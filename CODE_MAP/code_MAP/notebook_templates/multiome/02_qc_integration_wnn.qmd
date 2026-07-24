@@ -1,0 +1,181 @@
+---
+title: "Multiome QC, Integration, and WNN"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Run RNA and ATAC reductions, construct WNN neighbors, cluster, and save integrated multiome results.
+
+## Packages
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/multiome_created.qs"
+output_object <- "path/to/multiome_wnn.qs"
+results_dir <- "results/multiome_wnn"
+figures_dir <- "figures/multiome_wnn"
+rna_assay <- "RNA"
+atac_assay <- "peaks"
+sample_column <- "sample_column"
+group_column <- "group_column"
+n_pcs <- 30
+n_lsi_dims <- 30
+cluster_resolution <- 0.5
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+```
+
+## Validation
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(rna_assay, atac_assay) %in% Assays(object)))
+stopifnot(all(c(sample_column, group_column) %in% colnames(object[[]])))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+readr::write_tsv(tibble::tibble(cells = ncol(object), assays = paste(Assays(object), collapse = ",")), file.path(results_dir, "multiome_wnn_input_summary.tsv"))
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+DefaultAssay(object) <- rna_assay
+object <- NormalizeData(object)
+object <- FindVariableFeatures(object)
+object <- ScaleData(object)
+object <- RunPCA(object, npcs = n_pcs, reduction.name = "pca")
+DefaultAssay(object) <- atac_assay
+object <- RunTFIDF(object)
+object <- FindTopFeatures(object, min.cutoff = "q0")
+object <- RunSVD(object, reduction.name = "lsi")
+object <- FindMultiModalNeighbors(object, reduction.list = list("pca", "lsi"), dims.list = list(1:n_pcs, 2:n_lsi_dims))
+object <- RunUMAP(object, nn.name = "weighted.nn", reduction.name = "wnn.umap")
+object <- FindClusters(object, graph.name = "wsnn", resolution = cluster_resolution)
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+cluster_counts <- object[[]] |> tibble::as_tibble() |> count(seurat_clusters, .data[[sample_column]], name = "n_cells")
+readr::write_tsv(cluster_counts, file.path(results_dir, "wnn_cluster_counts.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "wnn_umap_clusters.pdf"), width = 6, height = 5)
+print(DimPlot(object, reduction = "wnn.umap", group.by = "seurat_clusters", label = TRUE))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$template <- list(step = "multiome_qc_integration_wnn", n_pcs = n_pcs, n_lsi_dims = n_lsi_dims)
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(object[[]] |> tibble::rownames_to_column("cell_id"), file.path(results_dir, "wnn_metadata.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-multiome-02-qc-integration-wnn-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, cells = ncol(object), clusters = length(levels(Idents(object))))
+```

@@ -1,0 +1,196 @@
+---
+title: "Reproducible Quarto Document"
+format: html
+engine: knitr
+references:
+  - id: canouil_jointly_2018
+    author:
+      - family: Canouil
+        given: Mickaël
+      - family: Balkau
+        given: Beverley
+      - family: Roussel
+        given: Ronan
+      - family: Froguel
+        given: Philippe
+      - family: Rocheleau
+        given: Ghislain
+    container-title: Frontiers in Genetics
+    doi: 10.3389/fgene.2018.00210
+    issued: 2018
+    title: "Jointly Modelling Single Nucleotide Polymorphisms With
+      Longitudinal and Time-to-Event Trait: An Application to Type 2
+      Diabetes and Fasting Plasma Glucose"
+    type: article-journal
+    journal-title: "Frontiers in Genetics*"
+---
+
+
+## Setup
+
+
+```{r include=FALSE}
+
+packages <- c(
+  "tidyverse",
+  "Seurat",
+  "SeuratWrappers",
+  "harmony",
+  "patchwork",
+  "data.table",
+  "qs2",
+  "future",
+  "Signac",
+  "GenomicRanges",
+  "GenomeInfoDb",
+  "EnsDb.Hsapiens.v86",
+  "AnnotationDbi"
+)
+
+library(Seurat)
+library(Signac)
+library(TFBSTools)
+library(JASPAR2024)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(dplyr)
+
+library(Seurat)
+library(scCustomize)
+library(ggplot2)
+
+purrr::walk(packages, library, character.only = TRUE)
+
+options(future.globals.maxSize = 25 * 1024^3)
+plan(multicore, workers = 5, maxSizeOfObjects = 25 * 1024^3)
+
+umap_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+
+    # Remove background grid
+    panel.grid = element_blank(),
+
+    # Keep axis titles
+    axis.title = element_text(size = 13),
+
+    # Remove axis numbers, ticks, and lines
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+
+    # Legend formatting
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+```
+
+```{r}
+
+ATAC_GSE274934 <- qs_read(file = "output/scATAC/objects/GSE274934_ATAC.qs2",nthreads = 10)
+
+DefaultAssay(ATAC_GSE274934) <- "ATAC"
+
+peak_ranges <- granges(ATAC_GSE274934)
+hg38_seqinfo <- seqinfo(BSgenome.Hsapiens.UCSC.hg38)
+
+# Retain the chromosomes present in the object
+hg38_seqinfo <- hg38_seqinfo[
+  intersect(seqlevels(peak_ranges), seqlevels(hg38_seqinfo))
+]
+
+# Reorder to match the assay
+hg38_seqinfo <- hg38_seqinfo[seqlevels(peak_ranges)]
+
+seqinfo(ATAC_GSE274934[["ATAC"]]) <- hg38_seqinfo
+
+seqinfo(ATAC_GSE274934[["ATAC"]])
+
+```
+
+```{r}
+
+library(TFBSTools)
+library(JASPAR2024)
+library(RSQLite)
+
+JASPAR2024_obj <- JASPAR2024()
+jaspar_db <- RSQLite::dbConnect(RSQLite::SQLite(), db(JASPAR2024_obj))
+
+pfm <- getMatrixSet(
+  jaspar_db,
+  opts = list(
+    collection = "CORE",
+    tax_group = "vertebrates",
+    species = 9606,
+    all_versions = FALSE
+  )
+)
+
+length(pfm)
+
+ATAC_GSE274934 <- AddMotifs(
+  object = ATAC_GSE274934,
+  genome = BSgenome.Hsapiens.UCSC.hg38,
+  pfm = pfm,
+  assay = "ATAC"
+)
+
+Motifs(ATAC_GSE274934[["ATAC"]])
+
+dim(
+  GetMotifData(
+    object = ATAC_GSE274934,
+    assay = "ATAC",
+    slot = "data"
+  )
+)
+
+Idents(ATAC_GSE274934) <-
+  ATAC_GSE274934$predicted.id
+
+levels(ATAC_GSE274934)
+
+da_peaks <- FindMarkers(
+  object = ATAC_GSE274934,
+  ident.1 = "AT2",
+  ident.2 = "AT1",
+  assay = "ATAC",
+  only.pos = TRUE,
+  #test.use = "LR",
+  min.pct = 0.05,
+  #latent.vars = "nCount_ATAC"
+)
+
+# get top differentially accessible peaks
+top.da.peak <- rownames(da_peaks[da_peaks$p_val_adj < 0.005 & da_peaks$pct.1 > 0.2, ])
+
+enriched_motifs <- FindMotifs(
+  object = ATAC_GSE274934,
+  features = top.da.peak,
+  assay = "ATAC"
+)
+
+MotifPlot(
+  object = ATAC_GSE274934,
+  motifs = head(rownames(enriched_motifs))
+)
+
+motifs_to_plot <- enriched_motifs %>%
+  dplyr::filter(str_detect(
+    motif.name,
+    regex("TEAD4|APOBEC", ignore_case = TRUE)
+  )) %>%
+  mutate(
+    motif.name = fct_reorder(motif.name, fold.enrichment)
+  )
+
+motifs_to_plot
+
+MotifPlot(
+  object = ATAC_GSE274934,
+  motifs = "TEAD4")
+
+```
+

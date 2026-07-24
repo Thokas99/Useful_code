@@ -1,0 +1,639 @@
+---
+title: "MAP 00 - Seurat QC and Integration"
+format: html
+---
+
+# Section 1. Overview
+
+This notebook builds the integrated CSS epithelial single-cell object used by the rest of the LUAD plasticity workflow.
+
+**MAP role:** mandatory foundation notebook. Keep QC, doublet removal, integration, clustering, annotation, LISI, and object export. Deprioritize ad hoc exploratory plots unless they support QC or reproducibility decisions.
+
+## Section 1.1. Reader Guide
+
+- Inputs are the four raw 10x `.h5` matrices under `input/ROC-25-0074` through `input/ROC-25-0077`.
+- The notebook performs sample-level QC, filtering, merging, normalization, Harmony integration, clustering, and annotation.
+- Main outputs are QC figures, QC tables, RNA layer exports, integration diagnostics, and the processed Seurat object.
+- Read this as the foundation step: every plasticity score, trajectory, velocity result, and module analysis downstream depends on this object.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Setup and parameters.
+2. Load four CSS samples.
+3. Per-sample QC and doublet filtering.
+4. Merge cleaned samples.
+5. Normalize, reduce dimensions, integrate, cluster, and annotate.
+6. Export RNA layers and processed objects.
+7. Evaluate integration quality with LISI and final diagnostic plots.
+
+```{r include=FALSE}
+# Keep the original project-relative paths working from inside code_MAP/
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+## Section 1.3. Setup
+
+This section loads the required packages and restores the Seurat object used as the starting point for downstream analyses.
+
+```{r include=FALSE}
+
+packages <- c(
+  "tidyverse",
+  "Seurat",
+  "SeuratWrappers",
+  "harmony",
+  "patchwork",
+  "data.table",
+  "SingleR",
+  "fst",
+  "UCell",
+  "CytoTRACE2",
+  "slingshot",
+  "tradeSeq",
+  "viridis",
+  "RColorBrewer",
+  "scran",
+  "qs2",
+  "ggsci",
+  "scCustomize", 
+  "future",
+  "ggpubr",
+  "GGally"
+)
+
+
+purrr::walk(packages, library, character.only = TRUE)
+
+plan(multicore, workers = 5)
+
+```
+
+# Section 2. Load and QC the Four CSS Samples
+
+The four CSS samples are loaded independently, merged into a single object, and annotated with standard QC metrics before filtering.
+
+```{r}
+
+
+
+# PARAMETERS
+
+set.seed(1234)
+params <- list(
+  mad_multiplier = 5,  # keep standard MAD (3 is correct baseline)
+  output_dir = "output",
+  plot_dir = "output/figures/qc_plots",
+  qc_dir = "output/tables/qc_metrics"
+)
+
+dir.create(params$output_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(params$plot_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(params$qc_dir, showWarnings = FALSE, recursive = TRUE)
+
+
+# LOAD SAMPLES
+
+
+load_samples <- function() {
+  cat("Loading samples...\n")
+
+  S1 <- CreateSeuratObject(
+    Read10X_h5("input/ROC-25-0074/input/filtered_feature_bc_matrix.h5"),
+    project = "S1_CSS", min.cells = 3, min.features = 200
+  )
+
+  S2 <- CreateSeuratObject(
+    Read10X_h5("input/ROC-25-0075/filtered_feature_bc_matrix.h5"),
+    project = "S2_CSS", min.cells = 3, min.features = 200
+  )
+
+  S3 <- CreateSeuratObject(
+    Read10X_h5("input/ROC-25-0076/filtered_feature_bc_matrix.h5"),
+    project = "S3_CSS", min.cells = 3, min.features = 200
+  )
+
+  S4 <- CreateSeuratObject(
+    Read10X_h5("input/ROC-25-0077/filtered_feature_bc_matrix.h5"),
+    project = "S4_CSS", min.cells = 3, min.features = 200
+  )
+
+  list(Css1 = S1, Css2 = S2, Css3 = S3, Css4 = S4)
+}
+
+
+# QC METRICS
+
+
+add_qc_metrics <- function(obj) {
+  obj$percent.mt <- PercentageFeatureSet(obj, pattern = "^MT-")
+  obj
+}
+
+
+# MAD THRESHOLDS (FIXED LOGIC)
+
+# KEY FIX:
+# - keep MAD
+# - avoid over-trimming upper tails of RNA distributions
+
+compute_mad_thresholds <- function(obj, k = 3) {
+
+  med_feat <- median(obj$nFeature_RNA)
+  mad_feat <- mad(obj$nFeature_RNA)
+
+  med_count <- median(obj$nCount_RNA)
+  mad_count <- mad(obj$nCount_RNA)
+
+  med_mt <- median(obj$percent.mt)
+  mad_mt <- mad(obj$percent.mt)
+
+  thr <- list(
+
+    # -------------------------
+    # FEATURES (symmetric OK)
+    # -------------------------
+    nFeature_low  = max(0, med_feat - k * mad_feat),
+    nFeature_high = med_feat + k * mad_feat,
+
+    # -------------------------
+    # COUNTS (ASYMMETRIC FIX)
+    # preserve high-expression epithelial states
+    # -------------------------
+    nCount_low  = max(0, med_count - k * mad_count),
+    nCount_high = med_count + (k * mad_count * 1.5),
+
+    # -------------------------
+    # MITO (UPPER ONLY, BIOLOGICAL FIXED STYLE)
+    # -------------------------
+    mt_high = med_mt + k * mad_mt,
+
+    # diagnostics
+    median_nFeature = med_feat,
+    mad_nFeature = mad_feat,
+    median_nCount = med_count,
+    mad_nCount = mad_count,
+    median_mt = med_mt,
+    mad_mt = mad_mt,
+    mad_multiplier = k
+  )
+
+  thr
+}
+
+
+# SAVE THRESHOLDS
+
+
+save_thresholds <- function(thr, sample_name, qc_dir) {
+
+  thr_df <- data.frame(
+    sample = sample_name,
+    mad_multiplier = thr$mad_multiplier,
+
+    nFeature_low = thr$nFeature_low,
+    nFeature_high = thr$nFeature_high,
+
+    nCount_low = thr$nCount_low,
+    nCount_high = thr$nCount_high,
+
+    mt_high = thr$mt_high
+  )
+
+  write.table(
+    thr_df,
+    file = file.path(qc_dir, paste0(sample_name, "_mad_thresholds.tsv")),
+    sep = "\t",
+    row.names = FALSE,
+    quote = FALSE
+  )
+
+  thr_df
+}
+
+
+# PLOTTING
+
+
+plot_qc <- function(obj, sample_name, stage, outdir) {
+
+  p_vln <- VlnPlot(
+    obj,
+    features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+    pt.size = 0.1,
+    ncol = 3
+  )
+
+  ggsave(
+    file.path(outdir, paste0(sample_name, "_", stage, "_vln.png")),
+    p_vln, width = 14, height = 5, dpi = 600
+  )
+
+  p_scatter <- FeatureScatter(obj, "nCount_RNA", "nFeature_RNA", pt.size = 0.6)
+
+  ggsave(
+    file.path(outdir, paste0(sample_name, "_", stage, "_scatter.png")),
+    p_scatter, width = 7, height = 6, dpi = 600
+  )
+
+  p_mt <- FeatureScatter(obj, "nCount_RNA", "percent.mt", pt.size = 0.6)
+
+  ggsave(
+    file.path(outdir, paste0(sample_name, "_", stage, "_mt.png")),
+    p_mt, width = 7, height = 6, dpi = 600
+  )
+}
+
+
+# PROCESS SAMPLE
+
+
+process_sample <- function(obj, sample_name, params) {
+
+  cat("\n============================\n")
+  cat("Processing:", sample_name, "\n")
+  cat("============================\n")
+
+  obj$sample <- sample_name
+  obj <- add_qc_metrics(obj)
+
+  cat("Cells before:", ncol(obj), "\n")
+
+  plot_qc(obj, sample_name, "preQC", params$plot_dir)
+
+  # -------------------------
+  # QC thresholds (MAD-based, corrected)
+  # -------------------------
+  thr <- compute_mad_thresholds(obj, k = params$mad_multiplier)
+  save_thresholds(thr, sample_name, params$qc_dir)
+
+  # -------------------------
+  # FILTERING
+  # -------------------------
+  obj_qc <- subset(
+    obj,
+    subset =
+      nFeature_RNA > thr$nFeature_low &
+      nFeature_RNA < thr$nFeature_high &
+      nCount_RNA > thr$nCount_low &
+      nCount_RNA < thr$nCount_high &
+      percent.mt < thr$mt_high
+  )
+
+  cat("Cells after QC:", ncol(obj_qc), "\n")
+
+  # -------------------------
+  # DOUBLETS
+  # -------------------------
+  sce <- as.SingleCellExperiment(obj_qc)
+  sce <- scDblFinder(sce)
+
+  obj_qc$scDblFinder.class <- colData(sce)$scDblFinder.class
+  obj_qc$scDblFinder.score <- colData(sce)$scDblFinder.score
+
+  obj_final <- subset(obj_qc, subset = scDblFinder.class == "singlet")
+
+  cat("Final cells:", ncol(obj_final), "\n")
+
+  plot_qc(obj_final, sample_name, "postQC", params$plot_dir)
+
+  summary <- data.frame(
+    sample = sample_name,
+    cells_before = ncol(obj),
+    cells_after_qc = ncol(obj_qc),
+    cells_final = ncol(obj_final),
+    pct_removed_qc = round(100 * (ncol(obj) - ncol(obj_qc)) / ncol(obj), 2),
+    pct_removed_doublets = round(100 * (ncol(obj_qc) - ncol(obj_final)) / ncol(obj_qc), 2)
+  )
+
+  write.table(
+    summary,
+    file = file.path(params$qc_dir, paste0(sample_name, "_summary.tsv")),
+    sep = "\t",
+    row.names = FALSE,
+    quote = FALSE
+  )
+
+  list(obj = obj_final, summary = summary)
+}
+
+
+```
+
+# Section 3. Run Pipeline Per Sample
+```{r}
+
+set.seed(1234)
+css.list <- load_samples()
+
+results <- lapply(names(css.list), function(sample_name) {
+  process_sample(css.list[[sample_name]], sample_name, params)
+})
+
+names(results) <- names(css.list)
+
+css.list_clean <- lapply(results, `[[`, "obj")
+names(css.list_clean) <- names(css.list)
+
+qc_summary <- do.call(rbind, lapply(results, `[[`, "summary"))
+
+write.table(
+  qc_summary,
+  file = file.path(params$qc_dir, "QC_summary_all_samples.tsv"),
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
+
+cat("\nPer-sample QC complete.\n")
+print(qc_summary)
+
+
+# MERGE CLEANED SAMPLES
+
+cat("\nMerging cleaned samples...\n")
+css_combined <- merge(
+  css.list_clean[[1]],
+  y = css.list_clean[2:4],
+  add.cell.ids = names(css.list_clean)
+)
+
+# Optional: save merged object before downstream analysis
+qs_save(css_combined, file = "output/objects/css_combined_postQC.qs2",nthreads = 10,compress_level = 9)
+
+```
+
+```{r}
+
+# to try, but I prefer harmony 
+css_combined <- IntegrateLayers(
+  object = css_combined,
+  method = RPCAIntegration,
+  normalization.method = "SCT",
+  verbose = T
+)
+
+```
+
+```{r}
+
+set.seed(1234)
+options(future.globals.maxSize = 25 * 1024^3)  # 6 GB
+
+css_combined <- SCTransform(css_combined)
+
+css_combined <- RunPCA(css_combined)
+
+ElbowPlot_scCustom(css_combined, ndims=50)
+ggsave("output/figures/ElbowPlot_scCustom.png", plot=ElbowPlot_scCustom(css_combined, ndims=50), width=12, height=8, dpi = 600)
+
+css_combined <- IntegrateLayers(
+  object = css_combined, 
+  method = HarmonyIntegration,
+  orig.reduction = "pca", 
+  normalization.method = "SCT",
+  new.reduction = "harmony",
+  verbose = TRUE
+)
+
+DimPlot_scCustom(seurat_object = css_combined, group.by = "orig.ident",reduction = "harmony")
+
+PC_Plotting(css_combined, dim_number=1)
+ggsave("output/figures/PC1_Plotting.png", plot=PC_Plotting(css_combined, dim_number=1), width=10, height=12, dpi = 600)
+PC_Plotting(css_combined, dim_number=2)
+ggsave("output/figures/PC2_Plotting.png", plot=PC_Plotting(css_combined, dim_number=2), width=10, height=12, dpi = 600)
+
+cat("Finding neighbors and clusters...\n")
+DefaultAssay(css_combined) <- "SCT"
+css_combined <- FindNeighbors(css_combined, dims = 1:41, reduction = "harmony")
+css_combined <- FindClusters(css_combined, resolution = 0.4,algorithm = 4, random.seed = 1234)
+
+cat("Running UMAP...\n")
+css_combined <- RunUMAP(css_combined, dims = 1:41,umap.method = "uwot",reduction = "harmony",seed.use = 1234)
+css_combined <- RunTSNE(css_combined, dims = 1:41,,reduction = "harmony",seed.use = 1234)
+
+DimPlot_scCustom(seurat_object = css_combined,label = T,label.size = 8,reduction = "tsne") + 
+  umap_theme
+DimPlot_scCustom(seurat_object = css_combined,label = T,label.size = 8) + 
+  umap_theme
+
+library(ggplot2)
+library(ggsci)
+
+n_clusters <- length(unique(css_combined$seurat_clusters))
+
+p <- DimPlot_scCustom(
+  seurat_object = css_combined,
+  group.by = "seurat_clusters",
+  colors_use = pal_frontiers()(n_clusters),
+  label = TRUE,
+  label.size = 7,
+  label.box = TRUE
+) +
+  umap_theme() +
+  NoLegend() +
+  labs(
+    title = "UMAP: Clusters identified using Leiden algorithm",x = "UMAP1", y = "UMAP2"
+  )
+
+p
+
+ggsave(
+  filename = "output/figures/umap_leiden_clusters.png",
+  plot = p,
+  width = 8,
+  height = 6,
+  dpi = 600
+)
+
+DimPlot_scCustom(seurat_object = css_combined, group.by = "orig.ident",reduction = "harmony")
+
+DimPlot_scCustom(seurat_object = css_combined, group.by = "orig.ident",label.size = 8)
+
+DimPlot_scCustom(seurat_object = css_combined, split.by = "orig.ident",label.size = 7)
+
+
+# FINAL PLOTS
+
+cat("Saving final plots...\n")
+
+p_umap_sample <- DimPlot(css_combined, group.by = "orig.ident", label = FALSE) +
+  ggtitle("UMAP by sample")
+
+ggsave(
+  filename = file.path(params$plot_dir, "UMAP_by_sample.png"),
+  plot = p_umap_sample,
+  width = 8,
+  height = 6,
+  dpi = 600
+)
+
+p_umap_clusters <- DimPlot(css_combined, label = TRUE) +
+  ggtitle("UMAP by clusters")
+
+ggsave(
+  filename = file.path(params$plot_dir, "UMAP_clusters.png"),
+  plot = p_umap_clusters,
+  width = 8,
+  height = 6,
+  dpi = 600
+)
+
+p_final_scatter <- FeatureScatter(
+  css_combined,
+  feature1 = "nCount_RNA",
+  feature2 = "nFeature_RNA",
+  pt.size = 0.5
+) +
+  ggtitle("Final nCount_RNA vs nFeature_RNA")
+
+ggsave(
+  filename = file.path(params$plot_dir, "final_scatter.png"),
+  plot = p_final_scatter,
+  width = 7,
+  height = 6,
+  dpi = 600
+)
+
+p_final_mt <- FeatureScatter(
+  css_combined,
+  feature1 = "nCount_RNA",
+  feature2 = "percent.mt",
+  pt.size = 0.5
+) +
+  ggtitle("Final nCount_RNA vs percent.mt")
+
+ggsave(
+  filename = file.path(params$plot_dir, "final_mt_scatter.png"),
+  plot = p_final_mt,
+  width = 7,
+  height = 6,
+  dpi = 600
+)
+
+
+cat("\nDone.\n")
+
+```
+
+# Section 4. Export RNA Layers for Downstream Tools
+
+```{r}
+
+DefaultAssay(css_combined) <- "RNA"
+css_combined <- NormalizeData(css_combined)
+css_combined <- FindVariableFeatures(css_combined)
+css_combined <- ScaleData(css_combined)
+css_combined <- JoinLayers(css_combined)
+
+DefaultAssay(css_combined) <- "SCT"
+
+css_combined <- Add_Mito_Ribo(object = css_combined, species = "human")
+
+qs_save(object = css_combined, file = "output/objects/css_combined_processed.qs2",compress_level = 10,nthreads = 10)
+
+```
+
+
+# Section 5. Batch Effect Evaluation with LISI
+
+Batch mixing after Harmony is quantified with LISI and summarized both globally and per sample.
+
+```{r}
+
+set.seed(1234)
+library(lisi)
+
+emb <- Embeddings(css_combined, "harmony")
+
+data <- data.frame(
+  harmony_1 = emb[,1],
+  harmony_2 = emb[,2]
+)
+
+meta <- data.frame(batch = css_combined$orig.ident)
+
+lisi <- compute_lisi(data, meta, "batch") |>
+  as.data.frame() |>
+  rownames_to_column("cell")
+
+fwrite(lisi, "output/tables/LISI_batch.csv")
+
+skimr::skim(lisi)
+
+summary(lisi)
+
+df <- data.frame(
+  H1 = data[,1],
+  H2 = data[,2],
+  LISI = lisi$batch,
+  batch = css_combined$orig.ident
+)
+
+p1 <- ggplot(df, aes(H1, H2, color = LISI)) +
+  geom_point(size = .4, alpha = .8) +
+  scale_color_viridis_c(limits = c(1, length(unique(df$batch)))) +
+  theme_bw(base_size = 12) +
+  labs(title = "Harmony PCA by Local inverse Simpson’s Index (LISI)", x = "harmony 1", y = "harmony 2") +
+  theme(legend.position = "bottom")
+
+p1 <- ggMarginal(p1, type="histogram")
+
+ggsave("output/figures/LISI_harmony.svg", plot=p1, width=12, height=8, device="svg", bg = "white")
+
+library(patchwork)
+
+med <- median(df$LISI, na.rm = TRUE)
+
+p1 <- ggplot(df, aes(x = LISI)) +
+  geom_histogram(bins = 50, fill = "grey85", color = "black") +
+  geom_vline(xintercept = med, linetype = "dashed", color = "red") +
+  annotate(
+    "text",
+    x = med,
+    y = Inf,
+    label = round(med, 2),
+    vjust = 1.5,
+    hjust = -0.5,
+    color = "red",
+    size = 6
+  ) +
+  theme_bw(base_size = 14) +
+  labs(x = "LISI", y = "Counts of cells")
+
+# violin per batch
+p2 <- ggplot(df, aes(batch, LISI)) +
+  geom_violin(trim = TRUE, fill = "white") +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  theme_bw(base_size = 14) +
+  labs(x = "Batch", y = "LISI")
+
+combined <- (p1 + p2) + 
+  plot_annotation(tag_levels = 'A') +
+  plot_annotation(title = "Local inverse Simpson’s Index (LISI) distribution & batch")
+
+ggsave(
+  "output/figures/LISI_harmony_distribution.svg",
+  plot = combined,
+  width = 12,
+  height = 8,
+  device = "svg",
+  bg = "white"
+)
+
+DimPlot_scCustom(seurat_object = css_combined, group.by = "orig.ident", reduction = "harmony") +
+  theme_bw(base_size = 12) +
+  scale_color_npg() +
+  theme(legend.position = "bottom") +
+  labs( title = "")
+
+ggsave(
+  "output/figures/harmony_orig_ident.svg",
+  width = 10,
+  height = 6,
+  device = "svg",
+  bg = "white"
+)
+
+```

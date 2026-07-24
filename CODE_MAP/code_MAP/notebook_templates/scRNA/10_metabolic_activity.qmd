@@ -1,0 +1,165 @@
+---
+title: "Metabolic Activity"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Import or compute metabolic activity scores in AnnData and save the updated `.h5ad`.
+
+## Packages
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+import os
+import pandas as pd
+import scanpy as sc
+```
+
+## User Config
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object = "path/to/previous_step.h5ad"
+activity_file = "path/to/metabolic_activity.tsv"
+output_object = "path/to/metabolic_activity.h5ad"
+results_dir = "results/metabolic_activity"
+figures_dir = "figures/metabolic_activity"
+sample_column = "sample_column"
+group_column = "group_column"
+cell_column = "cell_id"
+features_of_interest = ["pathway_1", "pathway_2"]
+seed = 1
+```
+
+## Input Loading
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+os.makedirs(results_dir, exist_ok=True)
+os.makedirs(figures_dir, exist_ok=True)
+adata = sc.read_h5ad(input_object)
+activity = pd.read_table(activity_file)
+```
+
+## Validation
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+if cell_column not in activity.columns:
+    raise ValueError(f"Missing activity cell column: {cell_column}")
+missing = {sample_column, group_column}.difference(adata.obs.columns)
+if missing:
+    raise ValueError(f"Missing obs columns: {sorted(missing)}")
+activity = activity.set_index(cell_column).reindex(adata.obs_names)
+```
+
+## Input Summary
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+pd.DataFrame({"n_cells": [adata.n_obs], "n_activity_features": [activity.shape[1]]}).to_csv(f"{results_dir}/metabolic_input_summary.tsv", sep="\t", index=False)
+```
+
+## Main Analysis
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+for column in activity.columns:
+    adata.obs[column] = activity[column].values
+adata.uns["metabolic_activity_features"] = list(activity.columns)
+```
+
+## QC Checks
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+activity.describe().T.to_csv(f"{results_dir}/metabolic_activity_summary.tsv", sep="\t")
+```
+
+## Visualization
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+for feature in [x for x in features_of_interest if x in adata.obs.columns]:
+    sc.pl.umap(adata, color=feature, save=f"_{feature}.png", show=False)
+```
+
+## Object Result Storage
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+adata.uns["template"] = {"step": "metabolic_activity", "activity_file": activity_file}
+```
+
+## Result Export
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+adata.obs[[sample_column, group_column] + list(activity.columns)].to_csv(f"{results_dir}/metabolic_activity_by_cell.tsv", sep="\t")
+```
+
+## Final Save
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+adata.write_h5ad(output_object)
+```
+
+## Output Summary
+
+```{python}
+#| label: tpl-scrna-10-metabolic-activity-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+print({"output_object": output_object, "activity_features": activity.shape[1]})
+```

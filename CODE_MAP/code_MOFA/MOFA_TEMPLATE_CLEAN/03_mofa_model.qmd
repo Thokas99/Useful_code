@@ -1,0 +1,1161 @@
+---
+title: "MOFA Template: Multi-Omics Model"
+format: html
+editor: source
+---
+
+# Overview
+
+This notebook builds the aligned MOFA input list, trains the model, and keeps the central downstream analysis in one place:
+
+1. factor-level summaries and score association
+2. sample heatmaps across factors
+3. top-feature heatmaps within each view
+4. group-wise median and mutation-frequency differences for the leading factor
+
+# Setup
+
+```{r}
+library(dplyr)
+library(readr)
+library(qs2)
+library(MOFA2)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(purrr)
+
+source("helpers/helpers_from_MOFA.R")
+
+project_id <- "PROJECT_ID"
+top_features_per_view <- 5000
+num_factors <- 10
+focus_score_column <- "C1_score"
+focus_group_column <- "C1_class"
+focus_group_high <- "high"
+focus_group_low <- "low"
+heatmap_factors <- 1:5
+top_features_for_heatmap <- 30
+
+FIG_DIR <- "output/figures"
+TABLE_DIR <- "output/tables"
+OBJECT_DIR <- "output/objects"
+dir.create(FIG_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(TABLE_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(OBJECT_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(FIG_DIR, "mofa_heatmaps"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(TABLE_DIR, "mofa_group_summaries"), recursive = TRUE, showWarnings = FALSE)
+
+metadata_scored <- readr::read_tsv(
+  file.path(TABLE_DIR, paste0(project_id, "_scored_metadata.tsv")),
+  show_col_types = FALSE
+)
+```
+
+# Helper Functions
+
+```{r}
+load_view_matrix <- function(path) {
+  tbl <- readr::read_tsv(path, show_col_types = FALSE)
+  feature_col <- colnames(tbl)[1]
+  sample_ids <- setdiff(colnames(tbl), feature_col)
+  mat <- as.matrix(tbl[, sample_ids, drop = FALSE])
+  rownames(mat) <- tbl[[feature_col]]
+  storage.mode(mat) <- "numeric"
+  mat
+}
+
+row_zscore <- function(mat) {
+  z <- t(scale(t(mat)))
+  z[is.na(z)] <- 0
+  z
+}
+
+factor_tbl_from_fit <- function(mofa_fit) {
+  MOFA2::get_factors(mofa_fit, factors = "all", as.data.frame = TRUE) |>
+    dplyr::rename(sample_id = sample, factor = factor, value = value)
+}
+
+weight_tbl_from_fit <- function(mofa_fit, view_name) {
+  MOFA2::get_weights(mofa_fit, views = view_name, factors = "all", as.data.frame = TRUE) |>
+    dplyr::rename(feature = feature, factor = factor, value = value)
+}
+
+plot_factor_heatmap <- function(factor_wide, annotation_cols) {
+  long_df <- factor_wide |>
+    tidyr::pivot_longer(
+      cols = dplyr::starts_with("Factor"),
+      names_to = "factor",
+      values_to = "value"
+    )
+
+  ggplot2::ggplot(long_df, ggplot2::aes(x = factor, y = sample_id, fill = value)) +
+    ggplot2::geom_tile() +
+    ggplot2::scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B") +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme(axis.text.y = ggplot2::element_blank()) +
+    ggplot2::labs(x = NULL, y = "Samples", fill = "Factor")
+}
+
+plot_view_weight_heatmap <- function(weight_tbl, view_name, factor_id, n_features = 30) {
+  factor_label <- paste0("Factor", factor_id)
+  top_tbl <- weight_tbl |>
+    dplyr::filter(factor == factor_label) |>
+    dplyr::slice_max(order_by = abs(value), n = n_features, with_ties = FALSE) |>
+    dplyr::mutate(feature = factor(feature, levels = rev(feature)))
+
+  ggplot2::ggplot(top_tbl, ggplot2::aes(x = factor, y = feature, fill = value)) +
+    ggplot2::geom_tile() +
+    ggplot2::scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B") +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::labs(
+      title = paste(view_name, factor_label, "top weights"),
+      x = NULL,
+      y = NULL,
+      fill = "Weight"
+    )
+}
+
+extract_weights_with_group_medians <- function(weight_tbl, view_mat, metadata_tbl, factor_id, group_col, high_label, low_label, n_features = 50) {
+  factor_label <- paste0("Factor", factor_id)
+  top_tbl <- weight_tbl |>
+    dplyr::filter(factor == factor_label) |>
+    dplyr::slice_max(order_by = abs(value), n = n_features, with_ties = FALSE) |>
+    dplyr::rename(weight = value)
+
+  high_samples <- metadata_tbl |>
+    dplyr::filter(.data[[group_col]] == high_label) |>
+    dplyr::pull(sample_id)
+  low_samples <- metadata_tbl |>
+    dplyr::filter(.data[[group_col]] == low_label) |>
+    dplyr::pull(sample_id)
+
+  common_high <- intersect(high_samples, colnames(view_mat))
+  common_low <- intersect(low_samples, colnames(view_mat))
+
+  tibble::tibble(feature = rownames(view_mat)) |>
+    dplyr::filter(feature %in% top_tbl$feature) |>
+    dplyr::mutate(
+      median_high = apply(view_mat[feature, common_high, drop = FALSE], 1, median, na.rm = TRUE),
+      median_low = apply(view_mat[feature, common_low, drop = FALSE], 1, median, na.rm = TRUE),
+      median_diff = median_high - median_low
+    ) |>
+    dplyr::left_join(top_tbl, by = "feature") |>
+    dplyr::arrange(dplyr::desc(abs(weight)))
+}
+
+extract_mutation_weights_with_group_frequency <- function(weight_tbl, mutation_mat, metadata_tbl, factor_id, group_col, high_label, low_label, n_features = 50) {
+  factor_label <- paste0("Factor", factor_id)
+  top_tbl <- weight_tbl |>
+    dplyr::filter(factor == factor_label) |>
+    dplyr::slice_max(order_by = abs(value), n = n_features, with_ties = FALSE) |>
+    dplyr::rename(weight = value)
+
+  high_samples <- metadata_tbl |>
+    dplyr::filter(.data[[group_col]] == high_label) |>
+    dplyr::pull(sample_id)
+  low_samples <- metadata_tbl |>
+    dplyr::filter(.data[[group_col]] == low_label) |>
+    dplyr::pull(sample_id)
+
+  common_high <- intersect(high_samples, colnames(mutation_mat))
+  common_low <- intersect(low_samples, colnames(mutation_mat))
+
+  tibble::tibble(feature = rownames(mutation_mat)) |>
+    dplyr::filter(feature %in% top_tbl$feature) |>
+    dplyr::mutate(
+      frequency_high = apply(mutation_mat[feature, common_high, drop = FALSE] > 0, 1, mean, na.rm = TRUE),
+      frequency_low = apply(mutation_mat[feature, common_low, drop = FALSE] > 0, 1, mean, na.rm = TRUE),
+      frequency_diff = frequency_high - frequency_low
+    ) |>
+    dplyr::left_join(top_tbl, by = "feature") |>
+    dplyr::arrange(dplyr::desc(abs(weight)))
+}
+```
+
+# Load Views
+
+```{r}
+views <- list(
+  RNA = compute_logcpm(load_view_matrix("input/tables/RNA_MATCHED.tsv")),
+  miRNA = compute_logcpm(load_view_matrix("input/tables/MIRNA_MATCHED.tsv")),
+  methylation = load_view_matrix("input/tables/METHYLATION_MATCHED.tsv"),
+  mutation = load_view_matrix("input/tables/MUTATION_MATCHED.tsv"),
+  RPPA = load_view_matrix("input/tables/RPPA_MATCHED.tsv")
+)
+```
+
+# Build MOFA Input
+
+```{r}
+view_mats <- lapply(views, function(mat) {
+  keep_most_variable_dt(mat, top_n = top_features_per_view)
+})
+
+common_samples <- Reduce(intersect, lapply(view_mats, colnames))
+stopifnot(length(common_samples) > 0)
+
+view_mats <- lapply(view_mats, function(mat) mat[, common_samples, drop = FALSE])
+metadata_scored <- metadata_scored |>
+  dplyr::filter(sample_id %in% common_samples)
+
+qs2::qs_save(view_mats, file.path(OBJECT_DIR, paste0(project_id, "_mofa_input.qs2")))
+
+mofa_obj <- MOFA2::create_mofa(view_mats)
+model_opts <- MOFA2::get_default_model_options(mofa_obj)
+train_opts <- MOFA2::get_default_training_options(mofa_obj)
+model_opts$num_factors <- num_factors
+
+mofa_obj <- MOFA2::prepare_mofa(
+  object = mofa_obj,
+  model_options = model_opts,
+  training_options = train_opts
+)
+```
+
+# Train and Export
+
+```{r}
+outfile <- file.path(OBJECT_DIR, paste0(project_id, "_mofa_model.hdf5"))
+mofa_fit <- MOFA2::run_mofa(mofa_obj, outfile = outfile)
+
+factor_tbl <- factor_tbl_from_fit(mofa_fit)
+readr::write_tsv(factor_tbl, file.path(TABLE_DIR, paste0(project_id, "_mofa_factors.tsv")))
+```
+
+# Factor Association Summary
+
+```{r}
+factor_wide <- factor_tbl |>
+  tidyr::pivot_wider(names_from = factor, values_from = value) |>
+  dplyr::left_join(metadata_scored, by = "sample_id")
+
+association_tbl <- purrr::map_dfr(
+  grep("^Factor", colnames(factor_wide), value = TRUE),
+  function(factor_name) {
+    stat <- suppressWarnings(
+      stats::cor.test(
+        factor_wide[[factor_name]],
+        factor_wide[[focus_score_column]],
+        method = "spearman"
+      )
+    )
+    tibble::tibble(
+      factor = factor_name,
+      spearman_rho = unname(stat$estimate),
+      p_value = stat$p.value
+    )
+  }
+) |>
+  dplyr::arrange(p_value)
+
+readr::write_tsv(
+  association_tbl,
+  file.path(TABLE_DIR, paste0(project_id, "_factor_score_associations.tsv"))
+)
+
+association_tbl
+```
+
+# Sample-Level Factor Heatmap
+
+```{r}
+heatmap_cols <- intersect(
+  c(paste0("Factor", heatmap_factors), focus_score_column, focus_group_column),
+  colnames(factor_wide)
+)
+
+factor_heatmap_input <- factor_wide |>
+  dplyr::select(sample_id, dplyr::all_of(heatmap_cols)) |>
+  dplyr::arrange(dplyr::desc(.data[[focus_score_column]]))
+
+plot_factor_heatmap(factor_heatmap_input, annotation_cols = c(focus_score_column, focus_group_column))
+```
+
+# Factor Distributions by Group
+
+```{r}
+factor_violin_tbl <- factor_wide |>
+  tidyr::pivot_longer(
+    cols = dplyr::starts_with("Factor"),
+    names_to = "factor",
+    values_to = "value"
+  )
+
+ggplot2::ggplot(
+  factor_violin_tbl,
+  ggplot2::aes(x = .data[[focus_group_column]], y = value, fill = .data[[focus_group_column]])
+) +
+  ggplot2::geom_violin(alpha = 0.5) +
+  ggplot2::geom_jitter(width = 0.15, alpha = 0.15, size = 0.25) +
+  ggplot2::facet_wrap(~ factor, scales = "free_y") +
+  ggplot2::theme_bw(11)
+```
+
+# View Weight Heatmaps
+
+```{r}
+lead_factors <- association_tbl |>
+  dplyr::slice_head(n = min(length(heatmap_factors), nrow(association_tbl))) |>
+  dplyr::pull(factor)
+
+weight_tbls <- purrr::map(names(view_mats), function(view_name) {
+  weight_tbl_from_fit(mofa_fit, view_name) |>
+    dplyr::mutate(view = view_name)
+})
+names(weight_tbls) <- names(view_mats)
+
+purrr::walk(names(weight_tbls), function(view_name) {
+  purrr::walk(lead_factors, function(factor_name) {
+    factor_id <- as.integer(gsub("Factor", "", factor_name))
+    p <- plot_view_weight_heatmap(
+      weight_tbl = weight_tbls[[view_name]],
+      view_name = view_name,
+      factor_id = factor_id,
+      n_features = top_features_for_heatmap
+    )
+    print(p)
+    ggplot2::ggsave(
+      filename = file.path(FIG_DIR, "mofa_heatmaps", paste0(view_name, "_", factor_name, "_weights_heatmap.png")),
+      plot = p,
+      width = 8,
+      height = 10,
+      dpi = 300
+    )
+  })
+})
+```
+
+# Group Median and Frequency Differences
+
+```{r}
+target_factor <- as.integer(gsub("Factor", "", lead_factors[[1]]))
+
+continuous_views <- c("RNA", "miRNA", "methylation", "RPPA")
+continuous_summaries <- purrr::map(continuous_views, function(view_name) {
+  extract_weights_with_group_medians(
+    weight_tbl = weight_tbls[[view_name]],
+    view_mat = view_mats[[view_name]],
+    metadata_tbl = metadata_scored,
+    factor_id = target_factor,
+    group_col = focus_group_column,
+    high_label = focus_group_high,
+    low_label = focus_group_low,
+    n_features = 50
+  ) |>
+    dplyr::mutate(view = view_name)
+})
+names(continuous_summaries) <- continuous_views
+
+purrr::iwalk(continuous_summaries, function(tbl, view_name) {
+  readr::write_tsv(
+    tbl,
+    file.path(
+      TABLE_DIR,
+      "mofa_group_summaries",
+      paste0(project_id, "_", view_name, "_Factor", target_factor, "_median_differences.tsv")
+    )
+  )
+})
+
+mutation_summary <- extract_mutation_weights_with_group_frequency(
+  weight_tbl = weight_tbls[["mutation"]],
+  mutation_mat = view_mats[["mutation"]],
+  metadata_tbl = metadata_scored,
+  factor_id = target_factor,
+  group_col = focus_group_column,
+  high_label = focus_group_high,
+  low_label = focus_group_low,
+  n_features = 50
+)
+
+readr::write_tsv(
+  mutation_summary,
+  file.path(
+    TABLE_DIR,
+    "mofa_group_summaries",
+    paste0(project_id, "_mutation_Factor", target_factor, "_frequency_differences.tsv")
+  )
+)
+```
+
+# Quick Checks
+
+```{r}
+variance_explained <- MOFA2::calculate_variance_explained(mofa_fit)
+print(variance_explained)
+
+continuous_summaries[[1]] |>
+  dplyr::slice_head(n = 10)
+
+mutation_summary |>
+  dplyr::slice_head(n = 10)
+```
+
+
+
+### Heatmap Helper
+
+Plot row-scaled top-weight features for selected views and factors, ordered by C1-core group.
+
+```{r}
+#| label: custom-complexheatmap
+#| echo: false
+#| warning: false
+#| message: false
+#| results: hide
+
+library(MOFA2)
+library(dplyr)
+library(tibble)
+library(ComplexHeatmap)
+library(circlize)
+library(viridis)
+library(grid)
+
+plot_mofa_view_heatmap <- function(
+  MOFAobject,
+  factor_id = 1,
+  view_id = "RNA",
+  group_id = "group1",
+  n_features = 100,
+  feature_selection = "balanced",
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average",
+  save_png = TRUE,
+  width = 14,
+  height = 10
+) {
+  row_zscore <- function(mat) {
+    mat <- as.matrix(mat)
+
+    row_median <- apply(mat, 1, median, na.rm = TRUE)
+    row_mad <- apply(mat, 1, mad, na.rm = TRUE)
+
+    row_mad[is.na(row_mad) | row_mad == 0] <- 1
+
+    mat_scaled <- sweep(mat, 1, row_median, "-")
+    mat_scaled <- sweep(mat_scaled, 1, row_mad, "/")
+    mat_scaled[is.na(mat_scaled)] <- 0
+
+    mat_scaled
+  }
+
+  pearson_row_hclust <- function(mat) {
+    cor_mat <- cor(
+      t(mat),
+      method = "pearson",
+      use = "pairwise.complete.obs"
+    )
+
+    cor_mat[is.na(cor_mat)] <- 0
+
+    hclust(
+      as.dist(1 - cor_mat),
+      method = clustering_method
+    )
+  }
+
+  pearson_column_hclust <- function(mat) {
+    cor_mat <- cor(
+      mat,
+      method = "pearson",
+      use = "pairwise.complete.obs"
+    )
+
+    cor_mat[is.na(cor_mat)] <- 0
+
+    hclust(
+      as.dist(1 - cor_mat),
+      method = clustering_method
+    )
+  }
+
+  data_list <- get_data(
+    MOFAobject,
+    views = view_id,
+    as.data.frame = FALSE
+  )
+
+  view_mat <- data_list[[view_id]][[group_id]]
+  mofa_samples <- samples_names(MOFAobject)[[group_id]]
+
+  if (all(mofa_samples %in% rownames(view_mat))) {
+    view_mat <- t(view_mat)
+  }
+
+  if (!all(mofa_samples %in% colnames(view_mat))) {
+    stop("MOFA samples are not in the columns of the selected view matrix.")
+  }
+
+  weights_df <- get_weights(
+    MOFAobject,
+    views = view_id,
+    factors = factor_id,
+    as.data.frame = TRUE
+  )
+
+  weights_view <- weights_df |>
+    dplyr::filter(view == view_id) |>
+    dplyr::mutate(abs_weight = abs(value))
+
+  if (!feature_selection %in% c("balanced", "absolute")) {
+    stop("feature_selection must be either 'balanced' or 'absolute'.")
+  }
+
+  if (feature_selection == "absolute") {
+    top_features <- weights_view |>
+      dplyr::arrange(dplyr::desc(abs_weight)) |>
+      dplyr::slice_head(n = n_features) |>
+      dplyr::pull(feature)
+  }
+
+  if (feature_selection == "balanced") {
+    n_negative <- floor(n_features / 2)
+    n_positive <- n_features - n_negative
+
+    top_negative_features <- weights_view |>
+      dplyr::filter(value < 0) |>
+      dplyr::arrange(value) |>
+      dplyr::slice_head(n = n_negative) |>
+      dplyr::pull(feature)
+
+    top_positive_features <- weights_view |>
+      dplyr::filter(value > 0) |>
+      dplyr::arrange(dplyr::desc(value)) |>
+      dplyr::slice_head(n = n_positive) |>
+      dplyr::pull(feature)
+
+    top_features <- c(
+      top_negative_features,
+      top_positive_features
+    )
+  }
+
+  top_features <- intersect(top_features, rownames(view_mat))
+
+  if (length(top_features) == 0) {
+    stop("No top features matched the rownames of the selected view matrix.")
+  }
+
+  metadata_mofa <- samples_metadata(MOFAobject) |>
+    tibble::as_tibble() |>
+    dplyr::mutate(
+      sample = as.character(sample),
+      C1_Core_group = factor(
+        C1_Core_group,
+        levels = c(
+          "Not-C1-like",
+          "Not-C1-intermediate",
+          "C1-intermediate",
+          "C1-like"
+        )
+      ),
+      purity_annotation = dplyr::coalesce(
+        as.numeric(purity_primary),
+        as.numeric(purity_cpe),
+        as.numeric(purity_absolute),
+        as.numeric(purity_estimate),
+        as.numeric(purity_ihc)
+      )
+    )
+
+  sample_order <- metadata_mofa |>
+    dplyr::filter(sample %in% colnames(view_mat)) |>
+    dplyr::arrange(C1_Core_group, C1_Core) |>
+    dplyr::pull(sample)
+
+  if (length(sample_order) == 0) {
+    stop("No MOFA samples matched the metadata sample column.")
+  }
+
+  heat_mat <- view_mat[top_features, sample_order, drop = FALSE]
+  heat_mat_scaled <- row_zscore(heat_mat)
+
+  annotation_df <- metadata_mofa |>
+    dplyr::filter(sample %in% sample_order) |>
+    dplyr::arrange(match(sample, sample_order)) |>
+    dplyr::select(
+      C1_Core_group,
+      C1_Core,
+      purity_annotation
+    ) |>
+    as.data.frame()
+
+  colnames(annotation_df) <- c(
+    "C1 group",
+    "C1 score",
+    "Purity"
+  )
+
+  rownames(annotation_df) <- sample_order
+
+  group_colors <- c(
+    "Not-C1-like" = "#4D4D4D",
+    "Not-C1-intermediate" = "#A6A6A6",
+    "C1-intermediate" = "#FDB863",
+    "C1-like" = "#D73027"
+  )
+
+  c1_score_col_fun <- circlize::colorRamp2(
+    c(
+      min(annotation_df[["C1 score"]], na.rm = TRUE),
+      0,
+      max(annotation_df[["C1 score"]], na.rm = TRUE)
+    ),
+    c("#2166AC", "white", "#B2182B")
+  )
+
+  purity_col_fun <- circlize::colorRamp2(
+    c(
+      min(annotation_df[["Purity"]], na.rm = TRUE),
+      median(annotation_df[["Purity"]], na.rm = TRUE),
+      max(annotation_df[["Purity"]], na.rm = TRUE)
+    ),
+    c("#542788", "white", "#238443")
+  )
+
+  ha_col <- ComplexHeatmap::HeatmapAnnotation(
+    df = annotation_df,
+    col = list(
+      "C1 group" = group_colors,
+      "C1 score" = c1_score_col_fun,
+      "Purity" = purity_col_fun
+    ),
+    annotation_name_gp = grid::gpar(fontsize = 9),
+    na_col = "grey85"
+  )
+
+  ht <- ComplexHeatmap::Heatmap(
+    heat_mat_scaled,
+    name = "row z-score",
+    col = circlize::colorRamp2(
+      c(-2, 0, 2),
+      viridis::viridis(3)
+    ),
+    use_raster = TRUE,
+    top_annotation = ha_col,
+
+    cluster_rows = if (cluster_rows) pearson_row_hclust else FALSE,
+    cluster_columns = if (cluster_columns) pearson_column_hclust else FALSE,
+
+    column_split = annotation_df[["C1 group"]],
+    cluster_column_slices = FALSE,
+
+    show_row_names = TRUE,
+    show_column_names = FALSE,
+
+    row_names_gp = grid::gpar(fontsize = 8),
+
+    column_title = paste0(
+      "MOFA Factor ", factor_id,
+      ": ", feature_selection, " top ", length(top_features), " ",
+      view_id, " features"
+    ),
+    column_title_gp = grid::gpar(fontsize = 12, fontface = "bold"),
+
+    heatmap_legend_param = list(
+      title = "Feature\nz-score"
+    )
+  )
+
+  ComplexHeatmap::draw(
+    ht,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right"
+  )
+
+  if (save_png) {
+    png(
+      filename = file.path(
+        FIG_DIR,
+        paste0(
+          "MOFA_complexheatmap_",
+          view_id,
+          "_factor",
+          factor_id,
+          "_",
+          feature_selection,
+          "_top",
+          length(top_features),
+          "_C1_purity.png"
+        )
+      ),
+      width = width,
+      height = height,
+      units = "in",
+      res = FIG_DPI
+    )
+
+    ComplexHeatmap::draw(
+      ht,
+      heatmap_legend_side = "right",
+      annotation_legend_side = "right"
+    )
+
+    dev.off()
+  }
+
+  invisible(ht)
+}
+
+```
+
+### miRNA Heatmaps
+
+```{r}
+#| label: plot-mirna-mofa-heatmaps
+#| echo: false
+#| warning: false
+#| message: false
+
+view_id <- "miRNA"
+
+plot_mofa_view_heatmap(
+  MOFAobject = MOFAobject,
+  factor_id = 1,
+  view_id = view_id,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average"
+)
+
+
+plot_mofa_view_heatmap(
+  MOFAobject = MOFAobject,
+  factor_id = 10,
+  view_id = view_id,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average"
+)
+
+
+```
+
+
+### RNA Heatmaps
+
+```{r}
+#| label: plot-rna-mofa-heatmaps
+#| echo: false
+#| warning: false
+#| message: false
+
+view_id <- "RNA"
+
+plot_mofa_view_heatmap(
+  MOFAobject = MOFAobject,
+  factor_id = 1,
+  n_features = 100,
+  view_id = view_id,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average"
+)
+
+plot_mofa_view_heatmap(
+  MOFAobject = MOFAobject,
+  factor_id = 10,
+  view_id = view_id,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average"
+)
+
+```
+
+
+### mutation Heatmaps
+
+```{r}
+#| label: plot-mutation-mofa-heatmaps
+#| echo: false
+#| warning: false
+#| message: false
+
+view_id <- "mutation"
+
+plot_mofa_view_heatmap(
+  MOFAobject = MOFAobject,
+  factor_id = 1,
+  view_id = view_id,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average"
+)
+
+plot_mofa_view_heatmap(
+  MOFAobject = MOFAobject,
+  factor_id = 10,
+  view_id = view_id,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average"
+)
+
+```
+
+
+### RPPA Heatmaps
+
+```{r}
+#| label: plot-RPPA-mofa-heatmaps
+#| echo: false
+#| warning: false
+#| message: false
+
+view_id <- "RPPA"
+
+plot_mofa_view_heatmap(
+  MOFAobject = MOFAobject,
+  factor_id = 1,
+  view_id = view_id,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average"
+)
+
+
+plot_mofa_view_heatmap(
+  MOFAobject = MOFAobject,
+  factor_id = 10,
+  view_id = view_id,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average"
+)
+
+
+```
+
+# Expansion Space
+
+The following section anchors are intentionally empty and can be expanded later without disturbing the core MOFA workflow.
+
+```{r}
+
+library(MOFA2)
+library(dplyr)
+library(tibble)
+library(readr)
+library(matrixStats)
+
+# Cleaning MOFA feature names
+clean_mofa_feature_name <- function(x) {
+  sub("_(RNA|RPPA|miRNA|mutation)$", "", x)
+}
+
+
+# Extracting MOFA weights and C1/Not-C1 medians for RNA, miRNA, and RPPA
+extract_mofa_weights_with_group_medians <- function(
+  MOFAobject,
+  mofa_data,
+  factor_id = 1,
+  view_id = "RNA",
+  feature_col = "feature",
+  c1_group_col = "C1_Core_group",
+  c1_label = "C1-like",
+  not_c1_label = "Not-C1-like"
+) {
+  view_mat <- mofa_data[[view_id]]
+
+  if (is.null(view_mat)) {
+    stop("The selected view_id is not present in mofa_data.")
+  }
+
+  view_mat <- as.matrix(view_mat)
+  storage.mode(view_mat) <- "numeric"
+
+  metadata_tbl <- MOFA2::samples_metadata(MOFAobject) |>
+    tibble::as_tibble() |>
+    dplyr::mutate(sample = as.character(sample))
+
+  if (!c1_group_col %in% colnames(metadata_tbl)) {
+    stop("The selected C1 group column is not present in sample metadata.")
+  }
+
+  c1_samples <- metadata_tbl |>
+    dplyr::filter(.data[[c1_group_col]] == c1_label) |>
+    dplyr::pull(sample) |>
+    intersect(colnames(view_mat))
+
+  not_c1_samples <- metadata_tbl |>
+    dplyr::filter(.data[[c1_group_col]] == not_c1_label) |>
+    dplyr::pull(sample) |>
+    intersect(colnames(view_mat))
+
+  if (length(c1_samples) == 0) {
+    stop("No C1-like samples matched the selected omics matrix.")
+  }
+
+  if (length(not_c1_samples) == 0) {
+    stop("No Not-C1-like samples matched the selected omics matrix.")
+  }
+
+  weights_tbl <- MOFA2::get_weights(
+    MOFAobject,
+    views = view_id,
+    factors = factor_id,
+    as.data.frame = TRUE
+  ) |>
+    dplyr::filter(view == view_id) |>
+    dplyr::transmute(
+      feature_original = feature,
+      feature = clean_mofa_feature_name(feature),
+      weight = value
+    )
+
+  median_tbl <- tibble::tibble(
+    feature = rownames(view_mat),
+    median_C1 = matrixStats::rowMedians(
+      view_mat[, c1_samples, drop = FALSE],
+      na.rm = TRUE
+    ),
+    median_NotC1 = matrixStats::rowMedians(
+      view_mat[, not_c1_samples, drop = FALSE],
+      na.rm = TRUE
+    )
+  ) |>
+    dplyr::mutate(
+      delta_median_C1_minus_NotC1 = median_C1 - median_NotC1
+    )
+
+  weights_tbl |>
+    dplyr::left_join(
+      median_tbl,
+      by = "feature"
+    ) |>
+    dplyr::mutate(
+      agreement = dplyr::case_when(
+        weight > 0 & delta_median_C1_minus_NotC1 > 0 ~ "Concordant",
+        weight < 0 & delta_median_C1_minus_NotC1 < 0 ~ "Concordant",
+        weight > 0 & delta_median_C1_minus_NotC1 < 0 ~ "Discordant",
+        weight < 0 & delta_median_C1_minus_NotC1 > 0 ~ "Discordant",
+        TRUE ~ "Neutral"
+      ),
+      association = dplyr::case_when(
+        weight > 0 ~ "C1",
+        weight < 0 ~ "NotC1",
+        TRUE ~ "Neutral"
+      ),
+      agreement = factor(
+        agreement,
+        levels = c("Concordant", "Discordant", "Neutral")
+      )
+    ) |>
+    dplyr::arrange(
+      agreement,
+      dplyr::desc(abs(weight))
+    ) |>
+    dplyr::select(
+      feature_original,
+      feature,
+      weight,
+      median_C1,
+      median_NotC1,
+      delta_median_C1_minus_NotC1,
+      association,
+      agreement
+    ) |>
+    dplyr::rename(
+      !!feature_col := feature
+    )
+}
+
+
+# Extracting MOFA mutation weights and C1/Not-C1 frequencies
+extract_mofa_mutation_weights_with_group_frequency <- function(
+  MOFAobject,
+  mofa_data,
+  factor_id = 1,
+  view_id = "mutation",
+  c1_group_col = "C1_Core_group",
+  c1_label = "C1-like",
+  not_c1_label = "Not-C1-like"
+) {
+  mutation_mat <- mofa_data[[view_id]]
+
+  if (is.null(mutation_mat)) {
+    stop("The selected mutation view is not present in mofa_data.")
+  }
+
+  mutation_mat <- as.matrix(mutation_mat)
+  storage.mode(mutation_mat) <- "numeric"
+
+  metadata_tbl <- MOFA2::samples_metadata(MOFAobject) |>
+    tibble::as_tibble() |>
+    dplyr::mutate(sample = as.character(sample))
+
+  if (!c1_group_col %in% colnames(metadata_tbl)) {
+    stop("The selected C1 group column is not present in sample metadata.")
+  }
+
+  c1_samples <- metadata_tbl |>
+    dplyr::filter(.data[[c1_group_col]] == c1_label) |>
+    dplyr::pull(sample) |>
+    intersect(colnames(mutation_mat))
+
+  not_c1_samples <- metadata_tbl |>
+    dplyr::filter(.data[[c1_group_col]] == not_c1_label) |>
+    dplyr::pull(sample) |>
+    intersect(colnames(mutation_mat))
+
+  if (length(c1_samples) == 0) {
+    stop("No C1-like samples matched the mutation matrix.")
+  }
+
+  if (length(not_c1_samples) == 0) {
+    stop("No Not-C1-like samples matched the mutation matrix.")
+  }
+
+  weights_tbl <- MOFA2::get_weights(
+    MOFAobject,
+    views = view_id,
+    factors = factor_id,
+    as.data.frame = TRUE
+  ) |>
+    dplyr::filter(view == view_id) |>
+    dplyr::transmute(
+      mutation_original = feature,
+      mutation = clean_mofa_feature_name(feature),
+      weight = value
+    )
+
+  frequency_tbl <- tibble::tibble(
+    mutation = rownames(mutation_mat),
+    frequency_C1 = matrixStats::rowMeans2(
+      mutation_mat[, c1_samples, drop = FALSE] > 0,
+      na.rm = TRUE
+    ),
+    frequency_NotC1 = matrixStats::rowMeans2(
+      mutation_mat[, not_c1_samples, drop = FALSE] > 0,
+      na.rm = TRUE
+    )
+  ) |>
+    dplyr::mutate(
+      delta_frequency_C1_minus_NotC1 = frequency_C1 - frequency_NotC1
+    )
+
+  weights_tbl |>
+    dplyr::left_join(
+      frequency_tbl,
+      by = "mutation"
+    ) |>
+    dplyr::mutate(
+      agreement = dplyr::case_when(
+        weight > 0 & delta_frequency_C1_minus_NotC1 > 0 ~ "Concordant",
+        weight < 0 & delta_frequency_C1_minus_NotC1 < 0 ~ "Concordant",
+        weight > 0 & delta_frequency_C1_minus_NotC1 < 0 ~ "Discordant",
+        weight < 0 & delta_frequency_C1_minus_NotC1 > 0 ~ "Discordant",
+        TRUE ~ "Neutral"
+      ),
+      association = dplyr::case_when(
+        weight > 0 ~ "C1",
+        weight < 0 ~ "NotC1",
+        TRUE ~ "Neutral"
+      ),
+      agreement = factor(
+        agreement,
+        levels = c("Concordant", "Discordant", "Neutral")
+      )
+    ) |>
+    dplyr::arrange(
+      agreement,
+      dplyr::desc(abs(weight))
+    ) |>
+    dplyr::select(
+      mutation_original,
+      mutation,
+      weight,
+      frequency_C1,
+      frequency_NotC1,
+      delta_frequency_C1_minus_NotC1,
+      association,
+      agreement
+    )
+}
+
+```
+
+```{r}
+
+TABLE_DIR <- "output/tables"
+dir.create(TABLE_DIR, recursive = TRUE, showWarnings = FALSE)
+
+
+# RNA
+rna_factor1_weights_medians <- extract_mofa_weights_with_group_medians(
+  MOFAobject = MOFAobject,
+  mofa_data = mofa_data,
+  factor_id = 1,
+  view_id = "RNA",
+  feature_col = "gene"
+)
+
+readr::write_tsv(
+  rna_factor1_weights_medians,
+  file.path(TABLE_DIR, "MOFA_factor1_RNA_weights_C1_NotC1_medians.tsv")
+)
+
+
+# miRNA
+mirna_factor1_weights_medians <- extract_mofa_weights_with_group_medians(
+  MOFAobject = MOFAobject,
+  mofa_data = mofa_data,
+  factor_id = 1,
+  view_id = "miRNA",
+  feature_col = "miRNA"
+)
+
+readr::write_tsv(
+  mirna_factor1_weights_medians,
+  file.path(TABLE_DIR, "MOFA_factor1_miRNA_weights_C1_NotC1_medians.tsv")
+)
+
+
+# RPPA
+protein_factor1_weights_medians <- extract_mofa_weights_with_group_medians(
+  MOFAobject = MOFAobject,
+  mofa_data = mofa_data,
+  factor_id = 1,
+  view_id = "RPPA",
+  feature_col = "protein"
+)
+
+readr::write_tsv(
+  protein_factor1_weights_medians,
+  file.path(TABLE_DIR, "MOFA_factor1_RPPA_weights_C1_NotC1_medians.tsv")
+)
+
+
+# Mutation
+mutation_factor1_weights_frequency <- extract_mofa_mutation_weights_with_group_frequency(
+  MOFAobject = MOFAobject,
+  mofa_data = mofa_data,
+  factor_id = 1,
+  view_id = "mutation"
+)
+
+readr::write_tsv(
+  mutation_factor1_weights_frequency,
+  file.path(TABLE_DIR, "MOFA_factor1_mutation_weights_C1_NotC1_frequency.tsv")
+)
+
+```
+
+```{r}
+
+rna_factor1_weights_medians |>
+  dplyr::filter(agreement == "Concordant") |>
+  dplyr::filter(weight > 0) |>
+  dplyr::slice_max(abs(weight), n = 50)
+
+```
+
+# Notes
+
+- Keep the factor heatmaps and group-difference exports in this notebook; they are central, not optional add-ons.
+- Change `focus_score_column`, `focus_group_column`, and the group labels at the top when the project is not a C1-style analysis.
+- Promote additional per-factor or per-view interpretation only after the core heatmap and difference summaries are stable.

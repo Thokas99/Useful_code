@@ -1,0 +1,1712 @@
+---
+title: "MAP 00 scRNA - QC, Azimuth, CopyKAT, and Harmony"
+format: html
+---
+
+# Overview
+
+## Aim
+
+This notebook runs the scRNA handoff workflow for the five CSS samples: per-sample QC, Azimuth lungref annotation, whole-cell CopyKAT, epithelial-masked CNV labels, sample merge, log-normalized Harmony integration, and final export.
+
+# Setup
+
+```{r include=FALSE}
+
+set.seed(1234)
+
+# ==============================================================================
+# Threads
+# ==============================================================================
+
+# Keep BLAS/OpenMP thread use predictable before loading heavy packages.
+Sys.setenv(
+  OMP_NUM_THREADS = "1",
+  OPENBLAS_NUM_THREADS = "1",
+  MKL_NUM_THREADS = "1",
+  VECLIB_MAXIMUM_THREADS = "1",
+  NUMEXPR_NUM_THREADS = "1"
+)
+
+if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {
+  RhpcBLASctl::blas_set_num_threads(1)
+  RhpcBLASctl::omp_set_num_threads(1)
+}
+
+# ==============================================================================
+# Packages
+# ==============================================================================
+
+packages <- c(
+  "tidyverse",
+  "Matrix",
+  "Seurat",
+  "SeuratWrappers",
+  "SingleCellExperiment",
+  "scDblFinder",
+  "harmony",
+  "patchwork",
+  "data.table",
+  "fst",
+  "viridis",
+  "RColorBrewer",
+  "scran",
+  "qs2",
+  "ggsci",
+  "scCustomize",
+  "future",
+  "ggpubr",
+  "ggExtra",
+  "skimr",
+  "lisi",
+  "Azimuth",
+  "SeuratData",
+  "copykat"
+)
+
+invisible(purrr::walk(packages, library, character.only = TRUE))
+
+# ==============================================================================
+# Future
+# ==============================================================================
+
+options(future.globals.maxSize = 25 * 1024^3)
+
+future::plan(
+  strategy = future::multicore,
+  workers = 5
+)
+
+# ==============================================================================
+# Plot theme
+# ==============================================================================
+
+umap_theme <- ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(size = 16, face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 11, color = "grey30"),
+    panel.grid = ggplot2::element_blank(),
+    axis.title = ggplot2::element_text(size = 13),
+    axis.text = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    legend.title = ggplot2::element_text(size = 11),
+    legend.text = ggplot2::element_text(size = 10)
+  )
+
+```
+
+# Inputs and Outputs
+
+## Paths and Parameters
+
+### scRNA Path Contract
+
+```{r}
+
+set.seed(1234)
+
+paths <- list(
+  input_dir = "input/GSE274934_RAW",
+  output_dir = "output/scRNA",
+  object_dir = "output/scRNA/objects",
+  figure_dir = "output/scRNA/figures",
+  table_dir = "output/scRNA/tables",
+  plot_dir = "output/scRNA/figures/qc_plots",
+  qc_dir = "output/scRNA/tables/qc_metrics",
+  copykat_dir = "output/scRNA/tables/copykat"
+)
+
+rna_qc_params <- list(
+  mad_multiplier = 4
+)
+
+copykat_params <- list(
+  cores = 9,
+  rerun = FALSE,
+  id_type = "S",
+  genome = "hg20",
+  ngene_chr = 5,
+  min_gene_per_cell = 200,
+  win_size = 25,
+  ks_cut = 0.1,
+  distance = "euclidean",
+  output_seg = "FALSE",
+  plot_genes = "FALSE"
+)
+
+dir.create(paths$output_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$object_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$figure_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$table_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$plot_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$qc_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$copykat_dir, showWarnings = FALSE, recursive = TRUE)
+
+samples <- c("AL05", "AL08", "AL10", "AL11", "AL12")
+
+gex_files <- c(
+  AL05 = "SRX25716946_GSM8462128_AL05_GEX_filtered_feature_bc_matrix.h5",
+  AL08 = "SRX25716948_GSM8462130_AL08_GEX_filtered_feature_bc_matrix.h5",
+  AL10 = "SRX25716949_GSM8462131_AL10_GEX_filtered_feature_bc_matrix.h5",
+  AL11 = "SRX25716950_GSM8462132_AL11_GEX_filtered_feature_bc_matrix.h5",
+  AL12 = "SRX25716952_GSM8462133_AL12_GEX_filtered_feature_bc_matrix.h5"
+)
+
+hlca_epithelial_finest <- c(
+  "AT1",
+  "AT2",
+  "AT2 proliferating",
+  "Transitional Club-AT2",
+  "Suprabasal",
+  "Basal resting",
+  "Multiciliated (non-nasal)",
+  "Multiciliated (nasal)",
+  "Deuterosomal",
+  "Goblet (nasal)",
+  "Goblet (bronchial)",
+  "Goblet (subsegmental)",
+  "Club (nasal)",
+  "Club (non-nasal)",
+  "Neuroendocrine",
+  "Ionocyte",
+  "Tuft",
+  "SMG serous (bronchial)",
+  "SMG serous (nasal)",
+  "SMG mucous",
+  "SMG duct"
+)
+
+```
+
+# Helper Functions
+
+## RNA QC Helpers
+
+These helpers load each GEX matrix, compute RNA QC metrics, apply MAD-based filtering, remove doublets, and write basic QC plots.
+
+```{r}
+
+set.seed(1234)
+
+```
+
+### `load_gex_sample`
+
+Loads one sample-level 10x Genomics HDF5 matrix and creates a Seurat object from the raw gene-expression counts. This is the notebook entry point for per-sample RNA data: it resolves the file path from the sample name, reads the matrix, applies the shared minimum cell/feature thresholds, and tags every cell with the sample identifier before downstream QC starts.
+
+```{r}
+
+load_gex_sample <- function(sample_name, paths) {
+  
+  cat("Loading:", sample_name, "\n")
+  
+  gex_path <- file.path(paths$input_dir, gex_files[[sample_name]])
+  gex_counts <- Read10X_h5(gex_path)
+  stopifnot(!is.null(rownames(gex_counts)), !is.null(colnames(gex_counts)))
+  
+  obj <- CreateSeuratObject(
+    counts = gex_counts,
+    assay = "RNA",
+    project = sample_name,
+    min.cells = 3,
+    min.features = 200
+  )
+  
+  obj$sample <- sample_name
+  
+  obj
+}
+
+```
+
+### `add_rna_qc_metrics`
+
+Adds the basic RNA QC fields used throughout the rest of the notebook. The helper computes mitochondrial percentage from `MT-` genes, ribosomal percentage from `RPS`/`RPL` genes, total detected features, and total counts, keeping these metrics in object metadata so filtering, plotting, and summaries all use the same values.
+
+```{r}
+
+add_rna_qc_metrics <- function(obj) {
+  
+  DefaultAssay(obj) <- "RNA"
+  
+  # Build QC columns explicitly so plotting and filtering are version-stable.
+  counts <- LayerData(obj, assay = "RNA", layer = "counts")
+  counts <- counts[, colnames(obj), drop = FALSE]
+  
+  obj$nCount_RNA <- as.numeric(Matrix::colSums(counts))
+  obj$nFeature_RNA <- as.numeric(Matrix::colSums(counts > 0))
+  obj$percent.mt <- PercentageFeatureSet(obj, pattern = "^MT-")
+  
+  required_qc_cols <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
+  if (!all(required_qc_cols %in% colnames(obj@meta.data))) {
+    stop("Missing RNA QC columns: ", paste(setdiff(required_qc_cols, colnames(obj@meta.data)), collapse = ", "))
+  }
+  
+  DefaultAssay(obj) <- "RNA"
+  obj
+}
+
+```
+
+### `compute_rna_qc_thresholds`
+
+Derives sample-specific QC thresholds from the observed distributions rather than hard-coding one global cutoff. It uses medians and MADs for features, counts, and mitochondrial percentage, then returns a compact threshold table that downstream filtering and audit output can reuse.
+
+```{r}
+
+compute_rna_qc_thresholds <- function(obj, rna_qc_params) {
+  
+  obj <- add_rna_qc_metrics(obj)
+  
+  k <- rna_qc_params$mad_multiplier
+  
+  med_feat <- median(obj$nFeature_RNA, na.rm = TRUE)
+  mad_feat <- mad(obj$nFeature_RNA, na.rm = TRUE)
+  
+  med_count <- median(obj$nCount_RNA, na.rm = TRUE)
+  mad_count <- mad(obj$nCount_RNA, na.rm = TRUE)
+  
+  med_mt <- median(obj$percent.mt, na.rm = TRUE)
+  mad_mt <- mad(obj$percent.mt, na.rm = TRUE)
+  
+  thr <- list(
+    nFeature_low  = max(0, med_feat - k * mad_feat),
+    nFeature_high = med_feat + k * mad_feat,
+    
+    nCount_low  = max(0, med_count - k * mad_count),
+    nCount_high = med_count + (k * mad_count * 1.5),
+    
+    mt_high = med_mt + k * mad_mt,
+    
+    median_nFeature = med_feat,
+    mad_nFeature = mad_feat,
+    median_nCount = med_count,
+    mad_nCount = mad_count,
+    median_mt = med_mt,
+    mad_mt = mad_mt,
+    mad_multiplier = k
+  )
+  
+  thr
+}
+
+```
+
+### `filter_rna_qc`
+
+Applies the thresholds produced by `compute_rna_qc_thresholds` to keep cells with acceptable library complexity, UMI depth, and mitochondrial fraction. It performs the actual cell-level QC subset and returns the filtered Seurat object used by doublet detection and annotation.
+
+```{r}
+
+filter_rna_qc <- function(obj, thresholds) {
+  
+  subset(
+    obj,
+    subset =
+      nFeature_RNA > thresholds$nFeature_low &
+      nFeature_RNA < thresholds$nFeature_high &
+      nCount_RNA > thresholds$nCount_low &
+      nCount_RNA < thresholds$nCount_high &
+      percent.mt < thresholds$mt_high
+  )
+}
+
+```
+
+### `save_thresholds`
+
+Writes the per-sample QC threshold table to disk. Keeping these values as TSV output makes the filtering choices inspectable without re-opening the Seurat object or rerunning the notebook.
+
+```{r}
+
+save_thresholds <- function(thr, sample_name, qc_dir) {
+  
+  thr_df <- data.frame(
+    sample = sample_name,
+    mad_multiplier = thr$mad_multiplier,
+    nFeature_low = thr$nFeature_low,
+    nFeature_high = thr$nFeature_high,
+    nCount_low = thr$nCount_low,
+    nCount_high = thr$nCount_high,
+    mt_high = thr$mt_high
+  )
+  
+  data.table::fwrite(
+    thr_df,
+    file.path(qc_dir, paste0(sample_name, "_mad_thresholds.csv"))
+  )
+  cat("Saved RNA MAD thresholds:", file.path(qc_dir, paste0(sample_name, "_mad_thresholds.csv")), "\n")
+  
+  thr_df
+}
+
+```
+
+### `plot_qc`
+
+Builds compact QC diagnostic plots for one sample and processing stage. The function reshapes selected metadata columns, draws violin plots for the main RNA QC metrics, saves the figure to the plot directory, and returns the saved file path invisibly.
+
+```{r}
+
+plot_qc <- function(obj, sample_name, stage, outdir) {
+  
+  DefaultAssay(obj) <- "RNA"
+  obj <- add_rna_qc_metrics(obj)
+  
+  required_qc_cols <- c("nFeature_RNA", "nCount_RNA", "percent.mt")
+  if (!all(required_qc_cols %in% colnames(obj@meta.data))) {
+    stop("Cannot plot RNA QC because these columns are missing: ", paste(setdiff(required_qc_cols, colnames(obj@meta.data)), collapse = ", "))
+  }
+  
+  qc_meta <- obj@meta.data |>
+    tibble::rownames_to_column("cell")
+  
+  # One facet per metric keeps each per-sample QC snapshot compact.
+  qc_long <- qc_meta |>
+    dplyr::select(cell, dplyr::all_of(required_qc_cols)) |>
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(required_qc_cols),
+      names_to = "metric",
+      values_to = "value"
+    ) |>
+    dplyr::mutate(
+      stage = .env$stage,
+      metric = factor(
+        metric,
+        levels = required_qc_cols,
+        labels = c("Detected genes", "UMI counts", "Mitochondrial %")
+      )
+    )
+  
+  p_vln_rna <- ggplot(qc_long, aes(x = stage, y = value)) +
+    geom_violin(fill = "grey85", color = "grey30", linewidth = 0.3, scale = "width", trim = TRUE) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, linewidth = 0.3, fill = "white") +
+    facet_wrap(vars(metric), scales = "free_y", nrow = 1) +
+    ggpubr::theme_pubclean(base_size = 11) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+    labs(title = paste(sample_name, stage, "RNA QC metrics"), x = NULL, y = NULL)
+  
+  ggsave(
+    file.path(outdir, paste0(sample_name, "_", stage, "_RNA_vln.png")),
+    p_vln_rna,
+    width = 14,
+    height = 5,
+    dpi = 600
+  )
+  cat("Saved RNA QC violin plot:", file.path(outdir, paste0(sample_name, "_", stage, "_RNA_vln.png")), "\n")
+  
+  p_scatter <- ggplot(qc_meta, aes(x = nCount_RNA, y = nFeature_RNA)) +
+    geom_point(size = 0.4, alpha = 0.45, color = "grey25") +
+    ggpubr::stat_cor(method = "spearman", label.x.npc = "left", label.y.npc = "top") +
+    ggpubr::theme_pubclean(base_size = 11) +
+    labs(
+      title = paste(sample_name, stage, "nCount_RNA vs nFeature_RNA"),
+      x = "nCount_RNA",
+      y = "nFeature_RNA"
+    )
+  
+  ggsave(
+    file.path(outdir, paste0(sample_name, "_", stage, "_RNA_scatter.png")),
+    p_scatter,
+    width = 7,
+    height = 6,
+    dpi = 600
+  )
+  cat("Saved RNA QC scatter plot:", file.path(outdir, paste0(sample_name, "_", stage, "_RNA_scatter.png")), "\n")
+  
+  p_mt <- ggplot(qc_meta, aes(x = nCount_RNA, y = percent.mt)) +
+    geom_point(size = 0.4, alpha = 0.45, color = "grey25") +
+    ggpubr::stat_cor(method = "spearman", label.x.npc = "left", label.y.npc = "top") +
+    ggpubr::theme_pubclean(base_size = 11) +
+    labs(
+      title = paste(sample_name, stage, "nCount_RNA vs percent.mt"),
+      x = "nCount_RNA",
+      y = "percent.mt"
+    )
+  
+  ggsave(
+    file.path(outdir, paste0(sample_name, "_", stage, "_RNA_mt.png")),
+    p_mt,
+    width = 7,
+    height = 6,
+    dpi = 600
+  )
+  cat("Saved RNA mitochondrial QC plot:", file.path(outdir, paste0(sample_name, "_", stage, "_RNA_mt.png")), "\n")
+  
+  DefaultAssay(obj) <- "RNA"
+}
+
+```
+
+## Azimuth and CopyKAT Helpers
+
+These helpers annotate QC-retained cells with Azimuth lungref, run whole-cell CopyKAT, and keep final `copykat_class` labels only for HLCA epithelial cells.
+
+```{r}
+
+set.seed(1234)
+
+```
+
+### `run_copykat_classification_core`
+
+Runs CopyKAT on the raw count matrix for one sample and converts the CopyKAT prediction table into this notebook's minimal class table. The helper is intentionally narrow: it calls `copykat::copykat()`, maps diploid cells to `normal`, aneuploid cells to `tumor`, leaves unclassified cells as `filtered`, and returns a one-column data frame keyed by cell barcode.
+
+```{r}
+
+run_copykat_classification_core <- function(counts, sample_name, sample_copykat_dir, copykat_params) {
+  
+  old_wd <- getwd()
+  on.exit(setwd(old_wd), add = TRUE)
+  setwd(sample_copykat_dir)
+  
+  res_copykat <- copykat::copykat(
+    rawmat = counts,
+    id.type = copykat_params$id_type,
+    ngene.chr = copykat_params$ngene_chr,
+    min.gene.per.cell = copykat_params$min_gene_per_cell,
+    win.size = copykat_params$win_size,
+    KS.cut = copykat_params$ks_cut,
+    sam.name = sample_name,
+    distance = copykat_params$distance,
+    output.seg = copykat_params$output_seg,
+    plot.genes = copykat_params$plot_genes,
+    genome = copykat_params$genome,
+    n.cores = copykat_params$cores
+  )
+  
+  pred_df <- res_copykat$prediction |>
+    as.data.frame()
+  rownames(pred_df) <- pred_df$cell.names
+  
+  class_df <- data.frame(
+    copykat_class = rep("filtered", length(colnames(counts))),
+    row.names = colnames(counts)
+  )
+  class_df[intersect(rownames(pred_df)[pred_df$copykat.pred == "diploid"], rownames(class_df)), "copykat_class"] <- "normal"
+  class_df[intersect(rownames(pred_df)[pred_df$copykat.pred == "aneuploid"], rownames(class_df)), "copykat_class"] <- "tumor"
+  class_df[intersect(rownames(pred_df)[pred_df$copykat.pred == "not.defined"], rownames(class_df)), "copykat_class"] <- "filtered"
+  
+  cat("CopyKAT found", sum(class_df$copykat_class == "tumor"), "tumor cells in", sample_name, "\n")
+  
+  class_df
+}
+
+```
+
+### `read_cached_copykat_classification`
+
+Reads a previously written CopyKAT classification table when reruns are disabled. It accepts only the simple current schema, `cell` plus `copykat_class`, and returns `NULL` if the file is missing, stale, incomplete, or explicitly bypassed by `copykat_params$rerun`.
+
+```{r}
+
+read_cached_copykat_classification <- function(annotation_file, cells, copykat_params) {
+  
+  if (!file.exists(annotation_file) || isTRUE(copykat_params$rerun)) {
+    return(NULL)
+  }
+  
+  copykat_df <- data.table::fread(annotation_file) |>
+    as.data.frame()
+  
+  if (!all(c("cell", "copykat_class") %in% colnames(copykat_df)) || !all(cells %in% copykat_df$cell)) {
+    return(NULL)
+  }
+  
+  rownames(copykat_df) <- copykat_df$cell
+  copykat_df[cells, , drop = FALSE]
+}
+
+```
+
+### `run_copykat_classification`
+
+Coordinates CopyKAT classification for a Seurat object. This wrapper creates the per-sample CopyKAT output directory, reuses a valid cached classification when available, otherwise pulls raw counts from the object, runs the core CopyKAT helper, writes the table to disk, and returns the cell-ordered classification data frame.
+
+```{r}
+
+run_copykat_classification <- function(obj, sample_name, paths, copykat_params) {
+  
+  cat("Running whole-cell CopyKAT classification:", sample_name, "\n")
+  
+  sample_copykat_dir <- file.path(paths$copykat_dir, sample_name)
+  dir.create(sample_copykat_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  annotation_file <- file.path(
+    sample_copykat_dir,
+    paste0(sample_name, "_copykat_cell_classification.csv")
+  )
+  cached <- read_cached_copykat_classification(annotation_file, colnames(obj), copykat_params)
+  
+  if (!is.null(cached)) {
+    cat("Using cached whole-cell CopyKAT table:", annotation_file, "\n")
+    return(cached)
+  }
+  
+  DefaultAssay(obj) <- "RNA"
+  
+  # CopyKAT uses raw counts from the full QC-retained sample.
+  counts <- LayerData(obj, assay = "RNA", layer = "counts")
+  counts <- counts[, colnames(obj), drop = FALSE]
+  
+  copykat_res <- run_copykat_classification_core(
+    counts = counts,
+    sample_name = sample_name,
+    sample_copykat_dir = sample_copykat_dir,
+    copykat_params = copykat_params
+  )
+  
+  copykat_df <- copykat_res |>
+    as.data.frame() |>
+    tibble::rownames_to_column("cell")
+  
+  data.table::fwrite(copykat_df, annotation_file)
+  
+  rownames(copykat_df) <- copykat_df$cell
+  copykat_df[colnames(obj), , drop = FALSE]
+}
+
+```
+
+### `azimuth_run`
+
+Annotates one QC-retained sample against the Azimuth lung reference. It normalizes the object, finds variable features, runs PCA, maps reference labels into metadata, and keeps the output ready for epithelial masking and later sample merging.
+
+```{r}
+
+azimuth_run <- function(obj, sample_name, reference = "lungref") {
+  
+  cat("\n============================\n")
+  cat("Azimuth lungref annotation:", sample_name, "\n")
+  cat("============================\n")
+  
+  DefaultAssay(obj) <- "RNA"
+  
+  obj <- NormalizeData(
+    obj,
+    normalization.method = "LogNormalize",
+    scale.factor = 10000,
+    verbose = TRUE
+  )
+  
+  obj <- FindVariableFeatures(
+    obj,
+    selection.method = "vst",
+    nfeatures = 5000,
+    verbose = TRUE
+  )
+  
+  obj <- ScaleData(
+    obj,
+    features = VariableFeatures(obj),
+    verbose = TRUE
+  )
+  
+  obj <- RunPCA(obj, npcs = 30, verbose = TRUE)
+  obj <- FindNeighbors(obj, dims = 1:30, reduction = "pca")
+  obj <- FindClusters(obj, resolution = 0.4, algorithm = 4, random.seed = 1234)
+  
+  # Azimuth lungref provides the epithelial labels used for final CopyKAT masking.
+  obj <- RunAzimuth(obj, reference = reference)
+  
+  meta_to_remove <- grep("\\.score$|^mapping\\.score$", colnames(obj@meta.data), value = TRUE)
+  obj@meta.data <- obj@meta.data[, !colnames(obj@meta.data) %in% meta_to_remove, drop = FALSE]
+  
+  if (!"predicted.ann_level_1" %in% colnames(obj@meta.data)) {
+    stop("Azimuth did not add predicted.ann_level_1 for ", sample_name, ".")
+  }
+  
+  cat("Azimuth level-1 counts for", sample_name, ":\n")
+  print(table(obj$predicted.ann_level_1, useNA = "ifany"))
+  
+  if ("predicted.ann_finest_level" %in% colnames(obj@meta.data)) {
+    cat("Azimuth finest-level counts for", sample_name, ":\n")
+    print(table(obj$predicted.ann_finest_level, useNA = "ifany"))
+  }
+  
+  obj
+}
+
+```
+
+### `add_copykat_metadata`
+
+Adds CopyKAT classifications back onto the Seurat object metadata. The helper requires full cell coverage, aligns the classification table to the object's current column order, and stores the result as `copykat_class`.
+
+```{r}
+
+add_copykat_metadata <- function(obj, copykat_df) {
+  
+  copykat_cells <- intersect(colnames(obj), rownames(copykat_df))
+  
+  if (length(copykat_cells) != ncol(obj)) {
+    stop("CopyKAT table does not cover every cell for this object.")
+  }
+  
+  obj$copykat_class <- copykat_df[colnames(obj), "copykat_class"]
+  
+  obj
+}
+
+```
+
+### `condense_copykat_labels`
+
+Applies the final epithelial mask to CopyKAT labels. Non-epithelial cells are set to `normal`, while epithelial cells keep their CopyKAT-derived class, so downstream malignant-candidate summaries are restricted to the intended HLCA epithelial compartment.
+
+```{r}
+
+condense_copykat_labels <- function(
+  obj,
+  sample_name,
+  epithelial_finest_labels = hlca_epithelial_finest
+) {
+  
+  cat("\n==============================\n")
+  cat("CopyKAT epithelial filtering:", sample_name, "\n")
+  cat("==============================\n")
+  
+  if (!"copykat_class" %in% colnames(obj@meta.data)) {
+    obj@meta.data[["copykat_class"]] <- as.character(obj@meta.data[["class"]])
+  }
+  
+  required_cols <- c("predicted.ann_finest_level", "copykat_class")
+  missing_cols <- setdiff(required_cols, colnames(obj@meta.data))
+  
+  if (length(missing_cols) > 0) {
+    stop("Missing metadata columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  original_class <- as.character(obj@meta.data[["copykat_class"]])
+  finest_label <- as.character(obj@meta.data[["predicted.ann_finest_level"]])
+  
+  is_epithelial <- finest_label %in% epithelial_finest_labels
+  is_epithelial[is.na(is_epithelial)] <- FALSE
+  
+  obj@meta.data[["copykat_class"]] <- dplyr::case_when(
+    !is_epithelial ~ "filtered",
+    original_class %in% c("normal", "tumor") ~ original_class,
+    TRUE ~ "filtered"
+  )
+  
+  obj@meta.data[["copykat_class"]] <- as.character(obj@meta.data[["copykat_class"]])
+  
+  cat("\nFinal CopyKAT labels:\n")
+  print(table(obj@meta.data[["copykat_class"]], useNA = "ifany"))
+  
+  cat("\nFinal labels by finest annotation:\n")
+  print(table(
+    copykat_class = obj@meta.data[["copykat_class"]],
+    finest = obj@meta.data[["predicted.ann_finest_level"]],
+    useNA = "ifany"
+  ))
+  
+  cat("\nDone:", sample_name, "\n")
+  
+  return(obj)
+}
+
+```
+
+## Per-Sample and Merge Helpers
+
+These helpers write per-sample summaries, add epithelial CNV counts, and merge finished per-sample objects.
+
+```{r}
+
+set.seed(1234)
+
+```
+
+### `run_doublet_filter`
+
+Runs `scDblFinder` on the QC-retained cells and removes predicted doublets. It converts the Seurat object to `SingleCellExperiment`, stores doublet scores/classes back in metadata, prints the class table for review, and returns only cells called `singlet`.
+
+```{r}
+
+run_doublet_filter <- function(obj) {
+  
+  DefaultAssay(obj) <- "RNA"
+  cat("Running scDblFinder doublet detection...\n")
+  
+  sce <- SingleCellExperiment(
+    assays = list(
+      counts = LayerData(obj, assay = "RNA", layer = "counts")
+    ),
+    colData = obj@meta.data
+  )
+  sce <- scDblFinder(sce)
+  
+  obj$scDblFinder.class <- colData(sce)$scDblFinder.class
+  obj$scDblFinder.score <- colData(sce)$scDblFinder.score
+  
+  cat("scDblFinder calls:\n")
+  print(table(obj$scDblFinder.class, useNA = "ifany"))
+  
+  subset(obj, subset = scDblFinder.class == "singlet")
+}
+
+```
+
+### `summarise_rna_filtering`
+
+Creates the per-sample RNA filtering summary after QC and doublet removal. It records raw, post-QC, and final cell counts plus basic final-object medians, giving a compact audit trail for how many cells were removed at each filtering step.
+
+```{r}
+
+summarise_rna_filtering <- function(obj_raw, obj_qc, obj_final, sample_name) {
+  data.frame(
+    sample = sample_name,
+    cells_before = ncol(obj_raw),
+    cells_after_qc = ncol(obj_qc),
+    cells_final = ncol(obj_final),
+    epithelial_cells = NA_integer_,
+    copykat_tumor_epithelial_cells = NA_integer_,
+    copykat_normal_epithelial_cells = NA_integer_,
+    copykat_filtered_epithelial_cells = NA_integer_,
+    copykat_tumor_epithelial_pct = NA_real_,
+    copykat_normal_epithelial_pct = NA_real_,
+    copykat_filtered_epithelial_pct = NA_real_,
+    copykat_filtered_cells = NA_integer_,
+    pct_removed_qc = round(100 * (ncol(obj_raw) - ncol(obj_qc)) / ncol(obj_raw), 2),
+    pct_removed_doublets = round(100 * (ncol(obj_qc) - ncol(obj_final)) / ncol(obj_qc), 2),
+    median_nFeature_RNA = median(obj_final$nFeature_RNA),
+    median_nCount_RNA = median(obj_final$nCount_RNA),
+    median_percent_mt = median(obj_final$percent.mt)
+  )
+}
+
+```
+
+### `add_copykat_summary`
+
+Extends the filtering summary with CopyKAT and epithelial-mask counts. It reports tumor/normal/filtered calls before and after epithelial masking, plus the number of HLCA epithelial cells used for that final masking step.
+
+```{r}
+
+add_copykat_summary <- function(
+  summary,
+  obj,
+  sample_name,
+  epithelial_finest_labels = hlca_epithelial_finest
+) {
+  
+  epithelial_cells <- colnames(obj)[
+    !is.na(obj$predicted.ann_finest_level) &
+      obj$predicted.ann_finest_level %in% epithelial_finest_labels
+  ]
+  
+  copykat_epi_counts <- table(factor(
+    obj$copykat_class[epithelial_cells],
+    levels = c("tumor", "normal", "filtered")
+  ))
+  
+  n_epi <- length(epithelial_cells)
+  
+  summary$sample <- sample_name
+  summary$cells_final <- ncol(obj)
+  summary$epithelial_cells <- n_epi
+  summary$copykat_tumor_epithelial_cells <- unname(copykat_epi_counts[["tumor"]])
+  summary$copykat_normal_epithelial_cells <- unname(copykat_epi_counts[["normal"]])
+  summary$copykat_filtered_epithelial_cells <- unname(copykat_epi_counts[["filtered"]])
+  summary$copykat_filtered_cells <- sum(obj$copykat_class == "filtered", na.rm = TRUE)
+  summary$copykat_tumor_epithelial_pct <- ifelse(
+    n_epi > 0,
+    round(100 * unname(copykat_epi_counts[["tumor"]]) / n_epi, 2),
+    NA_real_
+  )
+  summary$copykat_normal_epithelial_pct <- ifelse(
+    n_epi > 0,
+    round(100 * unname(copykat_epi_counts[["normal"]]) / n_epi, 2),
+    NA_real_
+  )
+  summary$copykat_filtered_epithelial_pct <- ifelse(
+    n_epi > 0,
+    round(100 * unname(copykat_epi_counts[["filtered"]]) / n_epi, 2),
+    NA_real_
+  )
+  summary$median_nFeature_RNA <- median(obj$nFeature_RNA)
+  summary$median_nCount_RNA <- median(obj$nCount_RNA)
+  summary$median_percent_mt <- median(obj$percent.mt)
+  
+  summary
+}
+
+```
+
+### `write_rna_summary`
+
+Writes one sample's RNA QC and CopyKAT summary table to the QC directory. This keeps a lightweight TSV alongside the heavier Seurat object so sample-level metrics can be reviewed quickly.
+
+```{r}
+
+write_rna_summary <- function(summary, sample_name, qc_dir) {
+  
+  data.table::fwrite(
+    summary,
+    file.path(qc_dir, paste0(sample_name, "_summary.csv"))
+  )
+  cat("Saved RNA summary:", file.path(qc_dir, paste0(sample_name, "_summary.csv")), "\n")
+  
+  invisible(summary)
+}
+
+```
+
+### `read_rna_summary`
+
+Reads a previously written per-sample summary TSV. It is used during merge/reporting steps so the notebook can rebuild combined summaries without reprocessing every sample object.
+
+```{r}
+
+read_rna_summary <- function(sample_name, qc_dir) {
+  
+  summary_file <- file.path(qc_dir, paste0(sample_name, "_summary.csv"))
+  
+  if (file.exists(summary_file)) {
+    return(data.table::fread(summary_file) |> as.data.frame())
+  }
+  
+  NULL
+}
+
+```
+
+### `qc_filtering`
+
+Runs the full pre-annotation RNA filtering workflow for one sample. It loads raw counts, computes and saves QC thresholds, applies RNA QC, removes doublets, writes pre/post QC plots and summaries, saves the filtered Seurat object, and frees memory before returning the output paths.
+
+```{r}
+
+qc_filtering <- function(sample_name, paths, rna_qc_params) {
+  
+  cat("\n============================\n")
+  cat("RNA QC filtering:", sample_name, "\n")
+  cat("============================\n")
+  
+  obj_raw <- load_gex_sample(sample_name, paths)
+  obj_raw <- add_rna_qc_metrics(obj_raw)
+  
+  cat("Cells before:", ncol(obj_raw), "\n")
+  
+  plot_qc(obj_raw, sample_name, "preQC", paths$plot_dir)
+  
+  thresholds <- compute_rna_qc_thresholds(obj_raw, rna_qc_params)
+  save_thresholds(thresholds, sample_name, paths$qc_dir)
+  
+  obj_qc <- filter_rna_qc(obj_raw, thresholds)
+  cat("Cells after RNA QC:", ncol(obj_qc), "\n")
+  
+  obj_final <- run_doublet_filter(obj_qc)
+  cat("Cells after doublet filtering:", ncol(obj_final), "\n")
+  
+  plot_qc(obj_final, sample_name, "postQC", paths$plot_dir)
+  
+  summary <- summarise_rna_filtering(obj_raw, obj_qc, obj_final, sample_name)
+  write_rna_summary(summary, sample_name, paths$qc_dir)
+  
+  obj_final <- RenameCells(obj_final, add.cell.id = sample_name)
+  obj_final@misc$rna_qc_thresholds <- thresholds
+  obj_final@misc$rna_qc_summary <- summary
+  
+  rm(obj_raw, obj_qc)
+  invisible(gc())
+  
+  obj_final
+}
+
+```
+
+### `copykat_run`
+
+Runs the post-QC annotation and CopyKAT workflow for one sample. It runs Azimuth, obtains or reuses CopyKAT calls, adds `copykat_class`, applies epithelial masking, writes the annotated object and summary, and returns the updated object.
+
+```{r}
+
+copykat_run <- function(obj, sample_name, paths, copykat_params) {
+  
+  cat("\n============================\n")
+  cat("Whole-cell CopyKAT annotation:", sample_name, "\n")
+  cat("============================\n")
+  
+  n_cells_before_copykat <- ncol(obj)
+  
+  copykat_df <- run_copykat_classification(
+    obj = obj,
+    sample_name = sample_name,
+    paths = paths,
+    copykat_params = copykat_params
+  )
+  
+  obj <- add_copykat_metadata(
+    obj,
+    copykat_df
+  )
+  
+  cat("Whole-cell CopyKAT counts for", sample_name, ":\n")
+  print(table(obj$copykat_class, useNA = "ifany"))
+  
+  stopifnot(ncol(obj) == n_cells_before_copykat)
+  
+  rm(copykat_df)
+  invisible(gc())
+  
+  obj
+}
+
+```
+
+### `merge_rna_qc_list`
+
+Merges the finished per-sample RNA objects into one Seurat object. The helper keeps sample identities intact, optionally joins assay layers after merge, and returns the combined object for downstream normalization and integration.
+
+```{r}
+
+merge_rna_qc_list <- function(rna_qc_list, join_layers = TRUE) {
+  
+  stopifnot(length(rna_qc_list) > 0)
+  
+  sample_ids <- names(rna_qc_list)
+  
+  if (is.null(sample_ids) || any(sample_ids == "")) {
+    stop("rna_qc_list must be a named list.")
+  }
+  
+  if (anyDuplicated(sample_ids)) {
+    stop("Sample names must be unique.")
+  }
+  
+  rna_qc_list <- Map(function(obj, sid) {
+    obj$sample <- sid
+    obj$orig.ident <- sid
+    obj
+  }, rna_qc_list, sample_ids)
+  
+  if (anyDuplicated(unlist(lapply(rna_qc_list, colnames), use.names = FALSE))) {
+    stop("Cell names must be unique before merging. Run qc_filtering() before merge.")
+  }
+  
+  merged_obj <- merge(
+    x = rna_qc_list[[1]],
+    y = rna_qc_list[-1],
+    project = "GSE274934"
+  )
+  
+  if (join_layers) {
+    merged_obj <- JoinLayers(merged_obj, assay = "RNA")
+  }
+  
+  merged_obj
+}
+
+```
+
+### `write_all_rna_summaries`
+
+Collects all per-sample RNA summaries into one combined TSV. It pulls the summary table from each processed sample object, binds them together, writes the aggregate file, and returns the combined data frame for notebook display.
+
+```{r}
+
+write_all_rna_summaries <- function(rna_qc_list, paths) {
+  
+  summary_df <- do.call(
+    rbind,
+    lapply(rna_qc_list, function(obj) obj@misc$rna_qc_summary)
+  )
+  
+  data.table::fwrite(
+    summary_df,
+    file.path(paths$qc_dir, "all_samples_summary.csv")
+  )
+  
+  summary_df
+}
+
+```
+
+# Per-Sample Processing and Merge
+
+## Run QC, Azimuth, CopyKAT, and Final Labels
+
+Each sample is processed explicitly so memory can be released between samples. To resume, start from a saved `*_RNA_QC.qs2` object and run the missing downstream helpers.
+
+### Explicit Per-Sample Processing
+
+```{r}
+
+set.seed(1234)
+
+cat("Run per-sample RNA QC, Azimuth, CopyKAT, and final label masking...\n")
+#options(timeout = 10000)
+#SeuratData::InstallData("lungref")
+
+# AL05
+AL05 <- qc_filtering("AL05", paths, rna_qc_params)
+qs2::qs_save(AL05, file = file.path(paths$object_dir, "AL05_RNA_QC.qs2"),nthreads = 10)
+cat("Saved RNA QC object:", file.path(paths$object_dir, "AL05_RNA_QC.qs2"), "\n")
+
+AL05 <- azimuth_run(AL05, "AL05")
+invisible(gc())
+AL05 <- copykat_run(AL05, "AL05", paths, copykat_params)
+AL05 <- condense_copykat_labels(AL05, "AL05")
+qs2::qs_save(AL05, file = file.path(paths$object_dir, "AL05_RNA_QC_azimuth_copykat.qs2"),nthreads = 10)
+cat("Saved annotated RNA object:", file.path(paths$object_dir, "AL05_RNA_QC_azimuth_copykat.qs2"), "\n")
+invisible(gc())
+
+# AL08
+AL08 <- qc_filtering("AL08", paths, rna_qc_params)
+qs2::qs_save(AL08, file = file.path(paths$object_dir, "AL08_RNA_QC.qs2"),nthreads = 10)
+cat("Saved RNA QC object:", file.path(paths$object_dir, "AL08_RNA_QC.qs2"), "\n")
+
+AL08 <- azimuth_run(AL08, "AL08")
+invisible(gc())
+AL08 <- copykat_run(AL08, "AL08", paths, copykat_params)
+AL08 <- condense_copykat_labels(AL08, "AL08")
+qs2::qs_save(AL08, file = file.path(paths$object_dir, "AL08_RNA_QC_azimuth_copykat.qs2"),nthreads = 10)
+cat("Saved annotated RNA object:", file.path(paths$object_dir, "AL08_RNA_QC_azimuth_copykat.qs2"), "\n")
+invisible(gc())
+
+# AL10
+AL10 <- qc_filtering("AL10", paths, rna_qc_params)
+qs2::qs_save(AL10, file = file.path(paths$object_dir, "AL10_RNA_QC.qs2"),nthreads = 10)
+cat("Saved RNA QC object:", file.path(paths$object_dir, "AL10_RNA_QC.qs2"), "\n")
+
+AL10 <- azimuth_run(AL10, "AL10")
+invisible(gc())
+AL10 <- copykat_run(AL10, "AL10", paths, copykat_params)
+AL10 <- condense_copykat_labels(AL10, "AL10")
+qs2::qs_save(AL10, file = file.path(paths$object_dir, "AL10_RNA_QC_azimuth_copykat.qs2"),nthreads = 10)
+cat("Saved annotated RNA object:", file.path(paths$object_dir, "AL10_RNA_QC_azimuth_copykat.qs2"), "\n")
+invisible(gc())
+
+# AL11
+AL11 <- qc_filtering("AL11", paths, rna_qc_params)
+qs2::qs_save(AL11, file = file.path(paths$object_dir, "AL11_RNA_QC.qs2"),nthreads = 10)
+cat("Saved RNA QC object:", file.path(paths$object_dir, "AL11_RNA_QC.qs2"), "\n")
+
+AL11 <- azimuth_run(AL11, "AL11")
+invisible(gc())
+AL11 <- copykat_run(AL11, "AL11", paths, copykat_params)
+AL11 <- condense_copykat_labels(AL11, "AL11")
+qs2::qs_save(AL11, file = file.path(paths$object_dir, "AL11_RNA_QC_azimuth_copykat.qs2"),nthreads = 10)
+cat("Saved annotated RNA object:", file.path(paths$object_dir, "AL11_RNA_QC_azimuth_copykat.qs2"), "\n")
+invisible(gc())
+
+# AL12
+AL12 <- qc_filtering("AL12", paths, rna_qc_params)
+qs2::qs_save(AL12, file = file.path(paths$object_dir, "AL12_RNA_QC.qs2"),nthreads = 10)
+cat("Saved RNA QC object:", file.path(paths$object_dir, "AL12_RNA_QC.qs2"), "\n")
+
+AL12 <- azimuth_run(AL12, "AL12")
+invisible(gc())
+AL12 <- copykat_run(AL12, "AL12", paths, copykat_params)
+AL12 <- condense_copykat_labels(AL12, "AL12")
+qs2::qs_save(AL12, file = file.path(paths$object_dir, "AL12_RNA_QC_azimuth_copykat.qs2"),nthreads = 10)
+cat("Saved annotated RNA object:", file.path(paths$object_dir, "AL12_RNA_QC_azimuth_copykat.qs2"), "\n")
+invisible(gc())
+
+```
+
+## Reload Samples and Merge Counts
+
+Saved per-sample objects carry Azimuth metadata and epithelial-masked `copykat_class`. Before integration, reductions and extra layers are stripped so the merge starts from raw RNA counts.
+
+### Counts-Only Merge Input
+
+```{r}
+
+set.seed(1234)
+
+rna_qc_list <- list(
+  AL05 = qs_read(file.path(paths$object_dir, "AL05_RNA_QC_azimuth_copykat.qs2"), nthreads = 10),
+  AL08 = qs_read(file.path(paths$object_dir, "AL08_RNA_QC_azimuth_copykat.qs2"), nthreads = 10),
+  AL10 = qs_read(file.path(paths$object_dir, "AL10_RNA_QC_azimuth_copykat.qs2"), nthreads = 10),
+  AL11 = qs_read(file.path(paths$object_dir, "AL11_RNA_QC_azimuth_copykat.qs2"), nthreads = 10),
+  AL12 = qs_read(file.path(paths$object_dir, "AL12_RNA_QC_azimuth_copykat.qs2"), nthreads = 10)
+)
+
+```
+
+### `keep_rna_counts_only`
+
+Reduces a Seurat object to the RNA counts needed for later processing and export. It keeps the object lighter by dropping unnecessary assay data while preserving metadata and the count layer that downstream steps still require.
+
+```{r}
+keep_rna_counts_only <- function(seu) {
+  DefaultAssay(seu) <- "RNA"
+
+  seu <- DietSeurat(
+    seu,
+    assays = "RNA",
+    layers = "counts",
+    dimreducs = NULL,
+    graphs = NULL,
+    misc = TRUE
+  )
+
+  DefaultAssay(seu) <- "RNA"
+  seu
+}
+
+rna_qc_list <- lapply(rna_qc_list, keep_rna_counts_only)
+
+rna_counts_summary <- purrr::imap_dfr(
+  rna_qc_list,
+  \(seu, sample_name) {
+    rna_assay <- seu[["RNA"]]
+
+    tibble::tibble(
+      sample = sample_name,
+      n_genes = nrow(rna_assay),
+      n_cells = ncol(seu),
+      assays = paste(SeuratObject::Assays(seu), collapse = ", "),
+      layers = paste(SeuratObject::Layers(rna_assay), collapse = ", ")
+    )
+  }
+)
+
+rna_counts_summary
+
+summary_df <- write_all_rna_summaries(
+  rna_qc_list,
+  paths
+)
+
+GSE274934 <- merge_rna_qc_list(
+  rna_qc_list,
+  join_layers = TRUE
+)
+
+qs_save(
+  GSE274934,
+  file = file.path(
+    paths$object_dir,
+    "GSE274934_merged_RNA_QC.qs2"
+  ),
+  nthreads = 10,
+  compress_level = 10
+)
+
+invisible(gc())
+
+GSE274934
+
+```
+
+# Harmony Integration and Embedding
+
+## Normalize, Find Variable Features, Scale, and PCA
+
+```{r}
+
+set.seed(1234)
+options(future.globals.maxSize = 25 * 1024^3)
+
+DefaultAssay(GSE274934) <- "RNA"
+
+GSE274934 <- NormalizeData(
+  GSE274934,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000,
+  verbose = TRUE
+)
+
+GSE274934 <- FindVariableFeatures(
+  GSE274934,
+  selection.method = "vst",
+  nfeatures = 3500,
+  verbose = TRUE
+)
+
+GSE274934 <- ScaleData(
+  GSE274934,
+  features = VariableFeatures(GSE274934),
+  verbose = TRUE
+)
+
+GSE274934 <- RunPCA(GSE274934)
+
+PC_Plotting(GSE274934, dim_number=1)
+ggsave(file.path(paths$figure_dir, "PC1_Plotting.png"), plot=PC_Plotting(GSE274934, dim_number=1), width=10, height=12, dpi = 600)
+PC_Plotting(GSE274934, dim_number=2)
+ggsave(file.path(paths$figure_dir, "PC2_Plotting.png"), plot=PC_Plotting(GSE274934, dim_number=2), width=10, height=12, dpi = 600)
+
+ElbowPlot_scCustom(GSE274934, ndims=50)
+ggsave(file.path(paths$figure_dir, "ElbowPlot_RNA.png"), plot=ElbowPlot_scCustom(GSE274934, ndims=50), width=12, height=8, dpi = 600)
+
+qs_save(GSE274934, file = file.path(paths$object_dir, "GSE274934_merged_RNA_QC.qs2"), nthreads = 10, compress_level = 10)
+
+```
+
+## Run Harmony
+
+```{r}
+
+set.seed(1234)
+
+GSE274934 <- RunHarmony(object = GSE274934,group.by.vars = "sample",max_iter = 15, plot_convergence = TRUE,)
+
+DimPlot_scCustom(seurat_object = GSE274934, group.by = "sample",reduction = "harmony")
+
+qs_save(GSE274934, file = file.path(paths$object_dir, "GSE274934_merged_RNA_QC.qs2"), nthreads = 10, compress_level = 10)
+
+```
+
+
+# Harmony QC
+
+## LISI Batch Mixing
+
+Batch mixing after Harmony is quantified with LISI globally and per sample.
+
+```{r}
+
+set.seed(1234)
+library(lisi)
+
+emb <- Embeddings(GSE274934, "harmony")
+
+data <- data.frame(
+  harmony_1 = emb[,1],
+  harmony_2 = emb[,2]
+)
+
+meta <- data.frame(batch = GSE274934$orig.ident)
+
+lisi <- compute_lisi(data, meta, "batch") |>
+  as.data.frame() |>
+  rownames_to_column("cell")
+
+fwrite(lisi, file.path(paths$table_dir, "LISI_batch.csv"))
+
+skimr::skim(lisi)
+
+summary(lisi)
+
+df <- data.frame(
+  H1 = data[,1],
+  H2 = data[,2],
+  LISI = lisi$batch,
+  batch = GSE274934$orig.ident
+)
+
+p1 <- ggplot(df, aes(H1, H2, color = LISI)) +
+  geom_point(size = .4, alpha = .8) +
+  scale_color_viridis_c(limits = c(1, length(unique(df$batch)))) +
+  theme_bw(base_size = 12) +
+  labs(title = "Harmony PCA by Local inverse Simpson’s Index (LISI)", x = "harmony 1", y = "harmony 2") +
+  theme(legend.position = "bottom")
+
+p1 <- ggMarginal(p1, type="histogram")
+
+p1
+
+ggsave(file.path(paths$figure_dir, "LISI_harmony.png"), plot=p1, width=12, height=8, bg = "white")
+
+library(patchwork)
+
+med <- median(df$LISI, na.rm = TRUE)
+
+p1 <- ggplot(df, aes(x = LISI)) +
+  geom_histogram(bins = 50, fill = "grey85", color = "black") +
+  geom_vline(xintercept = med, linetype = "dashed", color = "red") +
+  annotate(
+    "text",
+    x = med,
+    y = Inf,
+    label = round(med, 2),
+    vjust = 1.5,
+    hjust = -0.5,
+    color = "red",
+    size = 6
+  ) +
+  theme_bw(base_size = 14) +
+  labs(x = "LISI", y = "Counts of cells")
+
+# LISI by sample.
+p2 <- ggplot(df, aes(batch, LISI)) +
+  geom_violin(trim = TRUE, fill = "white") +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  theme_bw(base_size = 14) +
+  labs(x = "Batch", y = "LISI")
+
+combined <- (p1 + p2) + 
+  plot_annotation(tag_levels = 'A') +
+  plot_annotation(title = "Local inverse Simpson’s Index (LISI) distribution & batch")
+
+combined
+
+ggsave(
+  file.path(paths$figure_dir, "LISI_harmony_distribution.png"),
+  plot = combined,
+  width = 12,
+  height = 8,
+  bg = "white"
+)
+
+```
+
+
+# Clustering and UMAP
+
+## Define Silhouette Diagnostics
+
+```{r}
+
+set.seed(1234)
+
+library(Seurat)
+library(cluster)
+library(dplyr)
+library(purrr)
+
+```
+
+### `compute_silhouette_resolution`
+
+Scores clustering resolutions with silhouette width on the selected dimensional reduction. The helper samples cells when needed, calculates cluster separation for each candidate resolution, and returns a table that can be used to choose a stable clustering granularity.
+
+```{r}
+
+compute_silhouette_resolution <- function(
+  object,
+  cluster_col,
+  reduction = "harmony",
+  dims = 1:41,
+  n_per_cluster = 500,
+  seed = 1234
+) {
+  set.seed(seed)
+
+  clusters <- factor(object[[cluster_col, drop = TRUE]])
+  names(clusters) <- colnames(object)
+
+  n_clusters <- nlevels(clusters)
+
+  if (n_clusters < 2) {
+    return(tibble::tibble(
+      resolution = as.numeric(sub(".*res\\.", "", cluster_col)),
+      cluster_col = cluster_col,
+      n_clusters = n_clusters,
+      n_cells_used = NA_integer_,
+      mean_silhouette = NA_real_,
+      median_silhouette = NA_real_,
+      frac_negative = NA_real_
+    ))
+  }
+
+  cells_use <- split(names(clusters), clusters) |>
+    purrr::map(\(cells) sample(cells, min(length(cells), n_per_cluster))) |>
+    unlist(use.names = FALSE)
+
+  embedding <- Seurat::Embeddings(object, reduction)[
+    cells_use,
+    dims,
+    drop = FALSE
+  ]
+
+  sil_width <- cluster::silhouette(
+    as.integer(clusters[cells_use]),
+    stats::dist(embedding)
+  )[, "sil_width"]
+
+  tibble::tibble(
+    resolution = as.numeric(sub(".*res\\.", "", cluster_col)),
+    cluster_col = cluster_col,
+    n_clusters = n_clusters,
+    n_cells_used = length(cells_use),
+    mean_silhouette = mean(sil_width),
+    median_silhouette = median(sil_width),
+    frac_negative = mean(sil_width < 0)
+  )
+}
+
+```
+
+## Compare Candidate Cluster Resolutions
+
+```{r}
+
+cat("Finding neighbors...\n")
+
+GSE274934 <- FindNeighbors(
+  GSE274934,
+  reduction = "harmony",
+  dims = 1:41
+)
+
+resolutions <- seq(0.2, 1, by = 0.1)
+cluster_cols <- paste0("RNA_snn_res.", resolutions)
+
+for (i in seq_along(resolutions)) {
+  cat(
+    sprintf(
+      "Clustering resolution %.1f\n",
+      resolutions[i]
+    )
+  )
+
+  GSE274934 <- FindClusters(
+    GSE274934,
+    resolution = resolutions[i],
+    algorithm = 4,
+    random.seed = 1234,
+    cluster.name = cluster_cols[i]
+  )
+}
+
+cat("Computing silhouette scores...\n")
+
+silhouette_tbl <- purrr::map_dfr(
+  cluster_cols,
+  \(cluster_col) {
+    cat("  ", cluster_col, "\n", sep = "")
+
+    compute_silhouette_resolution(
+      object = GSE274934,
+      cluster_col = cluster_col,
+      reduction = "harmony",
+      dims = 1:41,
+      n_per_cluster = 1000
+    )
+  }
+)
+
+silhouette_tbl
+
+ggplot(
+  silhouette_tbl,
+  aes(
+    x = reorder(factor(resolution), median_silhouette),
+    y = median_silhouette
+  )
+) +
+  geom_col(width = 0.75, fill = "black") +
+  geom_text(
+    aes(label = n_clusters),
+    hjust = -0.2,
+    size = 5
+  ) +
+  coord_flip() +
+  theme_pubclean(base_size = 12) +
+  labs(
+    title = "Cluster compactness across resolutions",
+    subtitle = "Median silhouette width on the Harmony embedding",
+    x = "Resolution",
+    y = "Median silhouette width"
+  ) +
+  expand_limits(y = max(silhouette_tbl$median_silhouette, na.rm = TRUE) * 1.1)
+
+plan(sequential)
+GSE274934 <- FindClusters(GSE274934, resolution = 0.2,algorithm = 4, random.seed = 1234)
+
+res_cols <- grep(
+  "^RNA_snn_res\\.",
+  colnames(GSE274934@meta.data),
+  value = TRUE
+)
+
+GSE274934[[res_cols]] <- NULL
+
+qs_save(GSE274934, file = file.path(paths$object_dir, "GSE274934_merged_RNA_QC.qs2"), nthreads = 10, compress_level = 10)
+
+```
+
+## Run UMAP and Plot Key Labels
+
+```{r}
+
+set.seed(1234)
+
+cat("Running UMAP...\n")
+GSE274934 <- RunUMAP(GSE274934, dims = 1:41,umap.method = "uwot2",reduction = "harmony",seed.use = 1234)
+
+DimPlot_scCustom(seurat_object = GSE274934,label = TRUE,label.box = TRUE,label.size = 6, figure_plot = TRUE,repel = TRUE) + 
+  labs(x = "UMAP1", y = "UMAP2")
+
+DimPlot_scCustom(seurat_object = GSE274934, group.by = "sample", figure_plot = TRUE) + 
+  labs(x = "UMAP1", y = "UMAP2") 
+
+DimPlot_scCustom(seurat_object = GSE274934, group.by = "copykat_class") + 
+  umap_theme +
+  labs(title = "Epithelial-masked CopyKAT status", x = "UMAP1", y = "UMAP2") 
+
+DimPlot_scCustom(seurat_object = GSE274934, group.by = "predicted.ann_finest_level",label = TRUE,label.box = TRUE,label.size = 2) + 
+  umap_theme +
+  labs(x = "UMAP1", y = "UMAP2") +
+  NoLegend()
+
+qs_save(GSE274934, file = file.path(paths$object_dir, "GSE274934_merged_RNA_QC.qs2"), nthreads = 10, compress_level = 10)
+
+```
+
+## Save UMAP and Final QC Plots
+
+```{r}
+
+set.seed(1234)
+
+library(ggplot2)
+library(ggsci)
+
+n_clusters <- length(unique(GSE274934$seurat_clusters))
+
+p <- DimPlot_scCustom(
+  seurat_object = GSE274934,
+  group.by = "seurat_clusters",
+  label = TRUE,
+  label.size = 7,
+  label.box = TRUE
+) +
+  umap_theme +
+  NoLegend() +
+  labs(
+    title = "UMAP: Clusters identified using Leiden algorithm",x = "UMAP1", y = "UMAP2"
+  )
+
+p
+
+ggsave(
+  filename = file.path(paths$figure_dir, "umap_leiden_clusters.png"),
+  plot = p,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+
+final_qc_meta <- GSE274934@meta.data |>
+  tibble::rownames_to_column("cell")
+
+p_final_scatter <- ggplot(final_qc_meta, aes(x = nCount_RNA, y = nFeature_RNA, color = sample)) +
+  geom_point(size = 0.45, alpha = 0.55) +
+  ggpubr::stat_cor(
+    aes(group = 1),
+    method = "spearman",
+    label.x.npc = "left",
+    label.y.npc = "top",
+    inherit.aes = TRUE
+  ) +
+  ggpubr::theme_pubclean(base_size = 11) +
+  labs(
+    title = "Final nCount_RNA vs nFeature_RNA",
+    x = "nCount_RNA",
+    y = "nFeature_RNA",
+    color = "Sample"
+  )
+
+p_final_scatter
+
+ggsave(
+  filename = file.path(paths$plot_dir, "final_scatter.png"),
+  plot = p_final_scatter,
+  width = 7,
+  height = 6,
+  dpi = 600
+)
+
+p_final_mt <- ggplot(final_qc_meta, aes(x = nCount_RNA, y = percent.mt, color = sample)) +
+  geom_point(size = 0.45, alpha = 0.55) +
+  ggpubr::stat_cor(
+    aes(group = 1),
+    method = "spearman",
+    label.x.npc = "left",
+    label.y.npc = "top",
+    inherit.aes = TRUE
+  ) +
+  ggpubr::theme_pubclean(base_size = 11) +
+  labs(
+    title = "Final nCount_RNA vs percent.mt",
+    x = "nCount_RNA",
+    y = "percent.mt",
+    color = "Sample"
+  )
+
+p_final_mt
+
+ggsave(
+  filename = file.path(paths$plot_dir, "final_mt_scatter.png"),
+  plot = p_final_mt,
+  width = 7,
+  height = 6,
+  dpi = 600
+)
+
+
+cat("\nDone.\n")
+
+```
+
+# Validate Final Azimuth and Epithelial-Masked CopyKAT Labels
+
+```{r}
+
+set.seed(1234)
+
+table(GSE274934$predicted.ann_level_1)
+
+table(GSE274934$predicted.ann_finest_level)
+
+table(GSE274934$predicted.ann_level_1, GSE274934$predicted.ann_finest_level)
+
+table(GSE274934$sample, GSE274934$copykat_class, useNA = "ifany")
+
+table(GSE274934$predicted.ann_level_1, GSE274934$copykat_class, useNA = "ifany")
+
+table(GSE274934$copykat_class, GSE274934$predicted.ann_finest_level, useNA = "ifany")
+
+```
+
+## Plot Final Epithelial-Masked CopyKAT by HLCA Subtype
+
+```{r}
+
+library(tidyverse)
+library(scales)
+library(ggsci)
+
+p_copykat <- GSE274934@meta.data %>%
+  filter(predicted.ann_finest_level %in% hlca_epithelial_finest) %>%
+  dplyr::count(predicted.ann_finest_level, copykat_class) %>%
+  group_by(predicted.ann_finest_level) %>%
+  mutate(
+    frac = n / sum(n),
+    predicted.ann_finest_level = fct_reorder(
+      str_wrap(predicted.ann_finest_level, 30),
+      frac,
+      max
+    )
+  ) %>%
+  ungroup() %>%
+  ggplot(aes(predicted.ann_finest_level, frac, fill = copykat_class)) +
+  geom_col(position = "fill", width = 0.75, color = "white", linewidth = 0.2) +
+  coord_flip() +
+  scale_y_continuous(
+    labels = label_percent(),
+    breaks = seq(0, 1, 0.25)
+  ) +
+  scale_fill_npg() +
+  labs(
+    x = NULL,
+    y = "Proportion of epithelial cells",
+    fill = "CopyKAT class",
+    title = "CopyKAT classification across epithelial annotations",
+    subtitle = "Restricted to Azimuth-annotated epithelial cells."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text = element_text(color = "black"),
+    legend.position = "top",
+    plot.title = element_text(face = "bold"),
+  )
+
+ggsave(
+  file.path(paths$plot_dir, "copykat_epithelial_classification.png"),
+  p_copykat,
+  width = 7,
+  height = 6,
+  dpi = 600
+)
+
+```

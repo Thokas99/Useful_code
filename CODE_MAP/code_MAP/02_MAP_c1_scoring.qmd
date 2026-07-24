@@ -1,0 +1,828 @@
+---
+title: "MAP 02 - C1 Plasticity Scoring"
+format: html
+---
+
+# Section 1. Overview
+
+This notebook creates the central C1 plasticity score used throughout the CSS LUAD epithelial plasticity workflow.
+
+**MAP role:** mandatory C1 scoring notebook. Preserve the continuous `C1_score`, the UP/DOWN UCell components, CytoTRACE2 comparison, sample/cluster summaries, and cell-cycle checks.
+
+## Section 1.1. Reader Guide
+
+- Inputs are the processed Seurat object from step 01 and the curated signature table `input/Signatures/Core_genes_tidy.csv`.
+- The notebook scores UP and DOWN plasticity signatures with UCell, smooths them on the Harmony graph, and combines them into `C1_score`.
+- It cross-checks the score against CytoTRACE2, sample identity, clusters, annotation labels, and cell-cycle metadata.
+- Main outputs are score plots, signature presence tables, annotation comparisons, and updated Seurat metadata.
+- Read this as the step where the biological idea of plasticity becomes a numeric gradient.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Setup and load processed object.
+2. Score UP and DOWN C1 signatures.
+3. Build the continuous `C1_score`.
+4. Validate C1 against CytoTRACE2 and annotations.
+5. Generate essential UMAP, violin, and distribution plots.
+6. Export score summaries and updated object metadata.
+
+## Section 1.3. Setup
+
+This section loads the required packages and restores the Seurat object used as the starting point for downstream analyses.
+
+```{r include=FALSE}
+
+packages <- c(
+  "tidyverse",
+  "Seurat",
+  "SeuratWrappers",
+  "harmony",
+  "patchwork",
+  "data.table",
+  "fst",
+  "UCell",
+  "CytoTRACE2",
+  "slingshot",
+  "tradeSeq",
+  "viridis",
+  "RColorBrewer",
+  "scran",
+  "qs2",
+  "ggsci",
+  "scCustomize", 
+  "future",
+  "ggpubr",
+  "GGally"
+)
+
+
+purrr::walk(packages, library, character.only = TRUE)
+
+plan(multicore, workers = 5)
+
+umap_theme <- ggpubr::theme_classic2() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+
+    axis.title = element_text(size = 13),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+
+```
+
+# Section 2. Plasticity Scoring with UCell
+
+Plasticity-related signatures are scored with UCell, smoothed on the Harmony graph, and collapsed into a single `C1_score` used throughout the notebook.
+
+```{r UCell score}
+
+set.seed(1234)
+
+library(UCell)
+library(BiocParallel)
+
+BPPARAM <- MulticoreParam(workers = 5)
+register(BPPARAM)
+
+Core_genes_tidy <- read_csv("input/Signatures/Core_genes_tidy.csv")
+
+gene_list <- list(
+  DOWN_Signature = na.omit(Core_genes_tidy$Core_genes_DOWN),
+  UP_Signature   = na.omit(Core_genes_tidy$Core_genes_UP)
+)
+
+gene_list <- lapply(gene_list, function(g) intersect(g, rownames(css_combined)))
+
+css_combined <- AddModuleScore_UCell(css_combined, features = gene_list)
+
+css_combined <- SmoothKNN(
+  css_combined,
+  signature.names = paste0(names(gene_list), "_UCell"),
+  reduction = "harmony"
+)
+
+up   <- css_combined$UP_Signature_UCell_kNN
+down <- css_combined$DOWN_Signature_UCell_kNN
+
+score <- scale(up) - scale(down)
+
+css_combined$C1_score_raw <- as.numeric(score)
+css_combined$C1_score_scaled <- as.numeric(scale(score))
+
+scale01 <- function(x) {
+  r <- range(x, na.rm = TRUE)
+  if (r[1] == r[2]) return(rep(0, length(x)))
+  (x - r[1]) / (r[2] - r[1])
+}
+
+css_combined$C1_score <- scale01(css_combined$C1_score_scaled)
+
+md <- css_combined@meta.data
+
+keep_cols <- c(
+  colnames(md)[!grepl("_UCell$", colnames(md))],
+  "C1_score_raw",
+  "C1_score"
+)
+
+css_combined@meta.data <- md[, intersect(keep_cols, colnames(md)), drop = FALSE]
+
+bpstop(BPPARAM)
+
+```
+
+
+# Section 3. Core Genes in CSS
+
+Before interpreting the signature scores, the notebook checks how many curated core genes are actually present in the merged dataset.
+
+```{r}
+
+Core_genes_tidy <- read_csv("input/Signatures/Core_genes_tidy.csv")
+
+Core_genes_tidy$Core_genes_UP_DOWN %in% rownames(css_combined)
+
+table(Core_genes_tidy$Core_genes_UP_DOWN %in% rownames(css_combined))
+
+gene_presence <- data.frame(
+  Gene = Core_genes_tidy$Core_genes_UP_DOWN,
+  Present = Core_genes_tidy$Core_genes_UP_DOWN %in% rownames(css_combined)
+)
+
+counts <- table(Core_genes_tidy$Core_genes_UP_DOWN %in% rownames(css_combined))
+percent <- round(100 * counts / sum(counts), 1)
+
+summary_table <- tibble(
+  Present    = names(counts),
+  Count      = as.numeric(counts),
+  Percentage = percent
+)
+
+summary_table
+
+write.table(
+  summary_table,
+  file = "output/tables/Core_genes_in_samples.csv",
+  row.names = FALSE
+)
+
+
+```
+
+# Section 4. UCell Plots
+
+These plots summarize the spatial distribution of the UCell-derived signatures and compare the resulting `C1_score` across samples and Leiden clusters.
+
+```{r UCell plots}
+
+set.seed(1234)
+
+FeaturePlot_scCustom(css_combined, na_cutoff = NA,
+  features = c("UP_Signature_UCell_kNN","DOWN_Signature_UCell_kNN",
+               "C1_score","C1_score_raw"),
+  reduction = "umap") &
+  scale_color_viridis_c() & 
+  theme_bw(base_size = 12) &
+  umap_theme
+
+ggsave("output/figures/UCell_core_genes_UMAP.png", width=12, height=8)
+
+FeaturePlot_scCustom(css_combined, na_cutoff = NA,
+  features = "C1_score",
+  reduction = "umap") +
+  scale_color_viridis_c() +
+    labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "C1 score") +
+  umap_theme
+
+ggsave("output/figures/C1_score_UMAP.png", width=8, height=6,dpi = 600)
+
+c1_umap_p <- FeaturePlot_scCustom(
+  seurat_object = css_combined,
+  features = "C1_score",
+  reduction = "umap",
+  na_cutoff = NA,
+  order = TRUE
+) +
+  scale_color_viridis_c(
+    option = "magma",
+    name = "C1 score"
+  ) +
+  labs(
+    x = "UMAP 1",
+    y = "UMAP 2",
+    title = "C1 trajectory score"
+  ) +
+  umap_theme
+
+c1_umap_p
+
+ggsave("output/figures/C1_score_raw_UMAP.png", width=8, height=6,dpi = 600)
+
+FeaturePlot(css_combined,
+  features = c("UP_Signature_UCell_kNN","DOWN_Signature_UCell_kNN",
+               "C1_score","C1_score_raw"),
+  reduction = "harmony") &
+  scale_color_viridis_c() & 
+  umap_theme
+
+ggsave("output/figures/UCell_core_genes_PCA.png", width=12, height=8)
+
+umap_df <- FetchData(css_combined, vars = c("C1_score", "orig.ident", "SCT_snn_res.0.1"))
+
+p1 <- ggplot(umap_df, aes(x = orig.ident, y = C1_score, fill = orig.ident)) +
+  geom_violin(trim = TRUE, alpha = 0.7, fill = "white") +
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.5) +
+  ggpubr::stat_compare_means() +
+  umap_theme +
+  labs(
+    x = "Sample",
+    y = "C1 score",
+    title = "C1 score distribution across samples",
+    subtitle = "Violin and boxplot comparison by sample identity"
+  ) + 
+  scale_fill_brewer(palette = "Set2") +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "none"
+  )
+
+p1
+
+ggsave("output/figures/C1_score_violin.png", p1, width = 10, height = 6)
+
+p2 <- ggplot(umap_df, aes(x = SCT_snn_res.0.1, y = C1_score, fill = SCT_snn_res.0.1)) +
+  geom_violin(trim = TRUE, alpha = 0.7, fill = "white") +
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.5) +
+  ggpubr::stat_compare_means() +
+  umap_theme +
+  labs(
+    x = "Leiden cluster",
+    y = "C1 score",
+    title = "C1 score across Leiden clusters",
+    subtitle = "Distribution of C1 program activity by transcriptional state"
+  ) + 
+  scale_fill_brewer(palette = "Set2") +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "none"
+  )
+
+p2
+
+ggsave("output/figures/leiden_paga_violin.png", p2, width = 10, height = 6)
+
+```
+
+# Section 5. Discrete Plasticity Strata from C1 Score
+
+The continuous `C1_score` is converted into low, medium, and high plasticity strata using the 25th and 75th percentiles.
+
+```{r plasticity strata}
+
+set.seed(1234)
+library(fitdistrplus)
+library(diptest)
+
+x <- css_combined$C1_score
+
+svg("output/figures/C1_score_descdist.svg", width = 12, height = 8)
+descdist(x, discrete = FALSE, boot = 1000)
+dev.off()
+
+plotdist(x, histo = TRUE, demp = TRUE)
+
+svg("output/figures/C1_score_norm_fit.svg", width = 12, height = 8)
+fw <- fitdist(x, "norm", discrete = FALSE)
+plot(fw)
+dev.off()
+
+summary(fw)
+
+dip.test(x)
+
+q <- quantile(x, c(.25, .75), type = 8)
+q_low  <- q[1]
+q_high <- q[2]
+
+css_combined$plasticity <- cut(
+  x,
+  breaks = c(-Inf, q_low, q_high, Inf),
+  labels = c("low", "medium", "high"),
+  ordered_result = TRUE
+)
+
+df <- data.frame(C1_score = x)
+
+p <- ggplot(df, aes(x = C1_score)) +
+  geom_density(linewidth = 1.2, fill = "steelblue", alpha = 0.3) +
+  geom_vline(xintercept = q_low, linetype = "dashed", linewidth = 1, color = "red") +
+  geom_vline(xintercept = q_high, linetype = "dashed", linewidth = 1, color = "red") +
+  annotate("text", x = q_low, y = 0.3 * max(density(x)$y), label = "Q25", color = "red", hjust = 1.1) +
+  annotate("text", x = q_high, y = 0.3 * max(density(x)$y), label = "Q75", color = "red", hjust = -0.1) +
+  labs(
+    title = "Distribution of C1 score (kNN-smoothed)",
+    subtitle = "Dashed red lines indicate Q25 and Q75 thresholds",
+    x = "C1 score",
+    y = "Density"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text( size = 12)
+  )
+
+p
+
+ggsave("output/figures/C1_score_distribution.png", plot = p, width = 12, height = 8)
+
+```
+
+
+# Section 6. CytoTRACE2 Potency Scoring
+
+CytoTRACE2 is run on raw RNA counts to provide an orthogonal estimate of differentiation potency that can be compared against the UCell-derived plasticity score.
+
+```{r}
+
+set.seed(1234)
+library(BiocParallel)
+library(CytoTRACE2)
+
+cts <- GetAssayData(css_combined, assay="RNA", layer="counts")
+
+ct <- cytotrace2(cts, is_seurat=FALSE, species="human", seed=1234,ncores = 5)
+
+css_combined$CytoTRACE2 <- ct$CytoTRACE2_Score
+css_combined$CytoTRACE2_Potency <- factor(ct$CytoTRACE2_Potency)
+
+#qs_save(object = css_combined,file = "output/objects/css_harmony.qs2",compress_level = 5, nthreads = 10)
+
+```
+
+# Section 7. Plot CytoTRACE
+
+These figures assess agreement between CytoTRACE2 and `C1_score`, while also checking that CytoTRACE2 potency is not merely tracking sample identity.
+
+```{r}
+
+set.seed(1234)
+
+ari <- mclust::adjustedRandIndex(css_combined$CytoTRACE2_Potency, css_combined$orig.ident)
+print(paste("Adjusted Rand Index vs batch:", round(ari, 3)))
+
+p1 <- FeaturePlot_scCustom(
+  css_combined,
+  features = c("CytoTRACE2", "C1_score"),
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c() &
+  theme_bw(base_size = 12)
+
+p1
+
+ggsave("output/figures/UCell_and_CytoTRACE2.png", plot = p1, width = 10, height = 6)
+
+Idents(css_combined) <- "CytoTRACE2_Potency"
+p2_feat <- FeaturePlot_scCustom(
+  css_combined,
+  features = "C1_score",
+  reduction = "umap",
+  na_cutoff = NA
+) +
+  scale_color_viridis_c(option = "magma") +
+  ggtitle("C1 Score") +
+  labs(subtitle = "UMAP projection of C1 score (continuous program activity)") +
+  umap_theme
+
+p2_cluster <- DimPlot_scCustom(
+  css_combined,
+  reduction = "umap",
+  group.by = "CytoTRACE2_Potency",
+  label = TRUE,
+  label.size = 5,label.box = T
+) +
+  ggtitle("CytoTRACE2 Potency") +
+  labs(subtitle = "Transcriptional potency inferred by CytoTRACE2")  +
+  umap_theme
+
+p2 <- (p2_feat + p2_cluster)
+
+ggsave(
+  "output/figures/UCell_and_CytoTRACE2_clusters.png",
+  plot = p2,
+  width = 12,
+  height = 12
+)
+
+
+VlnPlot_scCustom(
+  css_combined,
+  features = "C1_score",
+  group.by = "CytoTRACE2_Potency"
+) + theme_bw() +
+  theme(legend.position = "none") +
+  ggpubr::stat_compare_means()
+
+
+```
+
+# Section 8. Correlation with C1 Score
+
+The direct association between the UCell-derived plasticity score and CytoTRACE2 is evaluated with a Spearman correlation and pairwise density/scatter panels.
+
+```{r}
+
+cor.test(x = css_combined@meta.data$C1_score, css_combined@meta.data$CytoTRACE2,method = "spearman")
+
+df <- data.frame(
+  C1_score = css_combined$C1_score,
+  CytoTRACE2 = css_combined$CytoTRACE2
+)
+
+library(GGally)
+p <- ggpairs(
+  df,columns = 1:2,
+  lower = list(continuous = wrap("smooth_loess", se = T, color = "lightblue", alpha = 0.5)),
+  upper = list(continuous = wrap("cor", size = 10,method = "spearman")),
+  diag = list(continuous = wrap("densityDiag"))
+) + 
+  theme_bw(base_size = 15)
+
+ggsave(plot = p,filename = "output/figures/UCell_and_CytoTRACE2_COR.png", width = 10, height = 6)
+
+```
+
+
+
+# Section 9. Reference-Based Cell Annotation
+
+This section projects the integrated object onto the Azimuth lung reference, then tests how the resulting annotation states align with the plasticity score.
+```{r}
+
+set.seed(1234)
+
+library(Azimuth)
+
+#ref_data <- tibble(SeuratData::AvailableData())
+#options(timeout = 50000)
+#SeuratData::InstallData("lungref")
+
+set.seed(12345)
+plan(sequential)
+css_combined <- RunAzimuth(css_combined, reference = "lungref")
+
+
+DimPlot_scCustom(css_combined, group.by = "predicted.ann_finest_level") + theme_bw(base_size = 25)
+table(css_combined$predicted.ann_finest_level)
+
+
+```
+
+# Section 10. Annotation-Level Statistical Comparisons
+```{r}
+
+library(ggpubr)
+library(FSA)
+library(rcompanion)
+
+# data
+meta <- css_combined@meta.data
+
+# analysis of global differences (Kruskal-Wallis)
+kruskal.test(C1_score ~ predicted.ann_finest_level, data = meta)
+
+# analysis of pairwise differences (Wilcoxon)
+pairwise.wilcox.test(
+  meta$C1_score,
+  meta$predicted.ann_finest_level,
+  p.adjust.method = "BH"
+)
+
+# analysis of post-hoc Dunn test
+dunn_res <- dunnTest(
+  C1_score ~ predicted.ann_finest_level,
+  data = meta,
+  method = "bh"
+)
+
+dunn_df <- dunn_res$res
+
+sig_dunn <- dunn_df %>%
+  as_tibble() %>%
+  separate(Comparison, into = c("group1", "group2"), sep = " - ") %>%
+  filter(P.adj < 0.05) %>%
+  arrange(P.adj) %>%
+  mutate(direction = ifelse(Z > 0, "higher", "lower"))
+
+write_csv(sig_dunn, "output/tables/C1_dunn_cells.csv")
+
+# data prep for plotting (global)
+meta <- meta %>%
+  mutate(
+    predicted.ann_finest_level = reorder(
+      predicted.ann_finest_level,
+      C1_score,
+      FUN = max
+    )
+  )
+
+# plot of C1 score across all cell types
+p1 <- ggplot(meta, aes(
+  x = predicted.ann_finest_level,
+  y = C1_score,
+  fill = predicted.ann_finest_level
+)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.8) +
+  geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white") +
+  stat_compare_means(label = "p.signif", hide.ns = TRUE) +
+  labs(
+    x = "Azimuth annotation",
+    y = "C1 score",
+    title = "C1 program activity across cell states",
+    subtitle = "Azimuth finest-level annotation"
+  ) +
+  coord_flip() +
+  cowplot::theme_cowplot() +
+  theme(
+    plot.title = element_text(size = 15, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    legend.position = "none"
+  )
+
+ggsave("output/figures/C1_by_celltype.png", p1, width = 10, height = 6, dpi = 600)
+
+# analysis subset for focused comparison
+df_focus <- meta %>%
+  filter(predicted.ann_finest_level %in%
+           c("AT2 proliferating", "Suprabasal", "AT2", "Basal resting")) %>%
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level))
+
+# plot of selected epithelial states
+ggplot(df_focus, aes(
+  x = predicted.ann_finest_level,
+  y = C1_score,
+  fill = predicted.ann_finest_level
+)) +
+  geom_violin(trim = TRUE, alpha = 0.25, color = NA) +
+  geom_boxplot(width = 0.15, fill = "white", color = "black",
+               outlier.shape = NA, linewidth = 0.4) +
+  scale_fill_brewer(palette = "Set2") +
+  stat_compare_means(
+    comparisons = list(
+      c("AT2", "AT2 proliferating"),
+      c("Suprabasal", "Basal resting")
+    )
+  ) +
+  theme_bw(base_size = 12) +
+  labs(
+    x = "Cell type",
+    y = "C1 score",
+    title = "C1 score across selected cell types",
+    subtitle = "Azimuth annotation"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "none"
+  )
+
+ggsave("output/figures/C1_by_celltype_AT2.png", width = 10, height = 6, dpi = 600)
+
+# analysis of effect size (non-parametric)
+df_focus2 <- meta %>%
+  filter(predicted.ann_finest_level %in% c("Suprabasal", "Basal resting")) %>%
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level))
+
+rcompanion::wilcoxonRG(
+  x = df_focus2$C1_score,
+  g = df_focus2$predicted.ann_finest_level,
+  verbose = TRUE
+)
+
+# analysis of effect size (non-parametric)
+df_focus2 <- meta %>%
+  filter(predicted.ann_finest_level %in% c("AT2", "AT2 proliferating")) %>%
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level))
+
+rcompanion::wilcoxonRG(
+  x = df_focus2$C1_score,
+  g = df_focus2$predicted.ann_finest_level,
+  verbose = TRUE
+)
+
+```
+
+
+# Section 11. Annotation and Cluster UMAP Views
+```{r}
+
+FeaturePlot_scCustom(css_combined, na_cutoff = NA,
+  features = "C1_score",
+  reduction = "umap") +
+  scale_color_viridis_c() +
+    labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "C1 score") +
+  umap_theme
+
+ggsave("output/figures/C1_score_UMAP.png", width=8, height=6,dpi = 600)
+
+library(scCustomize)
+library(ggsci)
+library(ggrepel)
+
+# Colors
+npg_cols <- pal_npg("nrc")(length(unique(css_combined$seurat_clusters)))
+names(npg_cols) <- sort(unique(css_combined$seurat_clusters))
+
+# Base UMAP
+p <- DimPlot_scCustom(
+  css_combined,
+  group.by = "seurat_clusters",
+  reduction = "umap",
+  label = FALSE
+) +
+  scale_color_npg() +
+  labs(x = "UMAP1", y = "UMAP2", title = "UMAP by leiden clusters") +
+  umap_theme +
+  theme(legend.position = "none")
+
+# Centroids
+centroids <- Embeddings(css_combined, "umap") %>%
+  as.data.frame() %>%
+  mutate(cluster = css_combined$seurat_clusters) %>%
+  group_by(cluster) %>%
+  summarise(
+    UMAP_1 = median(umap_1),
+    UMAP_2 = median(umap_2),
+    .groups = "drop"
+  )
+
+# Plot + BIGGER labels
+p <- p +
+geom_label(
+  data = centroids,
+  aes(UMAP_1, UMAP_2, label = cluster, fill = cluster),
+  color = "black",
+  fontface = "bold",
+  size = 4,
+  label.size = 0.6,         # thickness of border
+  label.padding = unit(0.4, "lines"),
+  label.r = unit(0.35, "lines"),
+  show.legend = FALSE
+) +
+  scale_fill_manual(values = npg_cols)
+
+
+ggsave("output/figures/leiden_UMAP.png", width=8, height=6,dpi = 600)
+
+
+library(dplyr)
+library(ggrepel)
+
+umap_df <- Embeddings(css_combined, "umap") %>%
+  as.data.frame() %>%
+  mutate(celltype = css_combined$predicted.ann_finest_level)
+
+centroids <- umap_df %>%
+  group_by(celltype) %>%
+  summarise(
+    UMAP_1 = median(umap_1),
+    UMAP_2 = median(umap_2),
+    n = n(),
+    .groups = "drop"
+  )
+ 
+p <- DimPlot_scCustom(
+  css_combined,
+  group.by = "predicted.ann_finest_level",
+  reduction = "umap",
+  label = FALSE
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Cell type annotation") +
+  umap_theme +
+  theme(legend.position = "none")
+
+p +
+  geom_label_repel(
+    data = centroids,
+    aes(
+      UMAP_1,
+      UMAP_2,
+      label = paste0(celltype, "\n(n=", n, ")")
+    ),
+    size = 4.5,
+    fontface = "bold",
+    
+    # box style
+    fill = "white",
+    label.size = 0.6,
+    label.colour = "black",
+    
+    # repelling behavior (important)
+    box.padding = 0.6,
+    point.padding = 0.4,
+    max.overlaps = Inf,
+    
+    # leader lines
+    segment.color = "black",
+    segment.size = 0.3,
+    
+    show.legend = FALSE
+  )
+
+p <- DimPlot_scCustom(
+  css_combined,
+  group.by = "predicted.ann_finest_level",
+  reduction = "umap",
+  label = F
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Cell type annotation") +
+  umap_theme 
+
+p
+
+ggsave("output/figures/annotation_UMAP.png", plot = p, width=8, height=6,dpi = 600)
+ 
+```
+
+# Section 12. Assign Cell-Cycle Scores
+```{r}
+
+DefaultAssay(css_combined) <- "RNA"
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+css_combined <- CellCycleScoring(css_combined, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+# view cell cycle scores and phase assignments
+head(css_combined[[]])
+
+```
+
+# Section 13. Save Updated Metadata and Annotation Outputs
+
+```{r}
+
+Idents(css_combined) <- "seurat_clusters"
+
+cols_to_remove <- c(
+  # assay junk
+  "nCount_SCT", "nFeature_SCT",
+  "nCount_tfsulm", "nFeature_tfsulm",
+  "nCount_pathwaysulm", "nFeature_pathwaysulm",
+  
+  # clustering redundancy
+  "SCT_snn_res.0.1",
+  
+  # azimuth levels
+  "predicted.ann_level_1", "predicted.ann_level_1.score",
+  "predicted.ann_level_2", "predicted.ann_level_2.score",
+  "predicted.ann_level_3", "predicted.ann_level_3.score",
+  "predicted.ann_level_4", "predicted.ann_level_4.score",
+  "predicted.ann_level_5", "predicted.ann_level_5.score",
+  "predicted.ann_finest_level.score",
+  "mapping.score"
+)
+
+css_combined@meta.data <- css_combined@meta.data[ , 
+  !(colnames(css_combined@meta.data) %in% cols_to_remove)
+]
+
+assays_to_remove <- c(
+  "prediction.score.ann_level_1",
+  "prediction.score.ann_level_2",
+  "prediction.score.ann_level_3",
+  "prediction.score.ann_level_4",
+  "prediction.score.ann_level_5",
+  "prediction.score.ann_finest_level"
+)
+
+for (assay in assays_to_remove) {
+  if (assay %in% names(css_combined@assays)) {
+    css_combined[[assay]] <- NULL
+  }
+}
+
+head(css_combined@meta.data)
+
+qs_save(object = css_combined,file = "output/objects/css_combined_processed.qs2",compress_level = 10, nthreads = 10)
+
+```

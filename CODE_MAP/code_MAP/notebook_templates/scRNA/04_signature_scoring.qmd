@@ -1,0 +1,180 @@
+---
+title: "scRNA Signature Scoring"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Score user-provided gene signatures and store the scores in Seurat metadata.
+
+## Packages
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/seurat_clustered.qs"
+signature_file <- "path/to/signatures.tsv"
+output_object <- "path/to/seurat_scored.qs"
+results_dir <- "results/signature_scoring"
+figures_dir <- "figures/signature_scoring"
+assay_name <- "RNA"
+sample_column <- "sample_column"
+group_column <- "group_column"
+signature_column <- "signature_name"
+gene_column <- "gene_symbol"
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+signatures <- readr::read_tsv(signature_file, show_col_types = FALSE)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(signature_column, gene_column) %in% colnames(signatures)))
+stopifnot(all(c(sample_column, group_column) %in% colnames(object[[]])))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+signature_summary <- signatures |> count(.data[[signature_column]], name = "n_genes")
+readr::write_tsv(signature_summary, file.path(results_dir, "signature_input_summary.tsv"))
+signature_summary
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+feature_sets <- split(signatures[[gene_column]], signatures[[signature_column]])
+feature_sets <- lapply(feature_sets, intersect, rownames(object))
+feature_sets <- feature_sets[lengths(feature_sets) > 0]
+object <- AddModuleScore(object, features = feature_sets, name = "signature_score_")
+score_cols <- tail(colnames(object[[]]), length(feature_sets))
+names(score_cols) <- names(feature_sets)
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+score_tbl <- object[[]] |>
+  tibble::rownames_to_column("cell_id") |>
+  select(cell_id, all_of(score_cols), all_of(c(sample_column, group_column)))
+readr::write_tsv(score_tbl, file.path(results_dir, "signature_scores_by_cell.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "signature_score_violin.pdf"), width = 8, height = 4)
+print(VlnPlot(object, features = score_cols, group.by = group_column, pt.size = 0))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$signature_scoring <- list(score_columns = score_cols, signature_file = signature_file)
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(signature_summary, file.path(results_dir, "signature_gene_counts.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scrna-04-signature-scoring-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, signatures_scored = length(score_cols))
+```
+

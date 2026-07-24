@@ -1,0 +1,173 @@
+---
+title: "RNA ATAC Linkage"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Link gene expression with nearby accessible regions and store links in the multiome object.
+
+## Packages
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/multiome_wnn.qs"
+output_object <- "path/to/multiome_rna_atac_links.qs"
+results_dir <- "results/rna_atac_linkage"
+figures_dir <- "figures/rna_atac_linkage"
+rna_assay <- "RNA"
+atac_assay <- "peaks"
+sample_column <- "sample_column"
+group_column <- "group_column"
+features_of_interest <- c("GENE1", "GENE2")
+distance <- 500000
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+```
+
+## Validation
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(rna_assay, atac_assay) %in% Assays(object)))
+stopifnot(all(c(sample_column, group_column) %in% colnames(object[[]])))
+features_of_interest <- intersect(features_of_interest, rownames(object[[rna_assay]]))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+readr::write_tsv(tibble::tibble(cells = ncol(object), features_requested = length(features_of_interest)), file.path(results_dir, "linkage_input_summary.tsv"))
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+DefaultAssay(object) <- atac_assay
+object <- LinkPeaks(object = object, peak.assay = atac_assay, expression.assay = rna_assay, genes.use = features_of_interest, distance = distance)
+links <- Links(object)
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+link_tbl <- as.data.frame(links)
+readr::write_tsv(tibble::as_tibble(link_tbl), file.path(results_dir, "rna_atac_links.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "coverage_linked_features.pdf"), width = 9, height = 4)
+if (length(features_of_interest) > 0) print(CoveragePlot(object, region = features_of_interest[1], features = features_of_interest[1], expression.assay = rna_assay))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$rna_atac_linkage <- list(features = features_of_interest, distance = distance, n_links = length(links))
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(tibble::as_tibble(link_tbl), file.path(results_dir, "linked_peaks.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-multiome-03-rna-atac-linkage-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, linked_features = length(features_of_interest))
+```
+

@@ -1,0 +1,182 @@
+---
+title: "scRNA Marker Identification and Export"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Identify markers between groups or clusters and export reusable marker tables.
+
+## Packages
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/seurat_clustered.qs"
+output_object <- "path/to/seurat_markers.qs"
+results_dir <- "results/markers"
+figures_dir <- "figures/markers"
+assay_name <- "RNA"
+sample_column <- "sample_column"
+group_column <- "group_column"
+ident_column <- "seurat_clusters"
+condition_1 <- "condition_1"
+condition_2 <- "condition_2"
+logfc_threshold <- 0.25
+min_pct <- 0.1
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(sample_column, group_column, ident_column) %in% colnames(object[[]])))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+group_counts <- object[[]] |> tibble::as_tibble() |> count(.data[[group_column]], name = "n_cells")
+readr::write_tsv(group_counts, file.path(results_dir, "marker_group_counts.tsv"))
+group_counts
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+Idents(object) <- object[[group_column, drop = TRUE]]
+markers <- FindMarkers(
+  object,
+  ident.1 = condition_1,
+  ident.2 = condition_2,
+  logfc.threshold = logfc_threshold,
+  min.pct = min_pct
+) |> tibble::rownames_to_column("feature")
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+marker_summary <- markers |> summarise(n_markers = n(), n_adjusted_significant = sum(p_val_adj < 0.05, na.rm = TRUE))
+readr::write_tsv(marker_summary, file.path(results_dir, "marker_summary.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+top_features <- markers |> arrange(p_val_adj) |> slice_head(n = 12) |> pull(feature)
+if (length(top_features) > 0) {
+  pdf(file.path(figures_dir, "top_marker_dotplot.pdf"), width = 8, height = 5)
+  print(DotPlot(object, features = top_features, group.by = group_column) + RotatedAxis())
+  dev.off()
+}
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$marker_identification <- list(group_column = group_column, condition_1 = condition_1, condition_2 = condition_2, n_markers = nrow(markers))
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(markers, file.path(results_dir, "markers_condition_1_vs_condition_2.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scrna-05-marker-identification-and-export-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, marker_rows = nrow(markers))
+```

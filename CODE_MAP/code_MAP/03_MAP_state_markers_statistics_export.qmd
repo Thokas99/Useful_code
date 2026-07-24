@@ -1,0 +1,1061 @@
+---
+title: "MAP 03 - State Markers, Statistics, and Export"
+format: html
+---
+
+# Section 1. Overview
+
+This notebook collects downstream interpretation and statistical checks for the CSS plasticity analysis.
+
+**MAP role:** mandatory state, marker, statistics, and export notebook. Any miscellaneous plots, covariate checks, score tests, regression models, or random statistical diagnostics should live here instead of being scattered across the MAP workflow.
+
+## Section 1.1. Reader Guide
+
+- Input is the processed Seurat object with scores, clusters, annotations, and metadata from earlier steps.
+- The notebook discovers cluster markers, summarizes C1 by sample and cluster, runs non-parametric and linear-model checks, and evaluates possible confounders.
+- Main outputs are marker tables, sample and cluster summaries, residual plots, correlation checks, and the Python-ready `.h5ad` export.
+- Read this as the R-side interpretation and quality-control bridge before the velocity and CellRank branch.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Load scored object.
+2. Compute cluster markers and essential marker plots.
+3. Optionally re-import scVelo/CellRank2 metadata when those outputs already exist.
+4. Run essential sample, annotation, and cluster summaries.
+5. Run only core Wilcoxon/Kruskal checks needed to read the result.
+6. Compute residual and confounder checks.
+7. Save the updated object and export AnnData for Python velocity/metabolism.
+
+Extensive post-hoc tests, adjusted models, permutations, and sensitivity analyses belong in `10_MAP_extensive_statistics.qmd`.
+
+## Section 1.3. Setup
+
+This section loads the required packages and restores the Seurat object used as the starting point for downstream analyses.
+
+```{r include=FALSE}
+
+packages <- c(
+  "tidyverse",
+  "Seurat",
+  "patchwork",
+  "data.table",
+  "fst",
+  "UCell",
+  "viridis",
+  "RColorBrewer",
+  "qs2",
+  "ggsci",
+  "scCustomize", 
+  "future",
+  "ggpubr",
+  "GGally"
+)
+
+
+purrr::walk(packages, library, character.only = TRUE)
+
+plan(multicore, workers = 4)
+
+options(future.globals.maxSize = 15 * 1024^3)  # 6 GB
+
+umap_theme <- cowplot::theme_cowplot() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    axis.title = element_text(size = 13),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+css_combined <- qs_read(file = "output/objects/css_combined_processed.qs2",nthreads = 10)
+
+```
+
+
+# Section 2. Cluster Biomarker Discovery
+
+This first analysis block identifies broad cluster markers that will be reused in later interpretation plots and summary tables.
+```{r }
+#| label: all_markers
+#| warning: false
+
+# Default assay is SCT
+#DefaultAssay(css_combined) <- "SCT"
+# Prepare SCT models for DE testing
+#css_combined <- PrepSCTFindMarkers(css_combined, assay = "SCT")
+
+set.seed(1234)
+DefaultAssay(css_combined) <- "RNA"
+
+# Then run DE
+combined_markers <- FindAllMarkers(
+  css_combined,
+  #test.use = "MAST",
+  only.pos = FALSE,
+  group.by = "seurat_clusters",
+  min.pct = 0.25,
+  logfc.threshold = 0.25#, latent.vars = c("orig.ident")
+)
+
+fwrite(combined_markers,"output/tables/CSS_combined_markers.csv",row.names = T)
+
+
+top3 <- combined_markers %>% group_by(cluster) %>% top_n(n = 4, wt = avg_log2FC)
+DoHeatmap(css_combined, features = top3$gene) + NoLegend()
+rm(top3)
+ 
+
+
+```
+
+# Section 3. Marker Table Exports
+
+This section splits the all-marker table into cluster-specific files so later notebooks and reports can reuse the marker calls without rerunning differential expression.
+
+```{r}
+
+head(combined_markers)
+
+# split markers into one data frame per cluster
+cluster_markers_list <- combined_markers |>
+  split(~ cluster)
+
+# give the list clean names like Cluster1_markers, Cluster2_markers, ...
+names(cluster_markers_list) <- paste0("Cluster", names(cluster_markers_list), "_markers")
+
+# write one csv per cluster
+iwalk(
+  cluster_markers_list,
+  ~ write_csv(.x, file = file.path("output/tables", paste0(.y, ".csv")))
+)
+
+```
+
+# Section 4. ORA
+
+```{r}
+
+library(gprofiler2)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+
+run_gprofiler_ordered <- function(
+  genes,
+  object_name,
+  sources = c("GO:BP", "KEGG", "REAC", "WP", "TF", "MIRNA")
+) {
+  message("Running g:Profiler for ", object_name)
+  
+  genes <- genes |>
+    na.omit() |>
+    unique()
+  
+  if (length(genes) < 5) {
+    message("  Too few genes")
+    return(NULL)
+  }
+  
+  gp_res <- tryCatch(
+    gost(
+      query = genes,
+      organism = "hsapiens",
+      ordered_query = TRUE,
+      multi_query = FALSE,
+      significant = TRUE,
+      sources = sources
+    ),
+    error = function(e) {
+      message("  gost failed: ", e$message)
+      NULL
+    }
+  )
+  
+  if (is.null(gp_res) || is.null(gp_res$result) || nrow(gp_res$result) == 0) {
+    message("  No significant terms")
+    return(gp_res)
+  }
+  
+  object_stub <- gsub("[^A-Za-z0-9_]+", "_", object_name)
+  
+  fwrite(
+    gp_res$result,
+    file = file.path("output/tables", paste0(object_stub, "_gprofiler_results.csv"))
+  )
+  
+  p <- gostplot(gp_res, capped = TRUE, interactive = FALSE) +
+    theme_bw(base_size = 11) +
+    labs(title = paste("g:Profiler ordered enrichment -", object_name))
+  
+  ggsave(
+    plot = p,
+    filename = file.path("output/figures", paste0(object_stub, "_gprofiler_plot.png")),
+    width = 16,
+    height = 8,
+    dpi = 600
+  )
+  
+  message("  Saved CSV and plot")
+  gp_res
+}
+
+extract_ranked_genes <- function(df, rank_col = "avg_log2FC") {
+  df |>
+    filter(!is.na(gene), !is.na(.data[[rank_col]])) |>
+    distinct(gene, .keep_all = TRUE) |>
+    arrange(desc(.data[[rank_col]])) |>
+    pull(gene)
+}
+
+n_clusters <- length(cluster_markers_list)
+
+gprofiler_results_list <- imap(
+  cluster_markers_list,
+  function(df, object_name) {
+    i <- match(object_name, names(cluster_markers_list))
+    message("[", i, "/", n_clusters, "] g:Profiler for ", object_name)
+    
+    genes <- extract_ranked_genes(df, rank_col = "avg_log2FC")
+    
+    run_gprofiler_ordered(
+      genes = genes,
+      object_name = object_name,
+      sources = c("GO:BP", "KEGG", "REAC", "WP", "TF", "MIRNA")
+    )
+  }
+)
+
+```
+
+# Section 5. GSEA for GO Biological Processes
+
+```{r}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(purrr)
+
+run_go_gsea <- function(df, object_name, rank_col = "logFClineage1", ont = "BP") {
+  
+  message("Running GO GSEA for ", object_name)
+  
+  ranked_genes <- df %>%
+    filter(!is.na(gene), !is.na(.data[[rank_col]])) %>%
+    distinct(gene, .keep_all = TRUE) %>%
+    arrange(desc(.data[[rank_col]]))
+  
+  gene_list <- ranked_genes[[rank_col]]
+  names(gene_list) <- ranked_genes$gene
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  
+  if (length(gene_list) < 10) {
+    message("  Too few genes for GSEA")
+    return(NULL)
+  }
+  
+  gsea_res <- tryCatch(
+    gseGO(
+      geneList      = gene_list,
+      OrgDb         = org.Hs.eg.db,
+      ont           = ont,
+      keyType       = "SYMBOL",
+      pvalueCutoff  = 0.05,
+      minGSSize     = 10,
+      maxGSSize     = 500,
+      eps           = 0,
+      verbose       = FALSE
+    ),
+    error = function(e) {
+      message("  gseGO failed: ", e$message)
+      NULL
+    }
+  )
+  
+  if (is.null(gsea_res)) return(NULL)
+  
+  gsea_df <- as.data.frame(gsea_res)
+  object_stub <- gsub("[^A-Za-z0-9_]+", "_", object_name)
+  
+  fwrite(
+    gsea_df,
+    file = file.path("output/tables", paste0(object_stub, "_GO_", ont, "_gsea_results.csv"))
+  )
+  
+  if (nrow(gsea_df) == 0) {
+    message("  No significant GO terms")
+    return(gsea_res)
+  }
+  
+  p <- enrichplot::dotplot(gsea_res, showCategory = 25) +
+    theme_bw(base_size = 11) +
+    labs(title = paste("GO", ont, "GSEA -", object_name))
+  
+  ggsave(
+    filename = file.path("output/figures", paste0(object_stub, "_GO_", ont, "_gsea_barplot.png")),
+    plot = p,
+    width = 14,
+    height = 10,
+    dpi = 600
+  )
+  
+  message("  Saved CSV and barplot")
+  gsea_res
+}
+
+n_clusters <- length(cluster_markers_list)
+
+go_results_list <- imap(
+  cluster_markers_list,
+  function(df, object_name) {
+    i <- match(object_name, names(cluster_markers_list))
+    message("[", i, "/", n_clusters, "] GO GSEA for ", object_name)
+    run_go_gsea(df, object_name, rank_col = "avg_log2FC", ont = "BP")
+  }
+)
+
+```
+
+# Section 6. GSEA for KEGG Pathways
+
+```{r}
+
+cluster_markers_list <- combined_markers |>
+  split(~ cluster)
+
+names(cluster_markers_list) <- paste0("Cluster", names(cluster_markers_list), "_markers")
+
+all_cluster_genes <- combined_markers |>
+  dplyr::filter(!is.na(gene)) |>
+  dplyr::distinct(gene) |>
+  dplyr::pull(gene)
+
+gene_map <- bitr(
+  all_cluster_genes,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+) |>
+  dplyr::distinct(SYMBOL, .keep_all = TRUE)
+
+```
+
+```{r}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(purrr)
+
+
+run_kegg_gsea <- function(df, cluster_name, gene_map, rank_col = "avg_log2FC") {
+  
+  ranked_genes <- df |>
+    filter(!is.na(gene), !is.na(.data[[rank_col]])) |>
+    distinct(gene, .keep_all = TRUE) |>
+    arrange(desc(.data[[rank_col]]))
+  
+  gene_list <- ranked_genes[[rank_col]]
+  names(gene_list) <- ranked_genes$gene
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  
+  map_sub <- gene_map |>
+    filter(SYMBOL %in% names(gene_list))
+  
+  if (nrow(map_sub) == 0) {
+    message("  No mapped genes found")
+    return(NULL)
+  }
+  
+  gene_list_entrez <- gene_list[map_sub$SYMBOL]
+  names(gene_list_entrez) <- map_sub$ENTREZID
+  
+  gene_list_entrez <- gene_list_entrez[!duplicated(names(gene_list_entrez))]
+  gene_list_entrez <- sort(gene_list_entrez, decreasing = TRUE)
+  
+  if (length(gene_list_entrez) < 10) {
+    message("  Too few mapped genes for GSEA")
+    return(NULL)
+  }
+  
+  gsea_res <- tryCatch(
+    gseKEGG(
+      geneList = gene_list_entrez,
+      organism = "hsa",
+      pvalueCutoff = 0.05,
+      minGSSize = 10,
+      maxGSSize = 500,
+      eps = 0,
+      verbose = FALSE
+    ),
+    error = function(e) {
+      message("  gseKEGG failed: ", e$message)
+      NULL
+    }
+  )
+  
+  if (is.null(gsea_res)) return(NULL)
+  
+  gsea_df <- as.data.frame(gsea_res)
+  cluster_stub <- gsub("[^A-Za-z0-9_]+", "_", cluster_name)
+  
+  fwrite(
+    gsea_df,
+    file = file.path("output/tables", paste0(cluster_stub, "_KEGG_gsea_results.csv"))
+  )
+  
+  if (nrow(gsea_df) == 0) {
+    message("  No significant KEGG terms")
+    return(gsea_res)
+  }
+  
+  p <- enrichplot::dotplot(gsea_res, showCategory = 25) +
+    theme_bw(base_size = 12) +
+    labs(title = paste("KEGG GSEA -", cluster_name))
+  
+  ggsave(
+    filename = file.path("output/figures", paste0(cluster_stub, "_KEGG_gsea_barplot.png")),
+    plot = p,
+    width = 14,
+    height = 10,
+    dpi = 600
+  )
+  
+  message("  Saved CSV and barplot")
+  gsea_res
+}
+
+n_clusters <- length(cluster_markers_list)
+
+kegg_results_list <- imap(
+  cluster_markers_list,
+  function(df, cluster_name) {
+    i <- match(cluster_name, names(cluster_markers_list))
+    message("[", i, "/", n_clusters, "] Running KEGG for ", cluster_name)
+    run_kegg_gsea(df, cluster_name, gene_map = gene_map, rank_col = "avg_log2FC")
+  }
+)
+
+```
+
+# Section 7. ReactomePA
+```{r}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(data.table)
+
+
+# Keep unique genes and filter NA waldStat
+ranked_genes <- along_DEGs %>%
+  filter(!is.na(waldStat)) %>%
+  distinct(gene, .keep_all = TRUE) %>%
+  arrange(desc(logFClineage1))
+
+# Create numeric vector for GSEA
+gene_list <- ranked_genes$logFClineage1
+names(gene_list) <- ranked_genes$gene
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Map gene symbols to Entrez IDs for KEGG
+gene_df <- bitr(names(gene_list), fromType = "SYMBOL", 
+                toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+gene_list_entrez <- gene_list[gene_df$SYMBOL]
+names(gene_list_entrez) <- gene_df$ENTREZID
+
+library(ReactomePA)
+
+gsea_res_Reactome <- gsePathway(
+  geneList = gene_list_entrez,
+  organism = "human",
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  verbose = TRUE
+)
+
+# Convert Entrez IDs to symbols
+gsea_res_Reactome <- setReadable(gsea_res_Reactome, OrgDb = org.Hs.eg.db)
+
+dotplot(gsea_res_Reactome, showCategory = 15)  +
+  theme_bw(base_size = 11) +
+  labs(title = "GSEA ReactomePA Pathways for genes along Pseudotime")
+
+ggsave(filename = "output/figures/clusterProfiler_ReactomePA_tradeSEQ.svg", width = 10, height = 8)
+
+# Save results as CSV
+fwrite(as.data.frame(gsea_res_Reactome), "output/tables/tradeSeq_GSEA_ReactomePA_results.csv")
+
+```
+
+# Section 8. Marker Visualization
+
+```{r}
+
+DefaultAssay(css_combined) <- "SCT"
+library(SeuratExtend)
+a <- FeaturePlot3(
+  css_combined,
+  reduction = "umap",
+  color = "ryb",
+  feature.1 = "DLK2",
+  feature.2 = "RRM2",
+  feature.3 = "SAA2",
+  pt.size = 0.5
+)
+a 
+
+ggsave(
+  filename = "output/figures/markers_fate.jpg",
+  plot = a,
+  width = 12,
+  height = 8)
+
+
+```
+
+
+# Section 9. Optional Re-import of scVelo and CellRank2 Metadata
+
+Run this section after `07_MAP_velocity_scvelo_cellrank.qmd` if the velocity metadata should be available inside the Seurat object for R-side plotting, violin tests, summaries, or export.
+
+```{r}
+
+velocity_metadata_path <- "output/tables/MAP_velocity_cellrank_metadata_for_seurat.csv"
+
+if (file.exists(velocity_metadata_path)) {
+  velocity_metadata <- readr::read_csv(velocity_metadata_path, show_col_types = FALSE)
+
+  velocity_metadata <- velocity_metadata |>
+    dplyr::mutate(cell_id = as.character(cell_id)) |>
+    tibble::column_to_rownames("cell_id")
+
+  velocity_cols_to_add <- c(
+    "velocity_pseudotime",
+    "latent_time",
+    "velocity_length",
+    "velocity_confidence",
+    "velocity_confidence_transition",
+    "root_cells",
+    "end_points",
+    "harmony_1",
+    "harmony_2"
+  )
+
+  velocity_cols_to_add <- intersect(velocity_cols_to_add, colnames(velocity_metadata))
+
+  common_cells <- intersect(colnames(css_combined), rownames(velocity_metadata))
+
+  css_combined <- AddMetaData(
+    object = css_combined,
+    metadata = velocity_metadata[common_cells, velocity_cols_to_add, drop = FALSE]
+  )
+
+  qs_save(
+    object = css_combined,
+    file = "output/objects/css_combined_processed_with_velocity.qs2",
+    compress_level = 10,
+    nthreads = 10
+  )
+}
+
+```
+
+# Section 10. Metadata-Level Statistical Tests
+
+These summary tables keep the C1 score readable at sample, cluster, and sample-by-cluster levels before the notebook moves into formal tests.
+
+```{r}
+
+# Set a reproducible seed for the metadata statistics.
+set.seed(1234)
+
+# Libraries
+library(dplyr)
+library(readr)
+library(rstatix)
+library(e1071)
+
+# Metadata
+meta <- css_combined@meta.data
+meta$seurat_clusters <- factor(meta$seurat_clusters)
+
+# BASIC SUMMARY STATS PER SAMPLE
+Summary_C1 <- meta %>%
+  group_by(sample) %>%
+  summarise(
+    n_cells     = n(),
+
+    mean_C1     = mean(C1_score, na.rm = TRUE),
+    median_C1   = median(C1_score, na.rm = TRUE),
+
+    sd_C1       = sd(C1_score, na.rm = TRUE),
+    var_C1      = var(C1_score, na.rm = TRUE),
+
+    min_C1      = min(C1_score, na.rm = TRUE),
+    max_C1      = max(C1_score, na.rm = TRUE),
+
+    q25_C1      = quantile(C1_score, 0.25, na.rm = TRUE),
+    q75_C1      = quantile(C1_score, 0.75, na.rm = TRUE),
+    IQR_C1      = IQR(C1_score, na.rm = TRUE),
+
+    skewness_C1 = skewness(C1_score, na.rm = TRUE),
+    kurtosis_C1 = kurtosis(C1_score, na.rm = TRUE),
+
+    sem_C1      = sd_C1 / sqrt(n_cells),
+
+    ci95_low    = mean_C1 - 1.96 * sem_C1,
+    ci95_high   = mean_C1 + 1.96 * sem_C1,
+
+    pct_high_C1 = mean(C1_score > 0.5) * 100
+  ) %>%
+  arrange(desc(mean_C1))
+
+Summary_C1
+
+# Save
+write_csv(
+  Summary_C1,
+  file = "output/tables/Summary_of_C1_per_sample.csv"
+)
+
+
+Cluster_Summary <- meta %>%
+  group_by(seurat_clusters) %>%
+  summarise(
+    n_cells     = n(),
+
+    mean_C1     = mean(C1_score, na.rm = TRUE),
+    median_C1   = median(C1_score, na.rm = TRUE),
+
+    sd_C1       = sd(C1_score, na.rm = TRUE),
+    var_C1      = var(C1_score, na.rm = TRUE),
+
+    min_C1      = min(C1_score, na.rm = TRUE),
+    max_C1      = max(C1_score, na.rm = TRUE),
+
+    q25_C1      = quantile(C1_score, 0.25, na.rm = TRUE),
+    q75_C1      = quantile(C1_score, 0.75, na.rm = TRUE),
+    IQR_C1      = IQR(C1_score, na.rm = TRUE),
+
+    skewness_C1 = skewness(C1_score, na.rm = TRUE),
+    kurtosis_C1 = kurtosis(C1_score, na.rm = TRUE),
+
+    sem_C1      = sd_C1 / sqrt(n_cells),
+
+    ci95_low    = mean_C1 - 1.96 * sem_C1,
+    ci95_high   = mean_C1 + 1.96 * sem_C1,
+
+    pct_high_C1 = mean(C1_score > 0.5) * 100
+  ) %>%
+  arrange(desc(mean_C1))
+
+Cluster_Summary
+
+write_csv(
+  Cluster_Summary,
+  file = "output/tables/Cluster_Summary_of_C1.csv"
+)
+
+Sample_Cluster_Summary <- meta %>%
+  group_by(sample, seurat_clusters) %>%
+  summarise(
+    n_cells     = n(),
+
+    mean_C1     = mean(C1_score, na.rm = TRUE),
+    median_C1   = median(C1_score, na.rm = TRUE),
+
+    sd_C1       = sd(C1_score, na.rm = TRUE),
+    var_C1      = var(C1_score, na.rm = TRUE),
+
+    min_C1      = min(C1_score, na.rm = TRUE),
+    max_C1      = max(C1_score, na.rm = TRUE),
+
+    q25_C1      = quantile(C1_score, 0.25, na.rm = TRUE),
+    q75_C1      = quantile(C1_score, 0.75, na.rm = TRUE),
+    IQR_C1      = IQR(C1_score, na.rm = TRUE),
+
+    skewness_C1 = skewness(C1_score, na.rm = TRUE),
+    kurtosis_C1 = kurtosis(C1_score, na.rm = TRUE),
+
+    sem_C1      = sd_C1 / sqrt(n_cells),
+
+    ci95_low    = mean_C1 - 1.96 * sem_C1,
+    ci95_high   = mean_C1 + 1.96 * sem_C1,
+
+    pct_high_C1 = mean(C1_score > 0.5) * 100
+  ) %>%
+  arrange(desc(mean_C1))
+
+Sample_Cluster_Summary
+
+write_csv(
+  Sample_Cluster_Summary,
+  file = "output/tables/Sample_Cluster_Summary_of_C1.csv"
+)
+
+```
+
+```{r}
+
+# KRUSKAL-WALLIS TEST
+kruskal.test(C1_score ~ sample, data = meta)
+
+# PAIRWISE WILCOXON TESTS
+pairwise_res <- pairwise.wilcox.test(
+  x = meta$C1_score,
+  g = meta$sample,
+  p.adjust.method = "BH"
+)
+
+pairwise_res
+
+# EFFECT SIZE
+effect_sizes <- meta %>%
+  wilcox_effsize(C1_score ~ sample)
+
+```
+
+# Section 11. Linear Models for Sample and Annotation Effects
+```{r}
+
+library(broom)
+library(jtools)
+
+# Pseudotime model (main model)
+m_traj <- lm(
+  C1_score ~ S.Score + G2M.Score + percent.mt + percent_mito_ribo + sample,
+  data = meta
+)
+
+tidy(m_traj)
+
+summ(
+  m_traj,
+  scale = TRUE,
+  confint = TRUE,
+  robust = "HC3"
+)
+
+library(car)
+
+Anova(m_traj, type = 2)
+
+# Cell Type Model
+m_celltype <- lm(C1_score ~ predicted.ann_finest_level, data = meta)
+
+tidy(m_celltype)
+
+summ(m_celltype, scale = TRUE, confint = TRUE, robust = TRUE)
+Anova(m_celltype, type = 2)
+
+
+```
+
+
+# Section 12. Cluster-Level Summary Statistics
+
+This block tests whether C1 differs across clusters and estimates the size of the cluster effect after basic covariate adjustment.
+
+```{r}
+
+
+# Cluster-level summary statistics
+cluster_summary <- meta %>%
+  dplyr::group_by(seurat_clusters) %>%
+  dplyr::summarise(
+    mean_C1   = mean(C1_score),
+    median_C1 = median(C1_score),
+    sd_C1     = sd(C1_score),
+    n         = n()
+  )
+
+# Global non-parametric test across clusters
+kruskal.test(C1_score ~ seurat_clusters, data = meta)
+
+library(FSA)
+
+# Post-hoc pairwise cluster comparisons (non-parametric)
+dunnTest(
+  C1_score ~ seurat_clusters,
+  data = meta,
+  method = "bh"
+)
+
+# Covariate-adjusted linear model
+cluster_lm <- lm(
+  C1_score ~ seurat_clusters + S.Score + G2M.Score +
+    sample + percent_mito_ribo,
+  data = meta
+)
+
+tidy(cluster_lm)
+
+# Model summary
+summary(cluster_lm)
+
+# Clean regression table with diagnostics
+summ(
+  cluster_lm,
+  scale = TRUE,
+  confint = TRUE,
+  vifs = TRUE,
+  robust = "HC3"
+)
+
+# ANOVA-style decomposition of variance
+cluster_aov <- aov(
+  C1_score ~ seurat_clusters + S.Score + G2M.Score +
+    sample + percent_mito_ribo,
+  data = meta
+)
+
+cluster_aov
+
+# Post-hoc cluster comparisons (parametric)
+TukeyHSD(cluster_aov, "seurat_clusters")
+
+library(effectsize)
+
+eta_squared(cluster_aov, partial = TRUE)
+
+library(emmeans)
+
+emm <- emmeans(cluster_lm, ~ seurat_clusters)
+
+pairs(emm, adjust = "tukey")
+
+emm2 <- emmeans(cluster_lm, ~ seurat_clusters | sample)
+
+pairs(emm2)
+
+
+```
+
+# Section 13. Cluster-Level Visualization
+
+These plots turn the cluster-level statistics into compact figures for quick review.
+
+```{r}
+
+library(ggplot2)
+
+ggplot(meta, aes(x = seurat_clusters, y = C1_score, fill = seurat_clusters)) +
+  geom_violin(fill = "grey90", color = NA) +
+  geom_boxplot(width = 0.15, outlier.size = 0.2) +
+    stat_compare_means(
+    label = "p.signif",
+    hide.ns = TRUE
+  ) +
+  theme_pubr(base_size = 12) +
+  scale_color_npg() +
+  labs(
+    title = "C1 activity varies across transcriptional clusters",
+    subtitle = "Non-parametric comparison with Kruskal–Wallis test tests",
+    x = "Seurat clusters",
+    y = "C1 score"
+  ) +
+    theme(legend.position = "none")
+
+ggsave("output/figures/C1_cluster_distribution.png",
+       width = 10,
+       height = 6,
+       dpi = 600)
+
+library(emmeans)
+
+emm_df <- as.data.frame(emmeans(cluster_lm, ~ seurat_clusters))
+
+ggplot(emm_df, aes(x = seurat_clusters, y = emmean, color = seurat_clusters)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  theme_ggprism_mod(base_size = 12) +
+  scale_color_npg() +
+  labs(
+    title = "Covariate-adjusted C1 score per cluster",
+    y = "Estimated marginal mean (C1 score)",
+    x = "Seurat clusters"
+  )  +
+    theme(legend.position = "none")
+
+library(effectsize)
+
+eta <- eta_squared(cluster_aov, partial = TRUE)
+
+ggplot(eta, aes(x = Parameter, y = Eta2_partial, fill = Parameter)) +
+  geom_col() +
+  theme_ggprism_mod(base_size = 12) +
+  scale_fill_npg() +
+  coord_flip() +
+  labs(
+    title = "Variance explained by model components",
+    x = NULL,
+    y = "Partial eta²"
+  ) +
+    theme(legend.position = "none")
+
+```
+
+# Section 14. Correlation Analysis Across Progression Metrics
+```{r}
+
+library(correlation)
+
+vars <- c(
+  "C1_score",
+  "CytoTRACE2",
+  "slingPseudotime_1",
+  "velocity_pseudotime",
+  "velocity_length",
+  "S.Score",
+  "G2M.Score"
+)
+
+df <- meta[, vars]
+
+cor_results <- correlation(df, method = "spearman", p_adjust = "BH")
+
+summary(cor_results)
+
+```
+
+# Section 15. Cell-Cycle Confounding Check
+```{r}
+
+library(ggplot2)
+library(viridis)
+library(ggpubr)
+
+
+# 1. Plot: C1 score vs G2M
+
+
+p1 <- ggplot(meta, aes(C1_score, G2M.Score, color = CytoTRACE2)) +
+  geom_point(size = 0.6, alpha = 0.6) +
+  geom_smooth(
+    method = "gam",
+    formula = y ~ s(x),
+    color = "black"
+  ) +
+  stat_cor(method = "spearman", color = "black") +
+  scale_color_viridis_c() +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "Association between C1 score and G2M score",
+    subtitle = "Colored by CytoTRACE2 (differentiation state)",
+    x = "C1 score",
+    y = "G2M score",
+    color = "CytoTRACE2"
+  )
+
+# Display plot
+p1
+
+# Save plot
+ggsave("output/figures/C1_vs_G2M.png", p1, width = 8, height = 6, dpi = 600)
+
+
+
+# 2. Compute residuals (regress out confounders)
+
+
+# Linear model: remove cell cycle + mitochondrial effects
+model <- lm(C1_score ~ G2M.Score + S.Score + percent_mito_ribo, data = meta)
+
+# Scaled residuals
+meta$C1_residual <- scale(residuals(model))
+
+# Add to Seurat object metadata
+css_combined@meta.data$C1_residual <- meta$C1_residual
+
+
+
+# 3. Plot: Residual C1 vs G2M
+p2 <- ggplot(meta, aes(C1_residual, G2M.Score, color = CytoTRACE2)) +
+  geom_point(size = 0.6, alpha = 0.6) +
+  geom_smooth(
+    method = "gam",
+    formula = y ~ s(x),
+    color = "black"
+  ) +
+  stat_cor(method = "spearman", color = "black") +
+  scale_color_viridis_c() +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "Residual C1 score vs G2M score",
+    subtitle = "C1 score corrected for cell cycle, mitochondrial and  ribosomal content",
+    x = "C1 residual",
+    y = "G2M score",
+    color = "CytoTRACE2"
+  )
+
+p2
+
+ggsave("output/figures/C1residual_vs_G2M.png", p2, width = 8, height = 6, dpi = 600)
+
+
+
+# 4. Plot: Residual C1 vs original C1
+
+p3 <- ggplot(meta, aes(C1_residual, C1_score, color = CytoTRACE2)) +
+  geom_point(size = 0.6, alpha = 0.6) +
+  geom_smooth(
+    method = "gam",
+    formula = y ~ s(x),
+    color = "black"
+  ) +
+  stat_cor(method = "spearman", color = "black") +
+  scale_color_viridis_c() +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "Residual vs original C1 score",
+    subtitle = "Assessing effect of regression on C1 signal",
+    x = "C1 residual",
+    y = "C1 score",
+    color = "CytoTRACE2"
+  )
+
+p3
+
+ggsave("output/figures/C1residual_vs_C1.png", p3, width = 8, height = 6, dpi = 600)
+
+
+p_tot <- ((p1 / p2) | p3) +
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = "A") &
+  theme(legend.position = "right")  # or "bottom"
+
+
+p_tot
+
+ggsave("output/figures/p_tot_C1residual_vs_C1.png", p_tot, width = 14, height = 10, dpi = 600)
+
+
+```
+
+# Section 16. Save Updated Object
+
+```{r}
+
+qs_save(object = css_combined,file = "output/objects/css_combined_processed.qs2",compress_level = 10, nthreads = 10)
+
+```
+
+# Section 17. Export Processed Object for Python
+```{r}
+
+DefaultAssay(object = css_combined) <- "RNA"
+
+as.anndata(x = css_combined, file_path = "output/objects/", file_name = "css_combined_processed.h5ad")
+
+```

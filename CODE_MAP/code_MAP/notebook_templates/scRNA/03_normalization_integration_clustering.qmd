@@ -1,0 +1,181 @@
+---
+title: "scRNA Normalization, Integration, and Clustering"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Normalize, reduce dimensions, cluster cells, and save embeddings and cluster labels in the Seurat object.
+
+## Packages
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/seurat_qc.qs"
+output_object <- "path/to/seurat_clustered.qs"
+results_dir <- "results/scrna_clustering"
+figures_dir <- "figures/scrna_clustering"
+assay_name <- "RNA"
+sample_column <- "sample_column"
+group_column <- "group_column"
+batch_column <- "sample_column"
+n_variable_features <- 3000
+n_pcs <- 30
+cluster_resolution <- 0.5
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(sample_column, group_column, batch_column) %in% colnames(object[[]])))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+readr::write_tsv(tibble::tibble(cells = ncol(object), features = nrow(object)), file.path(results_dir, "normalization_input_summary.tsv"))
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+object <- NormalizeData(object)
+object <- FindVariableFeatures(object, nfeatures = n_variable_features)
+object <- ScaleData(object, features = VariableFeatures(object))
+object <- RunPCA(object, npcs = n_pcs)
+object <- FindNeighbors(object, dims = seq_len(n_pcs))
+object <- FindClusters(object, resolution = cluster_resolution)
+object <- RunUMAP(object, dims = seq_len(n_pcs), reduction.name = "umap")
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+cluster_tbl <- object[[]] |>
+  tibble::rownames_to_column("cell_id") |>
+  count(seurat_clusters, .data[[sample_column]], name = "n_cells")
+readr::write_tsv(cluster_tbl, file.path(results_dir, "cluster_counts.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "scrna_umap_clusters.pdf"), width = 6, height = 5)
+print(DimPlot(object, reduction = "umap", group.by = "seurat_clusters", label = TRUE))
+dev.off()
+pdf(file.path(figures_dir, "scrna_umap_groups.pdf"), width = 6, height = 5)
+print(DimPlot(object, reduction = "umap", group.by = group_column))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$template <- list(step = "scrna_normalization_integration_clustering", n_pcs = n_pcs, resolution = cluster_resolution)
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(object[[]] |> tibble::rownames_to_column("cell_id"), file.path(results_dir, "clustered_metadata.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scrna-03-normalization-integration-clustering-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, cells = ncol(object), clusters = length(levels(Idents(object))))
+```
+

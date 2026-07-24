@@ -1,0 +1,180 @@
+---
+title: "scRNA Coexpression Modules"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Build simple feature coexpression modules and store module scores in Seurat metadata.
+
+## Packages
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/seurat_clustered.qs"
+module_file <- "path/to/modules.tsv"
+output_object <- "path/to/seurat_coexpression_modules.qs"
+results_dir <- "results/coexpression_modules"
+figures_dir <- "figures/coexpression_modules"
+assay_name <- "RNA"
+sample_column <- "sample_column"
+group_column <- "group_column"
+module_column <- "module_name"
+gene_column <- "gene_symbol"
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+modules <- readr::read_tsv(module_file, show_col_types = FALSE)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(module_column, gene_column) %in% colnames(modules)))
+stopifnot(all(c(sample_column, group_column) %in% colnames(object[[]])))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+module_summary <- modules |> count(.data[[module_column]], name = "n_genes")
+readr::write_tsv(module_summary, file.path(results_dir, "module_input_summary.tsv"))
+module_summary
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+module_sets <- split(modules[[gene_column]], modules[[module_column]])
+module_sets <- lapply(module_sets, intersect, rownames(object))
+module_sets <- module_sets[lengths(module_sets) > 0]
+object <- AddModuleScore(object, features = module_sets, name = "coexpression_module_")
+module_score_cols <- tail(colnames(object[[]]), length(module_sets))
+names(module_score_cols) <- names(module_sets)
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+module_scores <- object[[]] |>
+  tibble::rownames_to_column("cell_id") |>
+  select(cell_id, all_of(module_score_cols), all_of(c(sample_column, group_column)))
+readr::write_tsv(module_scores, file.path(results_dir, "coexpression_module_scores.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "coexpression_module_scores.pdf"), width = 8, height = 4)
+print(VlnPlot(object, features = module_score_cols, group.by = group_column, pt.size = 0))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$coexpression_modules <- list(module_file = module_file, score_columns = module_score_cols)
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(module_summary, file.path(results_dir, "coexpression_module_gene_counts.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scrna-08-coexpression-modules-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, modules_scored = length(module_score_cols))
+```
+

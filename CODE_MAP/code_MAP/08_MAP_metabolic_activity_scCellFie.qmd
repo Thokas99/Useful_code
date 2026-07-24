@@ -1,0 +1,443 @@
+---
+title: "MAP 08 - Exploratory Metabolic Activity with scCellFie"
+format: html
+---
+
+# Section 1. Overview
+
+This companion notebook adds a metabolic-task activity layer to the CSS LUAD epithelial plasticity workflow using `scCellFie`.
+
+**MAP role:** important exploratory functional layer. This analysis is kept in the core MAP because it provides a useful metabolic interpretation of the transcriptional states and was considered biologically valuable by the team.
+
+## Section 1.1. Reader Guide
+
+- Input is the velocity-enriched integrated AnnData object created upstream.
+- The notebook runs `scCellFie`, stores metabolic-task scores, summarizes those scores by cluster and sample, and then explores selected metabolic tasks on the shared UMAP space.
+- Main outputs are a saved `scCellFie` AnnData object, summary tables, filtered metabolic marker tables, and differential metabolic-task results.
+- Read this as a functional-activity layer: it asks which metabolic programs are active in each transcriptional state, while leaving the main state definitions to the QC, clustering, marker, and C1 notebooks.
+- Because the analysis is exploratory, thresholds and selected metabolic tasks are written explicitly and should be interpreted as hypothesis-generating.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Setup and load AnnData.
+2. Run scCellFie and save metabolic-task scores.
+3. Inspect a short hand-picked task list.
+4. Select cluster-informative metabolic marker tasks.
+5. Visualize filtered metabolic markers.
+6. Export differential metabolic-task tables.
+7. Fit exploratory metabolic trends across selected cluster paths.
+
+## Section 1.3. Setup
+```{python}
+
+import random
+# Python built-in random
+random.seed(1234)
+
+# warnings
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# single-cell ecosystem
+import scanpy as sc
+import sccellfie
+import numpy as np
+np.random.seed(1234)
+
+import glasbey
+import textwrap
+
+# data handling
+import pandas as pd
+import anndata as ad
+import scipy.sparse as sp
+
+# plotting
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# statistics
+from scipy.stats import spearmanr
+import os
+
+```
+
+
+# Section 2. Load the Integrated AnnData
+
+This first import step restores the merged object that already contains the RNA velocity layers and metadata generated upstream.
+```{python}
+
+# Set seed for reproducibility
+random.seed(1234)
+
+# Load AnnData
+adata = sc.read_h5ad("output/objects/css_combined_scVelo.h5ad")
+
+# Quick inspection
+adata
+
+```
+
+# Section 3. Run scCellFie and Save Metabolic Scores
+
+This block estimates metabolic-task activity for each cell, writes the enriched AnnData object, and creates summary tables grouped by Seurat cluster and sample.
+
+```{python}
+
+import sccellfie
+
+# Run scCellFie on your AnnData object
+# The settings below intentionally keep the original exploratory analysis intact.
+# Key interpretation point: these scores are metabolic-task activity estimates,
+# not direct flux measurements.
+results = sccellfie.run_sccellfie_pipeline(
+    adata,
+    organism='human',
+    sccellfie_data_folder=None,
+    n_counts_col='n_counts',              # present in adata.obs
+    process_by_group=False,
+    groupby=None,
+    neighbors_key='neighbors',            # present in adata.uns
+    n_neighbors=10,
+    batch_key='sample',                   # present in adata.obs
+    threshold_key='sccellfie_threshold',
+    smooth_cells=True,
+    alpha=0.33,
+    chunk_size=5000,
+    disable_pbar=False,
+    save_folder=None,
+    save_filename=None
+)
+
+# Save AnnData with scCellFie results
+sccellfie.io.save_adata(
+    adata=results['adata'],
+    output_directory='output/objects/',
+    filename='sccellfie_results'
+)
+
+# Choose a grouping variable for report generation.
+# MAP default: cluster-level summaries, because the biological states are
+# currently defined by the integrated epithelial cluster/state structure.
+#cell_group = 'predicted.ann_finest_level'   # or 'seurat_clusters'
+cell_group = 'seurat_clusters'   # or 'seurat_clusters'
+
+# Generate summary report for metabolic task visualization
+results['adata'].metabolic_tasks.obs['seurat_clusters_str'] = (
+    results['adata'].metabolic_tasks.obs['seurat_clusters'].astype(str)
+)
+
+report = sccellfie.reports.generate_report_from_adata(
+    results['adata'].metabolic_tasks,
+    group_by='seurat_clusters_str',
+    tissue_col='sample',
+    feature_name='metabolic_task'
+)
+
+# Save summary tables
+sccellfie.io.save_result_summary(
+    results_dict=report,
+    output_directory='output/tables/'
+)
+
+import pandas as pd
+
+mt = results["adata"].metabolic_tasks
+
+metabolic_tasks_df = pd.DataFrame(
+    mt.X.toarray() if hasattr(mt.X, "toarray") else mt.X,
+    index=mt.obs_names,
+    columns=mt.var_names
+)
+metabolic_tasks_df.head()
+
+metabolic_tasks_df.to_csv("output/tables/metabolic_tasks_scores.csv")
+
+```
+
+# Section 4. Inspect Selected Metabolic Tasks
+
+These plots provide a first biological check of the metabolic layer by mapping selected tasks onto UMAP and comparing activity across clusters.
+
+```{python}
+
+cell_group = "seurat_clusters_str"
+
+# Build a cluster palette large enough for all observed cluster labels.
+palette = glasbey.extend_palette('Set2',palette_size=max([10, results['adata'].metabolic_tasks.obs["seurat_clusters_str"].unique().shape[0]]))
+
+
+plt.rcParams['figure.figsize'] = (6,4)
+plt.rcParams['font.size'] = 10
+
+
+# Hand-picked tasks for the first inspection pass.
+# Keep this list short: these are examples to sanity-check the metabolic layer,
+# not the final marker set.
+metabolic_tasks = ['Mevalonate synthesis',
+                   'Synthesis of thromboxane from arachidonate',
+                   'Phenylalanine to phenylacetate (via phenylacetaldehyde)',
+                   'Calnexin/calreticulin cycle'
+                  ]
+
+pd.Series(metabolic_tasks, name="metabolic_task").to_csv(
+    "output/tables/MAP_sccellfie_handpicked_tasks.csv",
+    index=False
+)
+
+
+sc.pl.embedding(results['adata'].metabolic_tasks,
+                color=[cell_group] + metabolic_tasks,
+                ncols=2,
+                palette=palette,
+                frameon=False,
+                basis='X_umap',
+                wspace=0.7,
+                title=["\n".join(textwrap.wrap(t, width=60)) for t in [cell_group] + metabolic_tasks],
+                cmap='OrRd'
+               )
+
+fig, axes = sccellfie.plotting.create_multi_violin_plots(results['adata'].metabolic_tasks,
+                                                         features=metabolic_tasks,
+                                                         groupby=cell_group,
+                                                         stripplot=False,
+                                                         n_cols=2,
+                                                         ylabel='Metabolic Score'
+                                                        )
+
+
+ax = sc.pl.stacked_violin(results['adata'].metabolic_tasks, metabolic_tasks, groupby= "seurat_clusters_str", swap_axes=True, dendrogram=False, standard_scale='var')
+
+sc.pl.dotplot(results['adata'].metabolic_tasks, var_names=metabolic_tasks, groupby=cell_group, swap_axes=True, standard_scale='var')
+
+ax = sc.pl.heatmap(results['adata'].metabolic_tasks, var_names=metabolic_tasks, groupby=cell_group, cmap="YlGnBu", swap_axes=True, dendrogram=True,
+                   figsize=(16, 4)
+                  )
+
+plt.close("all")
+
+# Aggregate cell-level metabolic scores to cluster-level summaries.
+agg = sccellfie.expression.aggregation.agg_expression_cells(results['adata'].metabolic_tasks, groupby=cell_group, agg_func='trimean')
+agg.head()
+
+# Rescale tasks so the heatmap emphasizes relative cluster patterns.
+input_df = sccellfie.preprocessing.matrix_utils.min_max_normalization(agg.T, axis=1)
+
+plt.figure(figsize=(16, 4))
+g = sns.heatmap(input_df.loc[metabolic_tasks,:], cmap='YlGnBu', linewidths=0.5, xticklabels=1, yticklabels=1)
+
+cbar = g.collections[0].colorbar
+cbar.set_label('Scaled metabolic activity', size=14, rotation=90, labelpad=25)  # Change colorbar label size and rotation
+
+```
+
+# Section 5. Select Cluster-Informative Metabolic Markers
+
+The next section uses the `scCellFie` marker workflow to identify metabolic tasks that separate clusters by TF-IDF-like marker behavior.
+
+```{python}
+
+mrks = sccellfie.external.quick_markers(results['adata'].metabolic_tasks,
+                                        cluster_key=cell_group,
+                                        n_markers=100,
+                                        express_cut=5*np.log(2))
+
+
+mrks.head()
+
+mrks['tf_idf'].hist()
+plt.close("all")
+
+scatter = plt.scatter(mrks['tf'], mrks['idf'], c=mrks['tf_idf'], cmap='YlGnBu')
+plt.colorbar(scatter)
+plt.xlabel('TF')
+plt.ylabel('IDF')
+plt.close("all")
+
+x_col = 'tf'
+y_col = 'idf'
+df = mrks
+
+# These thresholds define which tasks are kept as cluster-informative markers.
+# Because this is exploratory, treat these as transparent screening settings,
+# not as hard biological truth.
+tfidf_threshold = 0.3
+tf_ratio = 1.2
+
+# Visualization
+plt.figure(figsize=(6, 6))
+# Plot all points
+plt.scatter(df[x_col], df[y_col], alpha=0.5, c='lightgray', label='All points')
+# Plot selected points
+filtered_mrks, curve = sccellfie.external.filter_tfidf_markers(df, tf_col=x_col, idf_col=y_col,
+                                                              tfidf_threshold=tfidf_threshold,
+                                                              tf_ratio=tf_ratio)
+plt.scatter(filtered_mrks[x_col], filtered_mrks[y_col], c='red', label='Selected points')
+plt.plot(*curve, label='Fit curve')
+plt.xlabel('TF')
+plt.ylabel('IDF')
+plt.legend()
+plt.close("all")
+
+
+filtered_mrks
+
+# Save the selected marker tasks for downstream reading and reporting.
+filtered_mrks.to_csv("output/tables/MAP_sccellfie_tfidf_marker_tasks.csv", index=False)
+
+tf_idf_mrks = filtered_mrks['gene'].unique().tolist()
+len(tf_idf_mrks)
+
+method = 'logreg'
+sc.tl.rank_genes_groups(results['adata'].metabolic_tasks, cell_group, method=method,
+                       use_raw=False, key_added=method)
+sc.pl.rank_genes_groups(results['adata'].metabolic_tasks, n_genes=50, sharey=True, key=method, fontsize=4)
+plt.close("all")
+
+scanpy_df = sc.get.rank_genes_groups_df(results['adata'].metabolic_tasks,
+                                      key=method,
+                                      group=None)
+scanpy_df.head(10)
+
+sc.pl.rank_genes_groups_dotplot(results['adata'].metabolic_tasks, n_genes=5, groupby=cell_group,
+                               key=method, use_raw=False, standard_scale='var',
+                              )
+plt.close("all")
+
+scanpy_df['scores'].hist()
+
+scores_threshold = 0.7
+filtered_scanpy_mrks = scanpy_df.loc[scanpy_df['scores'] > scores_threshold]
+
+filtered_scanpy_mrks
+filtered_scanpy_mrks.to_csv("output/tables/filtered_scanpy_mrks_scCellFie.csv")
+filtered_scanpy_mrks.to_csv("output/tables/MAP_sccellfie_logreg_marker_tasks.csv", index=False)
+
+scanpy_mrks = filtered_scanpy_mrks['names'].unique().tolist()
+len(scanpy_mrks)
+
+plt.close("all")
+```
+
+# Section 6. Visualize Filtered Metabolic Markers
+
+The filtered marker list is visualized on UMAP and as a scaled cluster heatmap, so the selected tasks can be read as cluster-associated metabolic signatures.
+
+```{python}
+
+both_markers = sorted(set(tf_idf_mrks)) # scanpy_mrks
+
+agg = sccellfie.expression.aggregation.agg_expression_cells(results['adata'].metabolic_tasks[:, both_markers],
+                                                            groupby=cell_group,
+                                                            agg_func='trimean')
+
+plt.rcParams['figure.figsize'] = (3,3)
+plt.rcParams['font.size'] = 10
+
+sc.pl.embedding(results['adata'].metabolic_tasks,
+               color=both_markers,
+               ncols=4,
+               #palette=palette,
+               frameon=False,
+               basis='X_umap',
+               wspace=0.7,
+               title=["\n".join(textwrap.wrap(t, width=45)) for t in both_markers],
+               cmap='OrRd'
+              )
+plt.close("all")
+                                                       
+filtered_agg = agg[both_markers]
+filtered_agg.head()
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Normalize marker-task scores before plotting the cluster heatmap.
+# This keeps the heatmap focused on relative cluster patterns instead of
+# absolute task-score scale differences.
+normalized_markers = sccellfie.preprocessing.min_max_normalization(filtered_agg, axis=0)
+normalized_markers.head()
+normalized_markers.to_csv("output/tables/normalized_markers_scCellFie.csv")
+normalized_markers.to_csv("output/tables/MAP_sccellfie_normalized_marker_tasks.csv")
+
+plot_df = normalized_markers.T.copy()
+plot_df.columns = plot_df.columns.astype(str)
+ 
+plt.figure(figsize=(15, 15))
+sns.heatmap(plot_df, cmap='magma', annot=False, linewidths=0.5,
+            cbar_kws={'label': 'Min-max scaled metabolic score'})
+
+plt.title('Metabolic Markers across Cell Types')
+plt.ylabel('Cluster')
+plt.xlabel('Metabolic Task')
+plt.tight_layout()
+plt.close("all")
+
+
+```
+
+# Section 7. Differential Metabolic Activity Between Clusters
+
+This block tests metabolic tasks across cluster pairs and stores the full differential table for later interpretation.
+
+```{python}
+
+da_all = sccellfie.stats.pairwise_differential_analysis(results['adata'].metabolic_tasks,
+                                                        groupby= cell_group, # Column including the conditions
+                                                        var_names=None,
+                                                        order=None,
+                                                        alternative='two-sided',
+                                                        alpha=0.05)
+
+
+da_all.head()
+
+# Export the full differential metabolic-task table.
+# Downstream reports should rank and interpret this table, not overinterpret
+# a single selected volcano plot.
+da_all.to_csv("output/tables/differential_analysis_scCellFie.csv")
+da_all.to_csv("output/tables/MAP_sccellfie_differential_metabolic_tasks.csv", index=False)
+
+overall_tasks = sccellfie.plotting.create_volcano_plot(da_all,
+                                                       effect_threshold=0.25,
+                                                       padj_threshold=0.05,
+                                                       cell_type=None,
+                                                       group1=None,
+                                                       group2=None,
+                                                       effect_col='cohens_d',
+                                                       effect_title="Cohen's d",
+                                                       wrapped_title_length=50,
+                                                       #save='Overall-VolcanoPlot',
+                                                       #dpi=300,
+                                                       tight_layout=True
+                                                      )
+
+```
+
+# Section 8. Model Metabolic Trends Along a Cluster Path
+
+The final block fits a GAM-style trend across the selected cluster order. Here, clusters `2` and `6` are treated as an exploratory path for metabolic-task changes.
+
+```{python}
+
+trajectory = ['2',"6"]
+
+# Fit smooth trends across the selected exploratory cluster order.
+# This is a hypothesis-generating trend model, not the MAP state definition.
+gam_results = sccellfie.stats.fit_gam_model(
+    results['adata'].metabolic_tasks,
+    cell_type_key=cell_group,
+    cell_type_order=trajectory,
+)
+
+# adjusted McFadden pseudo R² value between 0.2 - 0.4 represents an excellent fit
+
+results_df = sccellfie.stats.analyze_gam_results(gam_results, fdr_level=0.05)
+results_df.head(5)
+
+results_df.to_csv("output/tables/MAP_sccellfie_cluster_path_gam_results.csv", index=False)
+
+```

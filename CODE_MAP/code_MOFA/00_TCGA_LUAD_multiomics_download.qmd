@@ -1,0 +1,674 @@
+---
+title: "TCGA-LUAD Multi-Omics Download"
+subtitle: "Reproducible GDC acquisition and matched-matrix preparation for MOFA"
+author: "Bianchi Bioinformatics"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    code-fold: true
+    code-summary: "Show code"
+    theme: lux
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  freeze: auto
+editor: source
+params:
+  run_downloads: false
+  random_seed: 1234
+  project_id: "TCGA-LUAD"
+  tumor_code: "LUAD"
+  sample_type: "TP"
+  mirbase_version: "v22"
+---
+
+# Purpose
+
+This notebook downloads and prepares TCGA-LUAD primary-tumor matrices for multi-omics modeling.
+It was converted from `TCGA_download_compleate.R` and keeps the same biological workflow:
+
+1. identify TCGA-LUAD primary tumor samples from miRNA-seq availability;
+2. download and process miRNA-seq, RNA-seq, DNA methylation, RPPA proteomics, and somatic mutations;
+3. collapse duplicated TCGA aliquots to 16-character sample barcodes;
+4. retain the intersection of samples present in every modality;
+5. write raw and matched matrices plus a sample summary.
+
+The heavy GDC chunks are gated by `params$run_downloads`.
+Render once with the default `false` value for documentation, then execute with `true` only when the environment, internet access, storage, and package versions are ready.
+
+# Reproducibility Contract
+
+The run is intended to be reproducible at the level of:
+
+- explicit cohort: `r params$project_id`;
+- explicit sample type: primary tumor, `r params$sample_type`;
+- explicit miRBase target version: `r params$mirbase_version`;
+- fixed random seed: `r params$random_seed`;
+- all outputs written under project-local `input/tables/`;
+- package versions, session metadata, parameters, and output manifest written to disk.
+
+# Setup
+
+```{r}
+#| label: setup
+
+set.seed(params$random_seed)
+
+required_packages <- c(
+  "TCGAbiolinks",
+  "tidyverse",
+  "SummarizedExperiment",
+  "miRBaseConverter",
+  "data.table",
+  "vroom",
+  "knitr"
+)
+
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Install missing packages before running this notebook: ",
+    paste(missing_packages, collapse = ", ")
+  )
+}
+
+library(TCGAbiolinks)
+library(tidyverse)
+library(SummarizedExperiment)
+library(miRBaseConverter)
+library(data.table)
+library(vroom)
+
+if (requireNamespace("conflicted", quietly = TRUE)) {
+  conflicted::conflicts_prefer(
+    dplyr::filter,
+    dplyr::select,
+    dplyr::rename,
+    dplyr::mutate,
+    dplyr::summarise,
+    dplyr::distinct,
+    base::intersect,
+    base::setdiff
+  )
+}
+
+notebook_input <- knitr::current_input()
+notebook_dir <- if (!is.null(notebook_input)) {
+  dirname(normalizePath(notebook_input, mustWork = TRUE))
+} else {
+  getwd()
+}
+
+project_dir <- normalizePath(file.path(notebook_dir, ".."), mustWork = TRUE)
+input_dir <- file.path(project_dir, "input")
+table_dir <- file.path(input_dir, "tables")
+metadata_dir <- file.path(input_dir, "metadata")
+
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(metadata_dir, recursive = TRUE, showWarnings = FALSE)
+
+run_started_at <- Sys.time()
+```
+
+```{r}
+#| label: record-run-parameters
+
+run_parameters <- tibble::tibble(
+  parameter = names(params),
+  value = vapply(params, as.character, character(1))
+)
+
+data.table::fwrite(
+  run_parameters,
+  file.path(metadata_dir, "TCGA_LUAD_download_parameters.csv")
+)
+
+knitr::kable(run_parameters)
+```
+
+```{r}
+#| label: package-versions
+
+package_versions <- tibble::tibble(
+  package = required_packages,
+  version = vapply(
+    required_packages,
+    function(pkg) as.character(utils::packageVersion(pkg)),
+    character(1)
+  )
+)
+
+data.table::fwrite(
+  package_versions,
+  file.path(metadata_dir, "TCGA_LUAD_download_package_versions.csv")
+)
+
+knitr::kable(package_versions)
+```
+
+# Helper Functions
+
+```{r}
+#| label: helper-functions
+
+tcga_sample_barcode <- function(x) {
+  substr(x, 1, 16)
+}
+
+collapse_duplicate_samples_mean <- function(df, feature_col) {
+  df |>
+    pivot_longer(
+      cols = -all_of(feature_col),
+      names_to = "sample",
+      values_to = "value"
+    ) |>
+    mutate(sample = tcga_sample_barcode(sample)) |>
+    group_by(.data[[feature_col]], sample) |>
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop") |>
+    pivot_wider(
+      names_from = sample,
+      values_from = value
+    )
+}
+
+collapse_duplicate_samples_sum <- function(df, feature_col) {
+  df |>
+    pivot_longer(
+      cols = -all_of(feature_col),
+      names_to = "sample",
+      values_to = "value"
+    ) |>
+    mutate(sample = tcga_sample_barcode(sample)) |>
+    group_by(.data[[feature_col]], sample) |>
+    summarise(value = sum(value, na.rm = TRUE), .groups = "drop") |>
+    pivot_wider(
+      names_from = sample,
+      values_from = value,
+      values_fill = 0
+    )
+}
+
+collapse_duplicate_samples_max <- function(df, feature_col) {
+  df |>
+    pivot_longer(
+      cols = -all_of(feature_col),
+      names_to = "sample",
+      values_to = "value"
+    ) |>
+    mutate(sample = tcga_sample_barcode(sample)) |>
+    group_by(.data[[feature_col]], sample) |>
+    summarise(value = max(value, na.rm = TRUE), .groups = "drop") |>
+    pivot_wider(
+      names_from = sample,
+      values_from = value,
+      values_fill = 0
+    )
+}
+
+first_existing_column <- function(candidate_cols, observed_cols, label) {
+  value <- intersect(candidate_cols, observed_cols)[1]
+
+  if (is.na(value)) {
+    stop(
+      "Could not identify ", label, " column. Observed columns: ",
+      paste(observed_cols, collapse = ", ")
+    )
+  }
+
+  value
+}
+
+write_output_manifest <- function() {
+  output_files <- list.files(
+    table_dir,
+    pattern = "\\.csv$",
+    full.names = TRUE,
+    recursive = FALSE
+  )
+
+  manifest <- tibble::tibble(
+    file = output_files,
+    basename = basename(output_files),
+    size_bytes = file.info(output_files)$size,
+    modified_time = as.character(file.info(output_files)$mtime)
+  )
+
+  data.table::fwrite(
+    manifest,
+    file.path(metadata_dir, "TCGA_LUAD_download_output_manifest.csv")
+  )
+
+  manifest
+}
+```
+
+# 1. Primary Tumor Samples
+
+```{r}
+#| label: query-primary-tumor-samples
+#| eval: !expr params$run_downloads
+
+query_all <- GDCquery(
+  project = params$project_id,
+  data.category = "Transcriptome Profiling",
+  data.type = "Isoform Expression Quantification",
+  experimental.strategy = "miRNA-Seq"
+)
+
+samplesDown.luad <- getResults(query_all, cols = "cases")
+
+tumor_samples <- TCGAquery_SampleTypes(
+  barcode = samplesDown.luad,
+  typesample = params$sample_type
+)
+
+tumor_samples <- unique(tcga_sample_barcode(tumor_samples))
+
+stopifnot(length(tumor_samples) > 0)
+
+tumor_sample_table <- tibble::tibble(sample = tumor_samples)
+
+data.table::fwrite(
+  tumor_sample_table,
+  file.path(metadata_dir, "TCGA_LUAD_primary_tumor_samples.csv")
+)
+
+length(tumor_samples)
+head(tumor_samples)
+```
+
+# 2. miRNA-Seq
+
+```{r}
+#| label: download-process-mirna
+#| eval: !expr params$run_downloads
+
+query.miRNA <- GDCquery(
+  project = params$project_id,
+  data.category = "Transcriptome Profiling",
+  data.type = "Isoform Expression Quantification",
+  experimental.strategy = "miRNA-Seq",
+  barcode = tumor_samples
+)
+
+GDCdownload(query.miRNA)
+miRNA_data <- GDCprepare(query.miRNA)
+
+miRNA_mature <- miRNA_data |>
+  filter(grepl("mature", miRNA_region)) |>
+  mutate(MIMAT = sub("mature,(MIMAT\\d+)", "\\1", miRNA_region))
+
+miRNA_counts <- miRNA_mature |>
+  group_by(MIMAT, barcode) |>
+  summarise(read_count = sum(read_count), .groups = "drop") |>
+  mutate(read_count = as.numeric(read_count))
+
+miRNA_counts <- miRNA_counts |>
+  mutate(
+    MatureName = miRNA_AccessionToName(
+      MIMAT,
+      targetVersion = params$mirbase_version
+    )$TargetName
+  )
+
+miRNA_df <- miRNA_counts |>
+  select(MatureName, barcode, read_count) |>
+  group_by(MatureName, barcode) |>
+  summarise(read_count = sum(read_count), .groups = "drop") |>
+  pivot_wider(
+    names_from = barcode,
+    values_from = read_count,
+    values_fill = 0
+  ) |>
+  rename(miRNA = MatureName)
+
+miRNA_df <- collapse_duplicate_samples_sum(miRNA_df, "miRNA")
+
+data.table::fwrite(
+  miRNA_df,
+  file.path(table_dir, "miRNA_TCGA_RAW_COUNTS.csv")
+)
+
+dim(miRNA_df)
+```
+
+# 3. RNA-Seq
+
+```{r}
+#| label: download-process-rnaseq
+#| eval: !expr params$run_downloads
+
+query.rna <- GDCquery(
+  project = params$project_id,
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts",
+  barcode = tumor_samples
+)
+
+GDCdownload(query.rna)
+rna_data <- GDCprepare(query.rna)
+
+rna_matrix <- assay(rna_data) |>
+  as.data.frame() |>
+  rownames_to_column("ensembl_id") |>
+  as_tibble()
+
+rna_matrix <- rna_matrix |>
+  mutate(ensembl_id = gsub("\\..*", "", ensembl_id))
+
+rna_matrix <- collapse_duplicate_samples_sum(rna_matrix, "ensembl_id")
+
+vroom::vroom_write(
+  rna_matrix,
+  file.path(table_dir, "RNAseq_TCGA_RAW_COUNTS.csv")
+)
+
+dim(rna_matrix)
+```
+
+# 4. DNA Methylation
+
+```{r}
+#| label: download-process-methylation
+#| eval: !expr params$run_downloads
+
+query.meth <- GDCquery(
+  project = params$project_id,
+  data.category = "DNA Methylation",
+  data.type = "Methylation Beta Value",
+  platform = "Illumina Human Methylation 450",
+  barcode = tumor_samples
+)
+
+GDCdownload(query.meth)
+meth_data <- GDCprepare(query.meth)
+
+meth_beta <- assay(meth_data) |>
+  as.data.frame() |>
+  rownames_to_column("probe_id") |>
+  as_tibble()
+
+meth_beta <- collapse_duplicate_samples_mean(meth_beta, "probe_id")
+
+meth_mvalue <- meth_beta |>
+  mutate(
+    across(
+      -probe_id,
+      ~ {
+        beta <- as.numeric(.x)
+        beta <- pmin(pmax(beta, 1e-6), 1 - 1e-6)
+        log2(beta / (1 - beta))
+      }
+    )
+  )
+
+data.table::fwrite(
+  meth_mvalue,
+  file.path(table_dir, "Methylation_TCGA_M_VALUES.csv")
+)
+
+dim(meth_mvalue)
+```
+
+# 5. RPPA Proteomics
+
+```{r}
+#| label: download-process-rppa
+#| eval: !expr params$run_downloads
+
+query.rppa <- GDCquery(
+  project = params$project_id,
+  data.category = "Proteome Profiling",
+  data.type = "Protein Expression Quantification",
+  barcode = tumor_samples
+)
+
+GDCdownload(query.rppa)
+rppa_data <- GDCprepare(query.rppa)
+
+if (inherits(rppa_data, "SummarizedExperiment")) {
+  rppa_matrix <- assay(rppa_data) |>
+    as.data.frame() |>
+    rownames_to_column("protein") |>
+    as_tibble()
+} else {
+  rppa_matrix <- rppa_data |>
+    as_tibble()
+
+  feature_col <- first_existing_column(
+    c("peptide_target", "protein_expression", "protein", "gene_name", "target"),
+    colnames(rppa_matrix),
+    "RPPA feature"
+  )
+
+  sample_col <- first_existing_column(
+    c("barcode", "sample", "case_submitter_id", "submitter_id"),
+    colnames(rppa_matrix),
+    "RPPA sample"
+  )
+
+  value_col <- first_existing_column(
+    c("protein_expression", "value", "expression", "normalized_value"),
+    colnames(rppa_matrix),
+    "RPPA value"
+  )
+
+  rppa_matrix <- rppa_matrix |>
+    select(
+      protein = all_of(feature_col),
+      sample = all_of(sample_col),
+      value = all_of(value_col)
+    ) |>
+    mutate(sample = tcga_sample_barcode(sample)) |>
+    group_by(protein, sample) |>
+    summarise(value = mean(as.numeric(value), na.rm = TRUE), .groups = "drop") |>
+    pivot_wider(
+      names_from = sample,
+      values_from = value
+    )
+}
+
+rppa_matrix <- collapse_duplicate_samples_mean(rppa_matrix, "protein")
+
+data.table::fwrite(
+  rppa_matrix,
+  file.path(table_dir, "RPPA_TCGA_PROTEIN_EXPRESSION.csv")
+)
+
+dim(rppa_matrix)
+```
+
+# 6. Somatic Mutations
+
+```{r}
+#| label: download-process-mutations
+#| eval: !expr params$run_downloads
+
+maf <- GDCquery_Maf(
+  tumor = params$tumor_code,
+  pipelines = "mutect2"
+)
+
+mutation_matrix <- maf |>
+  as_tibble() |>
+  filter(!Variant_Classification %in% c(
+    "Silent",
+    "RNA",
+    "Intron",
+    "IGR",
+    "3'UTR",
+    "5'UTR"
+  )) |>
+  mutate(sample = tcga_sample_barcode(Tumor_Sample_Barcode)) |>
+  filter(sample %in% tumor_samples) |>
+  distinct(Hugo_Symbol, sample) |>
+  mutate(mutated = 1L) |>
+  pivot_wider(
+    names_from = sample,
+    values_from = mutated,
+    values_fill = 0
+  ) |>
+  rename(gene = Hugo_Symbol)
+
+mutation_matrix <- collapse_duplicate_samples_max(mutation_matrix, "gene")
+
+data.table::fwrite(
+  mutation_matrix,
+  file.path(table_dir, "Mutation_TCGA_BINARY_MATRIX.csv")
+)
+
+dim(mutation_matrix)
+```
+
+# 7. Match Samples Across Modalities
+
+```{r}
+#| label: match-all-modalities
+#| eval: !expr params$run_downloads
+
+sample_lists <- list(
+  miRNA = colnames(miRNA_df)[-1],
+  RNA = colnames(rna_matrix)[-1],
+  methylation = colnames(meth_mvalue)[-1],
+  RPPA = colnames(rppa_matrix)[-1],
+  mutation = colnames(mutation_matrix)[-1]
+)
+
+common_samples_all <- Reduce(intersect, sample_lists)
+
+stopifnot(length(common_samples_all) > 0)
+
+miRNA_matched <- miRNA_df |>
+  select(miRNA, all_of(common_samples_all))
+
+rna_matched <- rna_matrix |>
+  select(ensembl_id, all_of(common_samples_all))
+
+meth_matched <- meth_mvalue |>
+  select(probe_id, all_of(common_samples_all))
+
+rppa_matched <- rppa_matrix |>
+  select(protein, all_of(common_samples_all))
+
+mutation_matched <- mutation_matrix |>
+  select(gene, all_of(common_samples_all))
+
+length(common_samples_all)
+head(common_samples_all)
+```
+
+# 8. Save Matched Matrices
+
+```{r}
+#| label: save-matched-matrices
+#| eval: !expr params$run_downloads
+
+data.table::fwrite(
+  miRNA_matched,
+  file.path(table_dir, "miRNA_TCGA_TUMOR_MATCHED.csv")
+)
+
+data.table::fwrite(
+  rna_matched,
+  file.path(table_dir, "RNAseq_TCGA_TUMOR_MATCHED.csv")
+)
+
+data.table::fwrite(
+  meth_matched,
+  file.path(table_dir, "Methylation_TCGA_TUMOR_MATCHED.csv")
+)
+
+data.table::fwrite(
+  rppa_matched,
+  file.path(table_dir, "RPPA_TCGA_TUMOR_MATCHED.csv")
+)
+
+data.table::fwrite(
+  mutation_matched,
+  file.path(table_dir, "Mutation_TCGA_TUMOR_MATCHED.csv")
+)
+```
+
+# 9. Sample Summary
+
+```{r}
+#| label: sample-summary
+#| eval: !expr params$run_downloads
+
+sample_summary <- tibble(
+  modality = names(sample_lists),
+  n_samples = purrr::map_int(sample_lists, length)
+) |>
+  bind_rows(
+    tibble(
+      modality = "matched_all_modalities",
+      n_samples = length(common_samples_all)
+    )
+  )
+
+data.table::fwrite(
+  sample_summary,
+  file.path(table_dir, "TCGA_LUAD_modality_sample_summary.csv")
+)
+
+knitr::kable(sample_summary)
+```
+
+# 10. Output Manifest
+
+```{r}
+#| label: output-manifest
+#| eval: !expr params$run_downloads
+
+output_manifest <- write_output_manifest()
+
+knitr::kable(output_manifest)
+```
+
+# 11. Session Information
+
+```{r}
+#| label: session-info
+
+run_finished_at <- Sys.time()
+
+run_metadata <- tibble::tibble(
+  field = c(
+    "started_at",
+    "finished_at",
+    "working_directory",
+    "r_version",
+    "platform"
+  ),
+  value = c(
+    as.character(run_started_at),
+    as.character(run_finished_at),
+    getwd(),
+    R.version.string,
+    paste(Sys.info()[["sysname"]], Sys.info()[["release"]], Sys.info()[["machine"]])
+  )
+)
+
+data.table::fwrite(
+  run_metadata,
+  file.path(metadata_dir, "TCGA_LUAD_download_run_metadata.csv")
+)
+
+session_info_text <- capture.output(sessionInfo())
+writeLines(
+  session_info_text,
+  file.path(metadata_dir, "TCGA_LUAD_download_sessionInfo.txt")
+)
+
+knitr::kable(run_metadata)
+```

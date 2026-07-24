@@ -1,0 +1,178 @@
+---
+title: "Create Multiome Object"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Create a paired RNA and ATAC Seurat object from count matrices and metadata.
+
+## Packages
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/rna_count_matrix.qs"
+atac_counts_object <- "path/to/atac_peak_count_matrix.qs"
+metadata_file <- "path/to/cell_metadata.tsv"
+fragments_file <- "path/to/fragments.tsv.gz"
+output_object <- "path/to/multiome_created.qs"
+results_dir <- "results/create_multiome"
+figures_dir <- "figures/create_multiome"
+rna_assay <- "RNA"
+atac_assay <- "peaks"
+sample_column <- "sample_column"
+group_column <- "group_column"
+genome_name <- "genome_placeholder"
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+rna_counts <- qs2::qs_read(file = input_object, nthreads = n_threads)
+atac_counts <- qs2::qs_read(file = atac_counts_object, nthreads = n_threads)
+metadata <- readr::read_tsv(metadata_file, show_col_types = FALSE)
+```
+
+## Validation
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(all(colnames(rna_counts) == colnames(atac_counts)))
+stopifnot(all(c(sample_column, group_column) %in% colnames(metadata)))
+stopifnot(file.exists(fragments_file))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+readr::write_tsv(tibble::tibble(cells = ncol(rna_counts), genes = nrow(rna_counts), peaks = nrow(atac_counts)), file.path(results_dir, "multiome_input_summary.tsv"))
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+metadata <- metadata |> tibble::column_to_rownames(colnames(metadata)[1])
+object <- CreateSeuratObject(counts = rna_counts, assay = rna_assay, meta.data = metadata[colnames(rna_counts), , drop = FALSE])
+object[[atac_assay]] <- CreateChromatinAssay(counts = atac_counts, sep = c(":", "-"), genome = genome_name, fragments = fragments_file)
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+DefaultAssay(object) <- atac_assay
+object <- NucleosomeSignal(object)
+object <- TSSEnrichment(object)
+readr::write_tsv(object[[]] |> tibble::rownames_to_column("cell_id"), file.path(results_dir, "multiome_qc_metrics.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "multiome_qc.pdf"), width = 8, height = 4)
+print(VlnPlot(object, features = c("nCount_RNA", "nCount_peaks", "TSS.enrichment"), group.by = sample_column, pt.size = 0))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$template <- list(step = "create_multiome_object", rna_assay = rna_assay, atac_assay = atac_assay)
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(object[[]] |> tibble::rownames_to_column("cell_id"), file.path(results_dir, "created_multiome_metadata.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-multiome-01-create-multiome-object-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, cells = ncol(object), assays = paste(Assays(object), collapse = ","))
+```
+

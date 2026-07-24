@@ -1,0 +1,1713 @@
+---
+title: "Untitled"
+format: html
+---
+
+# Overview
+
+This notebook analyzes the public dataset `GSE171145` as an external LUAD comparison cohort. The workflow merges the raw samples, adds CopyKAT and clinical metadata, performs standard Seurat processing, annotates cell states, and then quantifies the same C1 plasticity program used in the CSS project.
+
+Biologically, this notebook asks whether the plasticity axis observed in the CSS samples is recapitulated in an independent set of EGFR-mutant LUAD tumors.
+
+# Setup
+
+The opening chunks load the analysis packages and define a helper to reconstruct one Seurat object per raw sample before merging them into a common atlas.
+
+
+```{r}
+library(tidyverse)
+library(Seurat)
+library(patchwork)
+library(scCustomize)
+library(qs2)
+library(harmony)
+library(ggsci)
+
+```
+
+# Load and merge raw samples
+
+This block reads each raw count table plus its barcode map, harmonizes cell names, and merges all samples into a single Seurat object that becomes the starting point for the downstream cohort-level analysis.
+
+```{r}
+
+library(Seurat)
+library(data.table)
+
+umap_theme <- ggpubr::theme_classic2() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+
+    axis.title = element_text(size = 13),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+load_bd_sample <- function(count_file, cell_file, sample_id) {
+  
+  message("Loading: ", sample_id)
+  
+  # Read counts
+  counts <- fread(count_file, data.table = FALSE)
+  rownames(counts) <- counts$gene
+  counts <- counts[,-1]
+  
+  # Read cell map
+  cell_map <- fread(cell_file, sep = "\t", header = TRUE)
+  
+  # Check alignment
+  if(!all(colnames(counts) %in% cell_map$CellIndex)) {
+    stop(paste("Mismatch in:", sample_id))
+  }
+  
+  # Reorder mapping
+  cell_map <- cell_map[match(colnames(counts), cell_map$CellIndex), ]
+  
+  # Replace with real barcodes
+  colnames(counts) <- cell_map$CellName
+  
+  # Create Seurat object
+  obj <- CreateSeuratObject(counts = counts, project = "GSE171145")
+  
+  # Add metadata
+  obj$sample <- sample_id
+  
+  return(obj)
+}
+
+base_path <- "input/tables/GSE171145_RAW"
+
+count_files <- list.files(base_path, pattern = "counts.tsv$", full.names = TRUE)
+
+seurat_list <- lapply(count_files, function(count_file) {
+  
+  sample_id <- gsub(".counts.tsv", "", basename(count_file))
+  cell_file <- sub("counts.tsv", "cellname.list.txt", count_file)
+  
+  load_bd_sample(count_file, cell_file, sample_id)
+})
+
+names(seurat_list) <- gsub(".counts.tsv", "", basename(count_files))
+
+combined <- merge(
+  seurat_list[[1]],
+  y = seurat_list[-1],
+  add.cell.ids = names(seurat_list)
+)
+
+combined
+
+table(combined$sample)
+
+qs_save(object = combined,file = "output/objects/GSE171145_merged_preQC.qs2",compress_level = 5,nthreads = 10)
+
+```
+
+# copykat CNV annotataion
+
+CopyKAT is run here as an orthogonal malignancy layer so the plasticity analysis can later be interpreted alongside inferred CNV status.
+```{r}
+
+library(copykat)
+
+combined <- qs_read(file = "output/objects/GSE171145_merged_preQC.qs2", nthreads = 10)
+
+# P1
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.1)
+gc()
+copykat.P1 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P1", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=8)
+
+# P2
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.2)
+gc()
+copykat.P2 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P2", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=8)
+
+# P3
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.3)
+gc()
+copykat.P3 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P3", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=8)
+
+# P4
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.4)
+gc()
+copykat.P4 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P4", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=8)
+
+# P5
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.5)
+gc()
+copykat.P5 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P5", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=8)
+
+# P6
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.6)
+gc()
+copykat.P6 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P6", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=8)
+
+# P7
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.7)
+gc()
+copykat.P7 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P7", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=8)
+
+# P8
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.8)
+gc()
+copykat.P8 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P8", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=5)
+
+# P9
+exp.rawdata <- as.matrix(combined@assays$RNA$counts.9)
+gc()
+copykat.P9 <- copykat(rawmat=exp.rawdata, id.type="S", ngene.chr=5, win.size=25, KS.cut=0.1, sam.name="P9", distance="euclidean", norm.cell.names="", output.seg=FALSE, plot.genes=FALSE, genome="hg20", n.cores=8)
+
+
+
+results <- list()
+
+for (i in 1:9) {
+  layer_name <- paste0("counts.", i)
+  message("Running CopyKAT on ", layer_name)
+  
+  exp.rawdata <- as.matrix(combined@assays$RNA[[layer_name]])
+  gc()
+  
+  results[[layer_name]] <- copykat(
+    rawmat = exp.rawdata,
+    id.type = "S",
+    ngene.chr = 5,
+    win.size = 25,
+    KS.cut = 0.1,
+    sam.name = paste0("P", i),
+    distance = "euclidean",
+    norm.cell.names = "",
+    output.seg = FALSE,
+    plot.genes = FALSE,
+    genome = "hg20",
+    n.cores = 8
+  )
+}
+
+```
+
+# Basic QC and object cleanup
+
+After merging, the object is joined across layers, annotated with mitochondrial content, and filtered to remove poor-quality cells before deeper interpretation.
+```{r}
+
+combined <- qs_read(file = "output/objects/GSE171145_merged_preQC.qs2",nthreads = 10)
+
+combined <- JoinLayers(combined)
+
+combined[["percent.mt"]] <- PercentageFeatureSet(combined, pattern = "^MT-")
+
+VlnPlot(combined, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"))
+
+combined <- subset(
+  combined,
+  subset = nFeature_RNA > 500 &
+           nFeature_RNA < 6000 &
+           percent.mt < 20
+)
+
+combined
+
+```
+
+# Add EGFR metadata 
+
+This metadata step links the merged object back to patient-level variables, which is essential for relating C1-Core to genotype and response-like clinical features.
+```{r}
+
+combined <- qs_read(file = "output/objects/GSE171145_merged_preQC.qs2", nthreads = 10)
+
+patient_meta <- vroom::vroom("output/tables/patient_meta.csv") |>
+  select(-...1)
+
+meta <- combined@meta.data
+
+sample_to_patient <- c(
+  "GSM5219674_LJQ-T"  = "P1",
+  "GSM5219675_GBG-T"  = "P2",
+  "GSM5219676_LYB-T1" = "P3",
+  "GSM5219677_LYB-T2" = "P4",
+  "GSM5219678_CYD-T"  = "P5",
+  "GSM5219679_CYZ-T"  = "P6",
+  "GSM5219680_XMS"    = "P7",
+  "GSM5219681_ZYQ"    = "P8",
+  "GSM5219682_TGS"    = "P9"
+)
+
+meta$patient_id <- sample_to_patient[meta$sample]
+
+meta
+
+meta2 <- merge(
+  meta,
+  patient_meta,
+  by = "patient_id",
+  all.x = TRUE
+)
+
+rownames(meta2) <- rownames(meta)
+
+combined@meta.data <- meta2
+
+p2 <- DimPlot_scCustom(combined, group.by = "egfr") +
+  theme_bw(base_size = 12) +
+  ggtitle("EGFR annotation") +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12)
+  )
+p2
+
+ggsave(
+  filename = "output/figures/EGFR_DimPlot.png",
+  plot = p2,
+  dpi = 600,
+  width = 10,
+  height = 8
+)
+
+```
+
+# Doublets
+```{r}
+
+# 4. Doublet detection
+library(scDblFinder)
+sce <- as.SingleCellExperiment(combined)
+library(BiocParallel)
+sce <- scDblFinder(sce, samples="orig.ident", BPPARAM=MulticoreParam(5))
+combined$doublet_score <- sce$scDblFinder.score
+combined$doublet_class <- sce$scDblFinder.class
+
+table(combined$doublet_class)
+
+prop.table(table(combined$doublet_class))
+
+combined <- subset(combined, subset = doublet_class == "singlet")
+
+```
+
+## minimal processing
+
+```{r}
+
+plan(multicore, workers = 5)
+options(future.globals.maxSize = 10 * 1024^3)  # 2 GiB
+combined <- NormalizeData(combined)
+combined <- FindVariableFeatures(combined, nfeatures = 5000)
+combined <- ScaleData(combined)
+combined <- RunPCA(combined)
+
+PC_Plotting(combined, dim_number=1)
+PC_Plotting(combined, dim_number=2)
+
+# Check elbow plot to justify PC selection
+ElbowPlot_scCustom(combined, ndims=50)
+
+combined <- RunHarmony(object = combined,group.by.vars = "sample")
+
+# 5. Neighbors + clustering
+combined <- FindNeighbors(
+  combined,
+  dims = 1:42,
+  reduction = "harmony"
+)
+
+plan(multicore, workers = 1)
+combined <- FindClusters(combined, resolution = 0.8,random.seed = 1234)
+
+plan(multicore, workers = 4)
+combined <- RunUMAP(object = combined,umap.method = "uwot2",  seed.use = 1234,dims = 1:42,reduction = "harmony")
+
+
+library(lisi)
+
+emb <- Embeddings(combined, "harmony")
+
+data <- data.frame(
+  harmony_1 = emb[,1],
+  harmony_2 = emb[,2]
+)
+
+# meta
+meta <- data.frame(batch = combined$sample)
+
+# LISI on Harmony space
+lisi <- compute_lisi(data, meta, "batch") |>
+  as.data.frame() |>
+  rownames_to_column("cell")
+
+skimr::skim(lisi)
+
+summary(lisi)
+
+```
+
+```{r}
+
+p4 <- combined@meta.data %>%
+  dplyr::count(sample, name = "n_cells") %>%
+  dplyr::arrange(desc(n_cells)) %>%
+  ggplot(aes(x = reorder(sample, n_cells), y = n_cells)) +
+  geom_col() +
+  geom_text(aes(label = n_cells), hjust = -0.2, size = 3) +
+  labs(x = "Patient", y = "Number of cells", fill = "Stage") +
+  coord_flip() +
+  theme_bw(base_size = 12)
+
+p4
+
+DimPlot_scCustom(combined, reduction = "umap", group.by = "sample") + 
+  theme_bw(base_size = 10) +
+  ggtitle("Sample annotation") +
+  theme(legend.position = "right")
+
+```
+
+# decoupleR
+```{r}
+
+library(decoupleR)
+
+# TF–target network
+net <- get_collectri(
+  organism = "human",
+  split_complexes = FALSE
+)
+
+# Use SCT normalized data
+mat <- LayerData(combined[["RNA"]], layer = "scale.data")
+
+# Run ULM
+acts <- run_ulm(
+  mat = mat,
+  net = net,
+  .source = "source",
+  .target = "target",
+  .mor = "mor",
+  minsize = 5
+)
+
+acts
+
+# Extract ulm and store it in tfsulm in pbmc
+combined[['tfsulm']] <- acts %>%
+                    tidyr::pivot_wider(id_cols = 'source', 
+                                       names_from = 'condition',
+                                       values_from = 'score') %>%
+                    tibble::column_to_rownames('source') %>%
+                    Seurat::CreateAssayObject(.)
+
+# Change assay
+DefaultAssay(object = combined) <- "tfsulm"
+
+# Scale the data
+combined <- Seurat::ScaleData(combined)
+combined@assays$tfsulm@data <- combined@assays$tfsulm@scale.data
+
+DefaultAssay(object = combined) <- "RNA"
+
+```
+
+## Plots
+```{r}
+
+DefaultAssay(object = combined) <- "tfsulm"
+
+FeaturePlot_scCustom(combined, features = c("TEAD4")) + 
+  labs(x = "UMAP1", y = "UMAP2", title = "TEAD4 activity") +
+  umap_theme
+
+DefaultAssay(object = combined) <- "RNA"
+
+FeaturePlot_scCustom(combined, features = c("TEAD4")) + 
+  labs(x = "UMAP1", y = "UMAP2", title = "TEAD4 expression") +
+  umap_theme
+
+```
+
+# CytoTRACE2
+
+```{r}
+
+set.seed(1234)
+library(BiocParallel)
+library(CytoTRACE2)
+
+# counts
+cts <- GetAssayData(combined, assay="RNA", layer="counts")
+
+# run CytoTRACE2
+ct <- cytotrace2(cts, is_seurat=FALSE, species="human", seed=1234,ncores = 5)
+
+# add to metadata
+combined$CytoTRACE2 <- ct$CytoTRACE2_Score
+combined$CytoTRACE2_Potency <- factor(ct$CytoTRACE2_Potency)
+
+```
+
+# Cell-Cycle Scoring
+```{r}
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+combined <- CellCycleScoring(combined, s.features = s.genes, g2m.features = g2m.genes, set.ident = F)
+
+```
+
+# Adding CopyKat
+
+```{r}
+
+sample_to_patient <- c(
+  "GSM5219674_LJQ-T"  = "P1",
+  "GSM5219675_GBG-T"  = "P2",
+  "GSM5219676_LYB-T1" = "P3",
+  "GSM5219677_LYB-T2" = "P4",
+  "GSM5219678_CYD-T"  = "P5",
+  "GSM5219679_CYZ-T"  = "P6",
+  "GSM5219680_XMS"    = "P7",
+  "GSM5219681_ZYQ"    = "P8",
+  "GSM5219682_TGS"    = "P9"
+)
+
+copykat_P1 <- vroom::vroom("output/tables/P1_copykat_prediction.txt")
+copykat_P2 <- vroom::vroom("output/tables/P2_copykat_prediction.txt")
+copykat_P3 <- vroom::vroom("output/tables/P3_copykat_prediction.txt")
+copykat_P4 <- vroom::vroom("output/tables/P4_copykat_prediction.txt")
+copykat_P5 <- vroom::vroom("output/tables/P5_copykat_prediction.txt")
+copykat_P6 <- vroom::vroom("output/tables/P6_copykat_prediction.txt")
+copykat_P7 <- vroom::vroom("output/tables/P7_copykat_prediction.txt")
+copykat_P8 <- vroom::vroom("output/tables/P8_copykat_prediction.txt")
+copykat_P9 <- vroom::vroom("output/tables/P9_copykat_prediction.txt")
+
+copykat_list <- list(
+  P1 = copykat_P1,
+  P2 = copykat_P2,
+  P3 = copykat_P3,
+  P4 = copykat_P4,
+  P5 = copykat_P5,
+  P6 = copykat_P6,
+  P7 = copykat_P7,
+  P8 = copykat_P8,
+  P9 = copykat_P9
+)
+
+copykat_all <- dplyr::bind_rows(copykat_list)
+
+meta <- combined@meta.data
+meta$cell.names <- rownames(meta)
+
+merged <- dplyr::inner_join(meta, copykat_all, by = "cell.names")
+
+rownames(merged) <- merged$cell.names
+
+combined@meta.data <- merged
+
+meta_ep <- Epithelial_obj@meta.data
+meta_ep$cell.names <- rownames(meta_ep)
+
+merged <- merge(meta_ep, copykat_all, by = "cell.names")
+
+rownames(merged) <- merged$cell.names
+
+Epithelial_obj@meta.data <- merged
+
+```
+
+# Annotation with reference HCLA Azimuth:lungref
+```{r}
+# Use terminal, with proper env 
+
+library(Seurat)
+library(Azimuth)
+library(future)
+plan("sequential")              
+
+ref_data <- tibble(SeuratData::AvailableData())
+options(timeout = 10000)
+SeuratData::InstallData("lungref")
+
+combined <- qs_read(file = "GSE171145_processed.qs2", nthreads = 10)
+
+options(future.globals.maxSize = 1000 * 1024^4)   # start with 2 GiB
+combined <- RunAzimuth(combined, reference = "lungref")
+
+meta_to_remove <- grep("\\.score$|^mapping\\.score$", colnames(combined@meta.data), value = TRUE)
+combined@meta.data <- combined@meta.data[, !colnames(combined@meta.data) %in% meta_to_remove]
+
+combined <- DietSeurat(
+  combined,
+  assays = "RNA",
+  dimreducs = c("pca","harmony", "umap"),   # or c("harmony", "umap")
+  graphs = NULL
+)
+
+qs_save(object = combined,compress_level = 8,file = "GSE171145_processed.qs2", nthreads = 10)
+
+
+table(combined$predicted.ann_level_1)
+
+table(combined$predicted.ann_finest_level)
+
+table(combined$predicted.ann_level_1, combined$predicted.ann_finest_level)
+
+```
+
+# Save the standard analysis
+```{r}
+
+qs_save(object = combined,compress_level = 8,file = "output/objects/GSE171145_CopyKat.qs2", nthreads = 10)
+
+combined <- qs_read(file = "output/objects/GSE171145_CopyKat.qs2", nthreads = 10)
+
+```
+
+
+# Score C1
+
+This is the core transfer step from the CSS project into the Maynard cohort: the same UP and DOWN signature logic is used to build a continuous C1 plasticity score in tumor epithelial cells.
+```{r}
+
+set.seed(1234)
+library(UCell)
+library(BiocParallel)
+
+# parallel
+BPPARAM <- MulticoreParam(workers = 2)
+register(BPPARAM)
+
+C1_Core_signature <- vroom::vroom("input/tables/C1_Core_signature.csv")
+
+C1_Core_DOWN <- C1_Core_signature |>
+  filter(C1_Core_direction == "DOWN")
+
+C1_Core_UP <-  C1_Core_signature |>
+  filter(C1_Core_direction == "UP")
+
+# Score the refined UP and DOWN signatures.
+# The final exported score is C1_Core; raw UCell helper columns are removed after smoothing.
+
+# C1 EpiCore scoring with UCell
+
+# Set a reproducible seed for scoring.
+set.seed(1234)
+
+# Load the scoring packages used in this block.
+library(UCell)
+library(BiocParallel)
+
+# Register the BiocParallel backend for UCell scoring.
+
+BPPARAM <- MulticoreParam(workers = 9)
+register(BPPARAM)
+
+# Define small helpers for z-scoring and signature checks.
+
+zscore <- function(x) {
+  as.numeric(scale(x))
+}
+
+check_signature <- function(gene_vector, object_genes, signature_name) {
+  genes_input <- unique(na.omit(gene_vector))
+  genes_found <- intersect(genes_input, object_genes)
+  genes_lost  <- setdiff(genes_input, object_genes)
+
+  message(
+    signature_name, ": ",
+    length(genes_found), "/", length(genes_input),
+    " genes found in object."
+  )
+
+  if (length(genes_found) < 5) {
+    stop(
+      signature_name,
+      " has fewer than 5 genes present in the object. ",
+      "The score would be unstable."
+    )
+  }
+
+  list(
+    genes_found = genes_found,
+    genes_lost  = genes_lost
+  )
+}
+
+# Build C1 EpiCore signatures
+
+object_genes <- rownames(combined)
+
+down_checked <- check_signature(
+  gene_vector    = C1_Core_DOWN$gene,
+  object_genes   = object_genes,
+  signature_name = "DOWN_Signature"
+)
+
+up_checked <- check_signature(
+  gene_vector    = C1_Core_UP$gene,
+  object_genes   = object_genes,
+  signature_name = "UP_Signature"
+)
+
+gene_list <- list(
+  DOWN_Signature = down_checked$genes_found,
+  UP_Signature   = up_checked$genes_found
+)
+
+# Optional report of genes missing from the Seurat object
+missing_signature_genes <- list(
+  DOWN_Signature_missing = down_checked$genes_lost,
+  UP_Signature_missing   = up_checked$genes_lost
+)
+
+missing_signature_genes
+
+# Add UCell scores
+
+combined <- AddModuleScore_UCell(
+  obj      = combined,
+  features = gene_list,
+  BPPARAM  = BPPARAM
+)
+
+# Smooth UCell scores in Harmony space
+# Smoothing is performed in Harmony space, not UMAP space.
+# This gives a neighborhood-level estimate of UP and DOWN activity.
+
+combined <- SmoothKNN(
+  obj             = combined,
+  signature.names = c("UP_Signature_UCell", "DOWN_Signature_UCell"),
+  reduction       = "harmony"
+)
+
+# Compute smoothed C1 EpiCore score
+# Formula:
+#   C1_Core = scale(scale(UP UCell kNN) - scale(DOWN UCell kNN))
+#
+# Interpretation:
+#   - Higher values = stronger C1-like epithelial state
+#   - Lower values  = stronger retained differentiated / lineage-like state
+#
+# Note:
+#   This is a smoothed neighborhood-level score.
+#   It is ideal for visualization, gradients, and trajectory/state analysis.
+
+md <- combined@meta.data
+
+up_z <- zscore(md$UP_Signature_UCell_kNN)
+down_z <- zscore(md$DOWN_Signature_UCell_kNN)
+
+combined$C1_Core_raw <- up_z - down_z
+combined$C1_Core <- zscore(up_z - down_z)
+
+# Clean temporary UCell columns
+# Keep only the final C1_Core score.
+# Remove both raw UCell and smoothed kNN UCell intermediate columns.
+
+cols_remove <- c(
+  "UP_Signature_UCell",
+  "DOWN_Signature_UCell",
+  "UP_Signature_UCell_kNN",
+  "DOWN_Signature_UCell_kNN"
+)
+
+cols_remove <- intersect(cols_remove, colnames(combined@meta.data))
+
+combined@meta.data <- combined@meta.data[
+  ,
+  setdiff(colnames(combined@meta.data), cols_remove),
+  drop = FALSE
+]
+
+# Stop backend
+
+bpstop(BPPARAM)
+
+```
+
+
+# Plot
+```{r}
+
+# Plot main continuous scores on UMAP
+score_umap_plot <- FeaturePlot_scCustom(
+  combined,
+  features = c("C1_Core", "CytoTRACE2","G2M.Score","S.Score"),
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c(option = "magma") &
+  labs(x = "UMAP1", y = "UMAP2") &
+  umap_theme
+
+score_umap_plot
+
+ggsave(
+  filename = "output/figures/score_umap_plot.png",
+  plot = score_umap_plot,
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+# Plot main continuous scores on UMAP
+C1_core_umap_plot <- FeaturePlot_scCustom(
+  combined,
+  features = c("C1_Core"),
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c(option = "magma") &
+  labs(x = "UMAP1", y = "UMAP2", title = "C1-Core") &
+  umap_theme
+
+C1_core_umap_plot
+
+ggsave(
+  filename = "output/figures/C1_core_UMAP.png",
+  plot = C1_core_umap_plot,
+  dpi = 600,
+  width = 10,
+  height = 6
+)
+
+
+DimPlot_scCustom( combined, reduction = "umap", group.by = "seurat_clusters") +
+  labs(x = "UMAP1", y = "UMAP2", title = "Leiden Clusters") +
+  umap_theme
+
+ggsave(
+  filename = "output/figures/seurat_clusters.png",
+  dpi = 600,
+  width = 10,
+  height = 6
+)
+ 
+DimPlot_scCustom( combined, reduction = "umap",group.by = "predicted.ann_level_1",label = T,label.box = T)  +
+  labs(x = "UMAP1", y = "UMAP2", title = "Annotation (HLCA)") +
+  umap_theme +
+  NoLegend()
+
+ggsave(
+  filename = "output/figures/AnnotationLV1.png",
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+
+DimPlot_scCustom( combined, reduction = "umap",group.by = "predicted.ann_finest_level",label = T,label.box = T,label.size = 3) +   
+  labs(x = "UMAP1", y = "UMAP2", title = "Annotation finest (HLCA)") +
+  umap_theme +
+  NoLegend()
+
+ggsave(
+  filename = "output/figures/AnnotationFINEST.png",
+  dpi = 600,
+  width = 24,
+  height = 18
+)
+
+
+DimPlot_scCustom( combined, reduction = "umap",group.by = "copykat.pred",label = T,label.box = T,label.size = 3) +   
+  labs(x = "UMAP1", y = "UMAP2", title = "CopyKat tumor annotation") +
+  umap_theme +
+  NoLegend()
+
+ggsave(
+  filename = "output/figures/Annotation_CopyKat.png",
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+
+DimPlot_scCustom(seurat_object = combined,group.by = "tmb_group") +   
+  labs(x = "UMAP1", y = "UMAP2", title = "TMB annotation") +
+  umap_theme +
+  scale_color_npg()
+
+ggsave(
+  filename = "output/figures/Annotation_tmb_group.png",
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+DimPlot_scCustom(seurat_object = combined,group.by = "smoking") +   
+  labs(x = "UMAP1", y = "UMAP2", title = "Smoking annotation") +
+  umap_theme +
+  scale_color_aaas()
+
+ggsave(
+  filename = "output/figures/Annotation_smoking.png",
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+p_A <- FeaturePlot_scCustom(
+  combined,
+  features = "C1_Core",
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c(option = "magma") &
+  labs(x = "UMAP1", y = "UMAP2", title = "C1-Core") &
+  umap_theme
+
+p_B <- DimPlot_scCustom(
+  combined,
+  reduction = "umap",
+  group.by = "copykat.pred"
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "CopyKat tumor annotation") +
+  umap_theme +
+  scale_color_bmj()
+
+p_C <- DimPlot_scCustom(
+  seurat_object = combined,
+  reduction = "umap",
+  group.by = "tmb_group"
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "TMB annotation") +
+  umap_theme +
+  scale_color_npg()
+
+p_D <- DimPlot_scCustom(
+  seurat_object = combined,
+  reduction = "umap",
+  group.by = "smoking"
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Smoking annotation") +
+  umap_theme +
+  scale_color_aaas()
+
+p_umap_annotations <- (p_A | p_B) / (p_C | p_D) +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    plot.tag = element_text(size = 18, face = "bold")
+  )
+
+p_umap_annotations
+
+ggsave(
+  filename = "output/figures/Full_umap_annotations_patchwork.png",
+  plot = p_umap_annotations,
+  width = 14,
+  height = 10,
+  dpi = 600
+)
+
+```
+
+# Epithelial only
+
+```{r}
+
+epithelial_labels <- c(
+  "AT1",
+  "AT2",
+  "AT2 proliferating",
+  "Basal resting",
+  "Club (nasal)",
+  "Club (non-nasal)",
+  "Goblet (nasal)",
+  "Ionocyte",
+  "Multiciliated (non-nasal)",
+  "SMG duct",
+  "SMG mucous",
+  "SMG serous (bronchial)",
+  "Suprabasal",
+  "Transitional Club-AT2",
+  "Tuft"
+)
+
+Epithelial_obj <- subset(
+  combined,
+  subset = predicted.ann_finest_level %in% epithelial_labels
+)
+
+Epithelial_obj$predicted.ann_finest_level <- droplevels(
+  factor(Epithelial_obj$predicted.ann_finest_level)
+)
+
+table(Epithelial_obj$predicted.ann_finest_level)
+ncol(Epithelial_obj)
+
+Epithelial_obj <- NormalizeData(Epithelial_obj)
+Epithelial_obj <- FindVariableFeatures(Epithelial_obj, nfeatures = 5000)
+Epithelial_obj <- ScaleData(Epithelial_obj)
+Epithelial_obj <- RunPCA(Epithelial_obj)
+
+PC_Plotting(Epithelial_obj, dim_number = 1)
+PC_Plotting(Epithelial_obj, dim_number = 2)
+ElbowPlot_scCustom(Epithelial_obj, ndims = 50)
+
+Epithelial_obj <- RunHarmony(
+  object = Epithelial_obj,
+  group.by.vars = "sample",
+  reduction.use = "pca",
+  dims.use = 1:42
+)
+
+Epithelial_obj <- FindNeighbors(
+  Epithelial_obj,
+  reduction = "harmony",
+  dims = 1:42
+)
+
+plan(multicore, workers = 4)
+Epithelial_obj <- RunUMAP(
+  object = Epithelial_obj,
+  reduction = "harmony",
+  dims = 1:42,
+  umap.method = "uwot2",
+  seed.use = 1234
+)
+
+```
+
+
+# Plot
+```{r}
+
+# Plot main continuous scores on UMAP
+score_umap_plot <- FeaturePlot_scCustom(
+  Epithelial_obj,
+  features = c("C1_Core", "CytoTRACE2","G2M.Score","S.Score"),
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c(option = "magma") &
+  labs(x = "UMAP1", y = "UMAP2") &
+  umap_theme
+
+score_umap_plot
+
+ggsave(
+  filename = "output/figures/Epithelial_obj_score_umap_plot.png",
+  plot = score_umap_plot,
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+# Plot main continuous scores on UMAP
+C1_core_umap_plot <- FeaturePlot_scCustom(
+  Epithelial_obj,
+  features = c("C1_Core"),
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c(option = "magma") &
+  labs(x = "UMAP1", y = "UMAP2", title = "C1-Core") &
+  umap_theme
+
+C1_core_umap_plot
+
+ggsave(
+  filename = "output/figures/Epithelial_obj_C1_core_UMAP.png",
+  plot = C1_core_umap_plot,
+  dpi = 600,
+  width = 10,
+  height = 6
+)
+
+
+DimPlot_scCustom( Epithelial_obj, reduction = "umap", group.by = "seurat_clusters") +
+  labs(x = "UMAP1", y = "UMAP2", title = "Leiden Clusters") +
+  umap_theme
+
+ggsave(
+  filename = "output/figures/Epithelial_obj_seurat_clusters.png",
+  dpi = 600,
+  width = 10,
+  height = 6
+)
+
+
+
+DimPlot_scCustom( Epithelial_obj, reduction = "umap",group.by = "predicted.ann_finest_level",label = T,label.box = T,label.size = 3) +   
+  labs(x = "UMAP1", y = "UMAP2", title = "Annotation finest (HLCA)") +
+  umap_theme +
+  NoLegend()
+
+ggsave(
+  filename = "output/figures/Epithelial_obj_AnnotationFINEST.png",
+  dpi = 600,
+  width = 24,
+  height = 18
+)
+
+DimPlot_scCustom( Epithelial_obj, reduction = "umap",group.by = "copykat.pred") +   
+  labs(x = "UMAP1", y = "UMAP2", title = "CopyKat tumor annotation") +
+  umap_theme
+
+ggsave(
+  filename = "output/figures/Epithelial_obj_Annotation_CopyKat.png",
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+
+DimPlot_scCustom(seurat_object = Epithelial_obj,group.by = "tmb_group") +   
+  labs(x = "UMAP1", y = "UMAP2", title = "TMB annotation") +
+  umap_theme +
+  scale_color_npg()
+
+ggsave(
+  filename = "output/figures/Epithelial_obj_Annotation_tmb_group.png",
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+DimPlot_scCustom(seurat_object = Epithelial_obj,group.by = "smoking") +   
+  labs(x = "UMAP1", y = "UMAP2", title = "Smoking annotation") +
+  umap_theme +
+  scale_color_aaas()
+
+ggsave(
+  filename = "output/figures/Epithelial_obj_Annotation_smoking.png",
+  dpi = 600,
+  width = 12,
+  height = 8
+)
+
+library(patchwork)
+library(ggsci)
+
+p_A <- FeaturePlot_scCustom(
+  Epithelial_obj,
+  features = "C1_Core",
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c(option = "magma") &
+  labs(x = "UMAP1", y = "UMAP2", title = "C1-Core") &
+  umap_theme
+
+p_B <- DimPlot_scCustom(
+  Epithelial_obj,
+  reduction = "umap",
+  group.by = "copykat.pred"
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "CopyKat tumor annotation") +
+  umap_theme +
+  scale_color_bmj()
+
+p_C <- DimPlot_scCustom(
+  seurat_object = Epithelial_obj,
+  reduction = "umap",
+  group.by = "tmb_group"
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "TMB annotation") +
+  umap_theme +
+  scale_color_npg()
+
+p_D <- DimPlot_scCustom(
+  seurat_object = Epithelial_obj,
+  reduction = "umap",
+  group.by = "smoking"
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Smoking annotation") +
+  umap_theme +
+  scale_color_aaas()
+
+p_umap_annotations <- (p_A | p_B) / (p_C | p_D) +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    plot.tag = element_text(size = 18, face = "bold")
+  )
+
+p_umap_annotations
+
+ggsave(
+  filename = "output/figures/epithelial_umap_annotations_patchwork.png",
+  plot = p_umap_annotations,
+  width = 14,
+  height = 10,
+  dpi = 600
+)
+
+DefaultAssay(Epithelial_obj) <- "RNA"
+
+p_A <- FeaturePlot_scCustom(
+  Epithelial_obj,
+  features = "C1_Core",
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c(option = "magma") &
+  labs(x = "UMAP1", y = "UMAP2", title = "C1-Core") &
+  umap_theme
+
+p_B <- FeaturePlot_scCustom(
+  Epithelial_obj,
+  features = "TEAD4",
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  labs(x = "UMAP1", y = "UMAP2", title = "TEAD4 expression") &
+  umap_theme
+
+DefaultAssay(Epithelial_obj) <- "tfsulm"
+
+p_C <- FeaturePlot_scCustom(
+  Epithelial_obj,
+  features = "TEAD4",
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  labs(x = "UMAP1", y = "UMAP2", title = "TEAD4 activity") &
+  umap_theme
+
+DefaultAssay(Epithelial_obj) <- "RNA"
+
+p_umap_annotations <- (p_A | p_B) / (p_C) +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    plot.tag = element_text(size = 18, face = "bold")
+  )
+
+p_umap_annotations
+
+ggsave(
+  filename = "output/figures/epithelial_TEAD4_umap_annotations_patchwork.png",
+  plot = p_umap_annotations,
+  width = 12,
+  height = 10,
+  dpi = 600
+)
+
+```
+
+# Show violin of diffent metadata
+```{r}
+
+library(FSA)
+library(ggpubr)
+
+df <- Epithelial_obj@meta.data |>
+  as_tibble() |>
+  mutate(
+    mutation = case_when(
+      egfr == "L858R" ~ "EGFR-L858R",
+      egfr == "19Del" ~ "EGFR-19Del",
+      egfr == "Wild" ~ "Other / EGFR-wild",
+      TRUE ~ paste0("EGFR-", egfr)
+    ),
+    patient_id = factor(patient_id),
+    mutation = factor(
+      mutation
+    ),
+    stage = factor(stage),
+    predicted.ann_finest_level = factor(predicted.ann_finest_level)
+  )
+
+pairwise.wilcox.test(
+  df$C1_Core,
+  df$egfr,
+  p.adjust.method = "BH"
+)
+
+# 1. STATISTICS
+pairwise.wilcox.test(df$C1_Core, df$predicted.ann_finest_level, p.adjust.method = "BH")
+
+library(rstatix)
+
+pwt <- df %>%
+  wilcox_test(C1_Core ~ predicted.ann_finest_level) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance()
+
+pwt
+
+write_csv(pwt, "output/tables/Epithelial_obj_C1_wilcox_test_cells.csv")
+
+dunn_res <- dunnTest(C1_Core ~ predicted.ann_finest_level, data = df, method = "bh")
+
+sig_dunn <- dunn_res$res %>%
+  as_tibble() %>%
+  separate(Comparison, c("group1","group2"), sep = " - ") %>%
+  filter(P.adj < 0.05) %>%
+  arrange(desc(Z)) %>%
+  mutate(direction = ifelse(Z > 0, "higher", "lower"))
+
+sig_dunn
+
+write_csv(sig_dunn, "output/tables/Epithelial_obj_C1_dunn_cells.csv")
+
+
+# 2. CELL TYPE PLOTS
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(RColorBrewer)
+library(patchwork)
+
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+cell_levels <- df %>%
+  group_by(predicted.ann_finest_level) %>%
+  summarise(med_C1 = median(C1_Core, na.rm = TRUE), .groups = "drop") %>%
+  arrange(med_C1) %>%
+  pull(predicted.ann_finest_level)
+
+pastel_cols <- setNames(
+  colorRampPalette(brewer.pal(9, "Pastel1"))(length(cell_levels)),
+  cell_levels
+)
+
+base_theme <- theme_pubclean(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    legend.position = "none"
+  )
+
+p1 <- ggplot(df, aes(predicted.ann_finest_level, C1_Core,
+                     fill = predicted.ann_finest_level,
+                     color = predicted.ann_finest_level)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.75, linewidth = 0.25) +
+  geom_boxplot(width = 0.13, outlier.shape = NA, fill = "white",
+               color = "black", linewidth = 0.35) +
+  scale_fill_manual(values = pastel_cols, drop = FALSE) +
+  scale_color_manual(values = pastel_cols, drop = FALSE) +
+  coord_flip() +
+  labs(
+    x = "Cell type",
+    y = "C1-Core",
+    title = "All cell types",
+    subtitle = "Azimuth::Lung v2 (HLCA) | Kruskal–Wallis p < 2e-16"
+  ) +
+  base_theme
+
+focus_cells <- c("AT2", "AT2 proliferating", "Basal resting", "Suprabasal")
+
+df_focus <- df %>%
+  filter(predicted.ann_finest_level %in% focus_cells) %>%
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level, levels = focus_cells))
+
+p2 <- ggplot(df_focus, aes(predicted.ann_finest_level, C1_Core,
+                           fill = predicted.ann_finest_level,
+                           color = predicted.ann_finest_level)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.75, linewidth = 0.25) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white",
+               color = "black", linewidth = 0.35) +
+  stat_compare_means(
+    comparisons = list(
+      c("AT2", "AT2 proliferating"),
+      c("Basal resting", "Suprabasal")
+    ),
+    method = "wilcox.test",
+    label = "p.format",
+    size = 4
+  ) +
+  scale_fill_manual(values = pastel_cols, drop = FALSE) +
+  scale_color_manual(values = pastel_cols, drop = FALSE) +
+  labs(
+    x = "Cell type",
+    y = "C1-Core",
+    title = "Focused epithelial populations",
+    subtitle = "Wilcoxon tests between selected groups"
+  ) +
+  base_theme
+
+comb <- (p1 | p2) +
+  plot_layout(widths = c(1.35, 1)) +
+  plot_annotation(
+    title = "C1-Core distribution across Azimuth lung cell annotations — GSE171145",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 17),
+      plot.subtitle = element_text(size = 12, color = "grey30")
+    )
+  )
+
+p1
+p2
+comb
+
+ggsave("output/figures/C1_Core_by_celltype.png", p1, width = 12, height = 8, dpi = 600)
+ggsave("output/figures/C1_Core_by_celltype_focus.png", p2, width = 10, height = 6, dpi = 600)
+ggsave("output/figures/C1_Core_by_celltype_Combined.png", comb, width = 15, height = 8, dpi = 600)
+
+
+# 3. ONCOGENIC MUTATION
+pairwise.wilcox.test(df$C1_Core, df$mutation, p.adjust.method = "BH")
+kruskal.test(C1_Core ~ mutation, data = df)
+
+dunn_res <- dunnTest(C1_Core ~ mutation, data = df, method = "bh")
+
+sig_dunn <- dunn_res$res %>%
+  as_tibble() %>%
+  separate(Comparison, c("group1","group2"), sep = " - ") %>%
+  filter(P.adj < 0.05) %>%
+  arrange(desc(Z)) %>%
+  mutate(direction = ifelse(Z > 0, "higher", "lower"))
+
+sig_dunn
+
+write_csv(sig_dunn,"output/tables/C1_dunn_mutation.csv")
+
+library(gt)
+table_mutation <- sig_dunn %>%
+  arrange(Z) %>%
+  gt() %>%
+  tab_header(
+    title = "Dunn’s Post-hoc Test Results",
+    subtitle = "Pairwise comparisons between Oncogenic Driver Mutation"
+  ) %>%
+  fmt_number(
+    columns = c(Z),
+    decimals = 2
+  ) %>%
+  fmt_scientific(
+    columns = c(P.unadj, P.adj),
+    decimals = 2
+  ) %>%
+  cols_label(
+    group1 = "Cell type 1",
+    group2 = "Cell type 2",
+    Z = "Z score",
+    P.unadj = "P (unadjusted)",
+    P.adj = "P (adjusted)",
+    direction = "Effect direction"
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_column_labels()
+  ) %>%
+  opt_table_lines() %>%
+  tab_options(
+    table.font.size = px(12)
+  )
+
+table_mutation
+
+table_mutation |> gtsave(filename = "output/figures/tab_mutation.png")
+
+mutation_comparisons <- list(
+  c("EGFR-19del", "EGFR-L858R"),
+  c("EGFR-19del", "Other / EGFR-wild"),
+  c("EGFR-L858R", "Other / EGFR-wild")
+)
+
+p3 <- ggplot(df, aes(mutation, C1_Core, fill = mutation)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.75, linewidth = 0.25) +
+  geom_boxplot(
+    width = 0.13,
+    outlier.shape = NA,
+    fill = "white",
+    color = "black",
+    linewidth = 0.35
+  ) +
+  stat_compare_means(
+    comparisons = mutation_comparisons,
+    method = "wilcox.test",
+    p.adjust.method = "BH",
+    label = "p.format",
+    size = 4
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    x = "Mutation",
+    y = "C1-Core",
+    title = "C1-Core by mutation mutation status",
+    subtitle = "Pairwise Wilcoxon tests with BH adjustment"
+  ) +
+  base_theme
+
+p3
+
+ggsave(
+  "output/figures/C1_Core_by_mutation.png",
+  p3,
+  width = 10,
+  height = 6,
+  dpi = 600
+)
+
+```
+
+```{r}
+
+plot_wilcox_violin <- function(
+  data,
+  x_col,
+  y_col,
+  title = NULL,
+  x_lab = NULL,
+  y_lab = NULL,
+  palette = "Set2",
+  output_file = NULL,
+  width = 10,
+  height = 8
+) {
+  x_col <- rlang::ensym(x_col)
+  y_col <- rlang::ensym(y_col)
+
+  plot_df <- data %>%
+    dplyr::filter(!is.na(!!x_col), !is.na(!!y_col)) %>%
+    dplyr::mutate(!!x_col := factor(!!x_col))
+
+  r_val <- wilcoxonRG(
+    x = dplyr::pull(plot_df, !!y_col),
+    g = dplyr::pull(plot_df, !!x_col),
+    verbose = FALSE
+  )
+
+  w_test <- wilcox.test(
+    stats::as.formula(paste(rlang::as_string(y_col), "~", rlang::as_string(x_col))),
+    data = plot_df
+  )
+
+  subtitle_text <- paste0(
+    "Wilcoxon p = ", format.pval(w_test$p.value, digits = 3),
+    " | RG = ", round(r_val, 2)
+  )
+
+  p <- ggplot(plot_df, aes(x = !!x_col, y = !!y_col, fill = !!x_col)) +
+    geom_violin(trim = TRUE, alpha = 0.25, color = NA) +
+    geom_boxplot(
+      width = 0.15,
+      fill = "white",
+      color = "black",
+      outlier.shape = NA,
+      linewidth = 0.4
+    ) +
+    scale_fill_brewer(palette = palette) +
+    theme_bw(base_size = 14) +
+    labs(
+      x = x_lab %||% rlang::as_string(x_col),
+      y = y_lab %||% rlang::as_string(y_col),
+      title = title %||% paste(rlang::as_string(y_col), "by", rlang::as_string(x_col)),
+      subtitle = subtitle_text
+    ) +
+    theme(
+      legend.position = "none",
+      axis.title = element_text(face = "bold"),
+      axis.text = element_text(color = "black")
+    )
+
+  if (!is.null(output_file)) {
+    ggsave(output_file, p, width = width, height = height, dpi = 600)
+  }
+
+  return(p)
+}
+
+```
+
+```{r}
+
+p3 <- plot_wilcox_violin(
+  data = df,
+  x_col = smoking,
+  y_col = C1_Core,
+  title = "C1-Core by smoking status",
+  x_lab = "Smoking status",
+  y_lab = "C1-Core",
+  output_file = "output/figures/C1_Core_by_smoking.png"
+)
+
+p3
+
+p4 <- plot_wilcox_violin(
+  data = df,
+  x_col = tmb_group,
+  y_col = C1_Core,
+  title = "C1-Core by TBM status",
+  x_lab = "TMB status",
+  y_lab = "C1-Core",
+  output_file = "output/figures/C1_Core_by_smoking.png"
+)
+
+p4
+
+
+```
+
+```{r}
+
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(ggpubr)
+library(broom)
+library(performance)
+library(emmeans)
+library(ggrepel)
+library(patchwork)
+library(RColorBrewer)
+library(forcats)
+
+meta <- Epithelial_obj@meta.data |>
+  as_tibble() |>
+  mutate(
+    mutation = case_when(
+      egfr == "L858R" ~ "EGFR-L858R",
+      egfr == "19Del" ~ "EGFR-19Del",
+      egfr == "Wild" ~ "Other / EGFR-wild",
+      TRUE ~ paste0("EGFR-", egfr)
+    ),
+    patient_id = factor(patient_id),
+    mutation = factor(
+      mutation
+    ),
+    stage = factor(stage),
+    predicted.ann_finest_level = factor(predicted.ann_finest_level)
+  )
+
+pastel_cols <- RColorBrewer::brewer.pal(max(3, nlevels(meta$mutation)), "Pastel2")
+names(pastel_cols) <- levels(meta$mutation)
+
+patient_summary <- meta |>
+  group_by(patient_id, mutation, stage, predicted.ann_finest_level) |>
+  summarise(
+    median_C1_Core = median(C1_Core, na.rm = TRUE),
+    n_cells = n(),
+    .groups = "drop"
+  ) |>
+  filter(n_cells >= 20) |>
+  droplevels()
+
+m_patient <- lm(
+  median_C1_Core ~ mutation + predicted.ann_finest_level,
+  data = patient_summary,
+  weights = n_cells
+)
+
+broom::tidy(m_patient, conf.int = TRUE)
+performance::check_collinearity(m_patient)
+emmeans::emmeans(m_patient, ~ mutation)
+
+patient_mutation_summary <- patient_summary |>
+  group_by(patient_id, mutation, stage) |>
+  summarise(
+    median_C1_Core = weighted.mean(median_C1_Core, w = n_cells, na.rm = TRUE),
+    n_cells = sum(n_cells),
+    .groups = "drop"
+  )
+
+p_patient <- ggplot(
+  patient_mutation_summary,
+  aes(x = mutation, y = median_C1_Core, fill = mutation)
+) +
+  geom_violin(trim = TRUE, alpha = 0.6, color = NA) +
+  geom_boxplot(
+    width = 0.13,
+    fill = "white",
+    color = "grey25",
+    outlier.shape = NA,
+    linewidth = 0.35
+  ) +
+  geom_point(
+    aes(size = n_cells, color = stage),
+    position = position_jitter(width = 0.08, height = 0),
+    alpha = 0.95
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = patient_id),
+    size = 3,
+    show.legend = FALSE,
+    max.overlaps = Inf
+  ) +
+  scale_fill_manual(values = pastel_cols) +
+  scale_size_continuous(range = c(2.5, 6)) +
+  ggpubr::theme_pubclean(base_size = 13) +
+  labs(
+    title = "Patient-level C1_Core by mutation group",
+    subtitle = "Each point is one patient",
+    x = "Mutation group",
+    y = "Weighted median C1_Core",
+    color = "Stage",
+    size = "Cells"
+  ) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey35"),
+    axis.text.x = element_text(angle = 25, hjust = 1)
+  )
+
+coef_df <- broom::tidy(m_patient, conf.int = TRUE) |>
+  filter(term != "(Intercept)", !is.na(estimate)) |>
+  mutate(
+    term_clean = term |>
+      gsub("mutation", "Mutation: ", x = _) |>
+      gsub("predicted.ann_finest_level", "Cell type: ", x = _),
+    term_clean = forcats::fct_reorder(term_clean, estimate)
+  )
+
+p_coef <- ggplot(coef_df, aes(x = estimate, y = term_clean)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey55") +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    height = 0.18,
+    linewidth = 0.45,
+    color = "grey35"
+  ) +
+  geom_point(size = 2.4, color = "grey20") +
+  ggpubr::theme_pubclean(base_size = 12) +
+  labs(
+    title = "Patient-level model effects",
+    subtitle = "Weighted model: median C1_Core ~ mutation group + epithelial subtype",
+    x = "Regression coefficient ± 95% CI",
+    y = NULL
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey35"),
+    axis.text.y = element_text(size = 8)
+  )
+
+p_slide <- p_patient | p_coef +
+  plot_annotation(
+    title = "C1_Core is associated with mutation group and epithelial cell state",
+    subtitle = "Patient/cell-state summaries reduce cell-level pseudoreplication and collinearity",
+    tag_levels = "A",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 16),
+      plot.subtitle = element_text(size = 11, color = "grey35"),
+      plot.tag = element_text(face = "bold", size = 15)
+    )
+  )
+
+p_slide
+
+ggsave(
+  "output/figures/C1_Core_patient_level_mutation_model_summary.png",
+  p_slide,
+  width = 15,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+
+```{r}
+
+qs_save(object = Epithelial_obj,compress_level = 8,file = "output/objects/Epithelial_obj_CopyKat.qs2", nthreads = 10)
+
+Epithelial_obj <- qs_read(file = "output/objects/Epithelial_obj.qs2", nthreads = 10)
+
+```
+
+

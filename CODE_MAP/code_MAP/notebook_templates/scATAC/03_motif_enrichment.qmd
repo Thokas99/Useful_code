@@ -1,0 +1,173 @@
+---
+title: "scATAC Motif Enrichment"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Run motif enrichment and chromVAR-style motif activity storage in a Signac object.
+
+## Packages
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/signac_integrated.qs"
+motif_database <- "path/to/motif_database.qs"
+output_object <- "path/to/signac_motifs.qs"
+results_dir <- "results/motif_enrichment"
+figures_dir <- "figures/motif_enrichment"
+assay_name <- "peaks"
+sample_column <- "sample_column"
+group_column <- "group_column"
+ident_column <- "seurat_clusters"
+condition_1 <- "condition_1"
+condition_2 <- "condition_2"
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+motifs <- qs2::qs_read(file = motif_database, nthreads = n_threads)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(sample_column, group_column, ident_column) %in% colnames(object[[]])))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+readr::write_tsv(tibble::tibble(cells = ncol(object), peaks = nrow(object)), file.path(results_dir, "motif_input_summary.tsv"))
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+object <- AddMotifs(object = object, genome = NULL, pfm = motifs)
+Idents(object) <- object[[group_column, drop = TRUE]]
+markers <- FindMarkers(object, ident.1 = condition_1, ident.2 = condition_2, only.pos = TRUE)
+motif_enrichment <- FindMotifs(object, features = rownames(markers))
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+readr::write_tsv(tibble::tibble(marker_peaks = nrow(markers), enriched_motifs = nrow(motif_enrichment)), file.path(results_dir, "motif_qc_summary.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "motif_region_stats.pdf"), width = 7, height = 4)
+print(RegionStats(object))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$motif_enrichment <- list(condition_1 = condition_1, condition_2 = condition_2, n_motifs = nrow(motif_enrichment))
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(tibble::as_tibble(motif_enrichment), file.path(results_dir, "motif_enrichment.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scatac-03-motif-enrichment-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, enriched_motifs = nrow(motif_enrichment))
+```

@@ -1,0 +1,2335 @@
+---
+title: "title example"
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    code-fold: true
+    code-summary: "Show code"
+    theme: lux
+    fig-width: 10
+    fig-height: 6
+    fig-align: center
+    df-print: paged
+execute:
+  echo: false
+  warning: false
+  message: false
+editor: source
+---
+
+# Setup
+
+```{r}
+#| label: setup
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+library(data.table)
+library(ggplot2)
+library(pheatmap)
+library(MOFA2)
+library(GSVA)
+library(singscore)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(future)
+library(tidyverse)
+library(fst)
+library(vroom)
+library(SecAct)
+library(singscore)
+
+
+# Keep choices explicit because these packages share common
+# function names used later in the notebook.
+conflicted::conflicts_prefer(
+  dplyr::filter,
+  dplyr::select,
+  dplyr::first,
+  janitor::clean_names,
+  base::intersect,
+  dplyr::count
+)
+
+N_WORKERS <- min(5, future::availableCores())
+if (N_WORKERS > 1) {
+  plan(multisession, workers = N_WORKERS)
+} else {
+  plan(sequential)
+}
+cat("Number of workers:", nbrOfWorkers(), "\n")
+
+RANDOM_SEED <- 1234
+
+dir.create("output/tables", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/objects", recursive = TRUE, showWarnings = FALSE)
+
+compute_cpm <- function(count_mat) {
+  dge <- edgeR::DGEList(counts = count_mat)
+  keep <- rowSums(edgeR::cpm(dge) > 1) >= 5
+  dge <- dge[keep, , keep.lib.sizes = FALSE]
+  dge <- edgeR::normLibSizes(dge, method = "TMMwsp")
+  edgeR::cpm(dge,  prior.count = 1)
+}
+
+compute_logcpm <- function(count_mat) {
+  dge <- edgeR::DGEList(counts = count_mat)
+  keep <- rowSums(edgeR::cpm(dge) > 1) >= 5
+  dge <- dge[keep, , keep.lib.sizes = FALSE]
+  dge <- edgeR::normLibSizes(dge, method = "TMMwsp")
+  edgeR::cpm(dge, log = TRUE, prior.count = 1)
+}
+
+library(tidyverse)
+library(gt)
+library(gtExtras)
+library(scales)
+
+plot_deconv_dunn_table <- function(
+  dunn_tbl,
+  deconv_col = NULL,
+  deconv_label = "Cell type",
+  title = "Dunn post-hoc comparisons across C1 consensus groups",
+  subtitle = "Only BH-adjusted significant pairwise comparisons are shown",
+  output_html = "Dunn_significant_comparisons.html",
+  save_html = TRUE,
+  table_id = "deconv_dunn_table"
+) {
+  
+  if (is.null(deconv_col)) {
+    if ("CIBERSORTx" %in% colnames(dunn_tbl)) {
+      deconv_col <- "CIBERSORTx"
+    } else if ("consensusTME" %in% colnames(dunn_tbl)) {
+      deconv_col <- "consensusTME"
+    } else {
+      stop("Could not find a deconvolution column. Expected either 'CIBERSORTx' or 'consensusTME'.")
+    }
+  }
+  
+  dunn_tbl_clean <- dunn_tbl %>%
+    mutate(
+      deconv_feature = .data[[deconv_col]],
+      comparison = paste(group1, "vs", group2),
+      direction = case_when(
+        statistic > 0 ~ paste0(group1, " higher"),
+        statistic < 0 ~ paste0(group2, " higher"),
+        TRUE ~ "No direction"
+      ),
+      p = as.numeric(p),
+      p.adj = as.numeric(p.adj),
+      statistic = round(statistic, 2),
+      p_display = scales::pvalue(p, accuracy = 0.001, add_p = FALSE),
+      p_adj_display = scales::pvalue(p.adj, accuracy = 0.001, add_p = FALSE),
+      p.adj.signif = factor(
+        p.adj.signif,
+        levels = c("*", "**", "***", "****")
+      )
+    ) %>%
+    arrange(.data$deconv_feature, .data$p.adj) %>%
+    select(
+      deconv_feature,
+      comparison,
+      direction,
+      n1,
+      n2,
+      statistic,
+      p,
+      p.adj,
+      p_display,
+      p_adj_display,
+      p.adj.signif
+    )
+  
+  gt_tbl <- dunn_tbl_clean %>%
+    gt(groupname_col = "deconv_feature", id = table_id) %>%
+    tab_header(
+      title = md(paste0("**", title, "**")),
+      subtitle = subtitle
+    ) %>%
+    cols_label(
+      comparison = "Comparison",
+      direction = "Direction",
+      n1 = "n1",
+      n2 = "n2",
+      statistic = "Dunn Z",
+      p_display = "p",
+      p_adj_display = "BH-adjusted p",
+      p.adj.signif = "Significance"
+    ) %>%
+    tab_spanner(
+      label = "Groups",
+      columns = c(comparison, direction, n1, n2)
+    ) %>%
+    tab_spanner(
+      label = "Statistics",
+      columns = c(statistic, p_display, p_adj_display, p.adj.signif)
+    ) %>%
+    data_color(
+      columns = statistic,
+      palette = "RdBu",
+      reverse = TRUE
+    ) %>%
+    data_color(
+      columns = p.adj,
+      colors = scales::col_numeric(
+        palette = c("#2166AC", "#F7F7F7"),
+        domain = c(0, 0.05)
+      )
+    ) %>%
+    cols_hide(columns = c(p, p.adj)) %>%
+    gtExtras::gt_theme_538(quiet = TRUE) %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_column_labels(everything())
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_row_groups()
+    ) %>%
+    tab_style(
+      style = cell_fill(color = "#F3F4F6"),
+      locations = cells_row_groups()
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_body(columns = p.adj.signif)
+    ) %>%
+    tab_options(
+      table.font.names = c("Arial", "Helvetica", "sans-serif"),
+      table.font.size = px(13),
+      heading.title.font.size = px(18),
+      heading.subtitle.font.size = px(13),
+      row_group.font.size = px(13),
+      row_group.font.weight = "bold",
+      column_labels.font.weight = "bold",
+      table.border.top.width = px(2),
+      table.border.bottom.width = px(2),
+      data_row.padding = px(5)
+    ) %>%
+    cols_align(
+      align = "center",
+      columns = c(n1, n2, statistic, p_display, p_adj_display, p.adj.signif)
+    ) %>%
+    cols_align(
+      align = "left",
+      columns = c(comparison, direction)
+    )
+  
+  if (save_html) {
+    gt::gtsave(
+      data = gt_tbl,
+      filename = output_html
+    )
+  }
+  
+  gt_tbl
+}
+
+
+```
+
+
+# RNA Preprocessing
+
+## RNA Identifier Harmonization
+
+### Map Ensembl IDs to HUGO Symbols
+
+```{r}
+
+library(biomaRt)
+library(dplyr)
+library(tibble)
+
+# -----------------------------
+# 1. Clean Ensembl IDs
+# -----------------------------
+RNA <- vroom::vroom("input/tables/RNAseq_TCGA_TUMOR_MATCHED.csv")
+
+sample_cols <- grep("^TCGA-", colnames(RNA), value = TRUE)
+
+RNA_clean <- RNA %>%
+  mutate(
+    ensembl_id_original = ensembl_id,
+    ensembl_id = sub("\\..*$", "", ensembl_id)
+  )
+
+ens_ids <- unique(RNA_clean$ensembl_id)
+
+duplicated_ensembl_before <- RNA_clean %>%
+  dplyr::count(ensembl_id, name = "n_rows") %>%
+  filter(n_rows > 1) %>%
+  arrange(desc(n_rows))
+
+print(duplicated_ensembl_before)
+
+RNA_ensembl_collapsed <- RNA_clean %>%
+  select(ensembl_id, all_of(sample_cols)) %>%
+  group_by(ensembl_id) %>%
+  summarise(
+    across(all_of(sample_cols), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+stopifnot(sum(duplicated(RNA_ensembl_collapsed$ensembl_id)) == 0)
+
+ens_ids <- unique(RNA_ensembl_collapsed$ensembl_id)
+
+
+# -----------------------------
+# 2. Query BioMart
+# -----------------------------
+
+mart <- useEnsembl(
+  biomart = "genes",
+  dataset = "hsapiens_gene_ensembl",
+  mirror = "useast"
+)
+
+gene_annot <- getBM(
+  attributes = c(
+    "ensembl_gene_id",
+    "hgnc_symbol",
+    "entrezgene_id",
+    "gene_biotype"
+  ),
+  filters = "ensembl_gene_id",
+  values = ens_ids,
+  mart = mart
+)
+
+gene_annot <- gene_annot %>%
+  rename(
+    ensembl_id = ensembl_gene_id,
+    gene_symbol = hgnc_symbol,
+    entrez_id = entrezgene_id
+  ) %>%
+  distinct(ensembl_id, gene_symbol, entrez_id, gene_biotype)
+
+duplicated_biomart_annotations <- gene_annot %>%
+  dplyr::count(ensembl_id, name = "n_annot_rows") %>%
+  filter(n_annot_rows > 1) %>%
+  arrange(desc(n_annot_rows))
+
+print(duplicated_biomart_annotations)
+
+gene_annot_one <- gene_annot %>%
+  mutate(
+    has_symbol = !is.na(gene_symbol) & gene_symbol != "",
+    has_entrez = !is.na(entrez_id),
+    is_protein_coding = gene_biotype == "protein_coding"
+  ) %>%
+  arrange(
+    ensembl_id,
+    desc(has_symbol),
+    desc(is_protein_coding),
+    desc(has_entrez),
+    gene_symbol,
+    entrez_id
+  ) %>%
+  group_by(ensembl_id) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(-has_symbol, -has_entrez, -is_protein_coding)
+
+stopifnot(sum(duplicated(gene_annot_one$ensembl_id)) == 0)
+
+RNA_annotated <- RNA_ensembl_collapsed %>%
+  left_join(gene_annot_one, by = "ensembl_id")
+
+stopifnot(nrow(RNA_annotated) == nrow(RNA_ensembl_collapsed))
+
+RNA_annotated <- RNA_clean %>%
+  left_join(gene_annot, by = "ensembl_id")
+
+mapping_summary <- RNA_annotated %>%
+  summarise(
+    n_input_ensembl = n(),
+    n_with_biomart_match = sum(!is.na(gene_biotype)),
+    n_without_biomart_match = sum(is.na(gene_biotype)),
+    n_with_gene_symbol = sum(!is.na(gene_symbol) & gene_symbol != ""),
+    n_without_gene_symbol = sum(is.na(gene_symbol) | gene_symbol == "")
+  )
+
+mapping_summary
+
+RNA_mapped <- RNA_annotated %>%
+  filter(!is.na(gene_symbol), gene_symbol != "")
+
+duplicated_gene_symbols <- RNA_mapped %>%
+  dplyr::count(gene_symbol, name = "n_ensembl_ids") %>%
+  filter(n_ensembl_ids > 1) %>%
+  arrange(desc(n_ensembl_ids))
+
+print(duplicated_gene_symbols)
+
+duplicated_gene_symbol_mapping <- RNA_mapped %>%
+  semi_join(duplicated_gene_symbols, by = "gene_symbol") %>%
+  select(ensembl_id, gene_symbol, entrez_id, gene_biotype) %>%
+  arrange(gene_symbol, ensembl_id)
+
+duplicated_gene_symbol_mapping
+
+
+RNA_gene_symbol <- RNA_mapped %>%
+  select(gene_symbol, all_of(sample_cols)) %>%
+  group_by(gene_symbol) %>%
+  summarise(
+    across(all_of(sample_cols), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+final_qc <- tibble(
+  original_rows = nrow(RNA),
+  ensembl_collapsed_rows = nrow(RNA_ensembl_collapsed),
+  annotated_rows = nrow(RNA_annotated),
+  mapped_rows_with_symbol = nrow(RNA_mapped),
+  final_gene_symbol_rows = nrow(RNA_gene_symbol),
+  n_samples = length(sample_cols),
+  duplicated_ensembl_after_collapse = sum(duplicated(RNA_ensembl_collapsed$ensembl_id)),
+  duplicated_gene_symbols_final = sum(duplicated(RNA_gene_symbol$gene_symbol)),
+  missing_gene_symbols_final = sum(is.na(RNA_gene_symbol$gene_symbol)),
+  empty_gene_symbols_final = sum(RNA_gene_symbol$gene_symbol == "")
+)
+
+print(final_qc)
+
+stopifnot(final_qc$duplicated_ensembl_after_collapse == 0)
+stopifnot(final_qc$duplicated_gene_symbols_final == 0)
+stopifnot(final_qc$missing_gene_symbols_final == 0)
+stopifnot(final_qc$empty_gene_symbols_final == 0)
+
+RNA_gene_symbol |>
+  fwrite(file = "input/tables/HUGO_RNAseq_TCGA_TUMOR_MATCHED.csv")
+
+```
+
+## RNA Expression Matrices
+
+### Build CPM and logCPM Matrices
+
+```{r}
+
+set.seed(RANDOM_SEED)
+
+rna_mat <- vroom("input/CLEAN_RNA_raw_counts_TCGA.csv") |>
+  column_to_rownames("gene")
+
+rna_cpm <- compute_cpm(rna_mat)
+rna_logcpm <- compute_logcpm(rna_mat)
+
+```
+
+# C1-Core Scoring
+
+## Transcriptome-Based C1-Core Scores
+
+### Scoring Setup
+
+```{r}
+
+# ============================================================
+# C1 CORE SCORING: singscore + GSVA + consensus
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(vroom)
+library(ggplot2)
+library(ggpubr)
+library(forcats)
+library(singscore)
+library(GSVA)
+
+set.seed(RANDOM_SEED)
+
+dir.create("output/tables", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+theme_set(theme_pubclean(base_size = 12))
+
+pastel_score_cols <- c(
+  "singscore" = "#9ecae1",
+  "GSVA" = "#fdae6b",
+  "consensus" = "#a1d99b"
+)
+
+pastel_group_cols <- c(
+  "Not-C1-like" = "#bcbddc",
+  "Not-C1-intermediate" = "#c7e9c0",
+  "C1-intermediate" = "#fdd0a2",
+  "C1-like" = "#fcbba1"
+)
+
+class_from_z <- function(x) {
+  case_when(
+    x > 1 ~ "C1-like",
+    x > 0 & x <= 1 ~ "C1-intermediate",
+    x >= -1 & x <= 0 ~ "Not-C1-intermediate",
+    x < -1 ~ "Not-C1-like",
+    TRUE ~ NA_character_
+  )
+}
+
+scale_numeric <- function(x) {
+  as.numeric(scale(x))
+}
+
+c1_group_levels <- c(
+  "Not-C1-like",
+  "Not-C1-intermediate",
+  "C1-intermediate",
+  "C1-like"
+)
+
+```
+
+### Prepare C1-Core Signature Inputs
+
+```{r}
+
+# ============================================================
+# 1. Prepare expression matrix and C1-core genes
+# ============================================================
+
+c1_core <- vroom(
+  "input/tables/C1_Core_signature.csv",
+  show_col_types = FALSE
+)
+
+c1_core_genes <- c1_core |>
+  filter(C1_Core_direction %in% c("UP", "DOWN")) |>
+  mutate(
+    C1_Core_direction = toupper(C1_Core_direction)
+  ) |>
+  distinct(gene, C1_Core_direction)
+
+c1_core_up <- c1_core_genes |>
+  filter(C1_Core_direction == "UP") |>
+  pull(gene) |>
+  unique()
+
+c1_core_down <- c1_core_genes |>
+  filter(C1_Core_direction == "DOWN") |>
+  pull(gene) |>
+  unique()
+
+c1_core_up_found <- intersect(c1_core_up, rownames(rna_logcpm))
+c1_core_down_found <- intersect(c1_core_down, rownames(rna_logcpm))
+
+c1_gene_coverage <- tibble(
+  set = c("UP", "DOWN"),
+  requested = c(length(c1_core_up), length(c1_core_down)),
+  found = c(length(c1_core_up_found), length(c1_core_down_found)),
+  missing = c(
+    paste(base::setdiff(c1_core_up, rownames(rna_logcpm)), collapse = ";"),
+    paste(base::setdiff(c1_core_down, rownames(rna_logcpm)), collapse = ";")
+  )
+)
+
+c1_gene_coverage
+
+write.csv(
+c1_gene_coverage,
+  "output/tables/C1_core_gene_coverage.csv",
+  row.names = FALSE
+)
+
+```
+
+### singscore-Based C1-Core Scoring
+
+```{r}
+
+# ============================================================
+# 2. singscore C1-core scoring
+# ============================================================
+
+rank_data <- rankGenes(rna_logcpm)
+
+c1_singscore_raw <- simpleScore(
+  rankData = rank_data,
+  upSet = c1_core_up_found,
+  downSet = c1_core_down_found
+)
+
+c1_singscore <- c1_singscore_raw |>
+  as.data.frame() |>
+  rownames_to_column("sample") |>
+  transmute(
+    sample,
+    singscore_TotalScore = TotalScore,
+    singscore_UpScore = UpScore,
+    singscore_DownScore = DownScore,
+    singscore_TotalScore_check = UpScore + DownScore,
+    C1_singscore = scale_numeric(TotalScore)
+  )
+
+c1_singscore_check <- c1_singscore |>
+  summarise(
+    max_abs_diff_TotalScore = max(
+      abs(singscore_TotalScore - singscore_TotalScore_check),
+      na.rm = TRUE
+    )
+  )
+
+c1_singscore_check
+
+```
+
+### GSVA-Based C1-Core Scoring
+
+```{r}
+
+# ============================================================
+# 3. GSVA C1-core scoring
+# ============================================================
+
+c1_gene_sets <- list(
+  C1_core_UP = c1_core_up_found,
+  C1_core_DOWN = c1_core_down_found
+)
+
+gsva_par <- gsvaParam(
+  exprData = rna_logcpm,
+  geneSets = c1_gene_sets,
+  kcdf = "Gaussian"
+)
+
+gsva_score_mat <- gsva(gsva_par)
+
+c1_gsva <- gsva_score_mat |>
+  as.data.frame() |>
+  rownames_to_column("gene_set") |>
+  pivot_longer(
+    cols = -gene_set,
+    names_to = "sample",
+    values_to = "gsva_score"
+  ) |>
+  pivot_wider(
+    names_from = gene_set,
+    values_from = gsva_score
+  ) |>
+  mutate(
+    GSVA_UP_z = scale_numeric(C1_core_UP),
+    GSVA_DOWN_z = scale_numeric(C1_core_DOWN),
+    C1_GSVA_raw = GSVA_UP_z - GSVA_DOWN_z,
+    C1_GSVA = scale_numeric(C1_GSVA_raw)
+  ) |>
+  select(
+    sample,
+    GSVA_UP = C1_core_UP,
+    GSVA_DOWN = C1_core_DOWN,
+    GSVA_UP_z,
+    GSVA_DOWN_z,
+    C1_GSVA_raw,
+    C1_GSVA
+  )
+
+```
+
+### Consensus C1-Core Score
+
+```{r}
+
+# ============================================================
+# 4. Consensus score
+# ============================================================
+
+c1_score_tbl <- c1_singscore |>
+  inner_join(c1_gsva, by = "sample") |>
+  mutate(
+    C1_consensus = scale_numeric(rowMeans(
+      cbind(C1_singscore, C1_GSVA),
+      na.rm = TRUE
+    )),
+    C1_singscore_group = factor(class_from_z(C1_singscore), levels = c1_group_levels),
+    C1_GSVA_group = factor(class_from_z(C1_GSVA), levels = c1_group_levels),
+    C1_consensus_group = factor(class_from_z(C1_consensus), levels = c1_group_levels)
+  ) |>
+  as_tibble()
+
+write.csv(
+  c1_score_tbl,
+  "output/tables/C1_core_singscore_GSVA_consensus_scores.csv",
+  row.names = FALSE
+)
+
+c1_score_summary <- c1_score_tbl |>
+  summarise(
+    n_samples = n(),
+    spearman_singscore_gsva = cor(C1_singscore, C1_GSVA, method = "spearman"),
+    spearman_singscore_consensus = cor(C1_singscore, C1_consensus, method = "spearman"),
+    spearman_gsva_consensus = cor(C1_GSVA, C1_consensus, method = "spearman")
+  )
+
+c1_score_summary
+
+write.csv(
+  c1_score_summary,
+  "output/tables/C1_core_score_method_correlations.csv",
+  row.names = FALSE
+)
+
+library(GGally)
+p <- ggpairs(data = c1_score_tbl, columns = c("C1_singscore","C1_GSVA","C1_consensus"),
+  lower = list(continuous = wrap("smooth_loess", se = T, color = "lightblue", alpha = 0.5)),
+  upper = list(continuous = wrap("cor", size = 10,method = "spearman")),
+  diag = list(continuous = wrap("densityDiag"))
+) + 
+  theme_bw(base_size = 15)
+
+p
+
+c1_score_tbl |>
+  count(C1_singscore_group)
+
+c1_score_tbl |>
+  count(C1_GSVA_group)
+
+c1_score_tbl |>
+  count(C1_consensus_group)
+
+```
+
+# Additional Functional Readouts
+
+## Metabolic Flux
+
+### METAFlux
+
+```{r}
+set.seed(RANDOM_SEED)
+
+library(METAFlux)
+
+expr_metaflux <- log2(rna_cpm + 1)
+
+# medium file for human derived samples
+data("human_blood")
+data("human_gem")
+#Calculate mras for human sample data
+scores<-calculate_reaction_score(expr_metaflux)
+#Calculate flux for human sample data
+flux<-compute_flux(mras=scores,medium=human_blood) 
+
+#optional: flux scores cubic root normalization
+cbrt <- function(x) {
+    sign(x) * abs(x)^(1/3)
+}
+
+flux=cbrt(flux)
+
+flux |>
+  as.data.frame() |>
+  rownames_to_column("flux") |>
+  write_fst("output/tables/LUAD_METAFlux_Flux.fst")
+
+flux <- read_fst("output/tables/LUAD_METAFlux_Flux.fst") |>
+  column_to_rownames("flux")
+
+data("nutrient_lookup_files")
+
+library(dplyr)
+
+subsystem_map <- human_gem |>
+  select(ID, SUBSYSTEM) |>
+  filter(
+    ID %in% rownames(flux),
+    !is.na(SUBSYSTEM),
+    SUBSYSTEM != ""
+  )
+
+flux_sub <- flux[subsystem_map$ID, , drop = FALSE]
+
+pathway_sum <- rowsum(
+  x = abs(flux_sub),
+  group = subsystem_map$SUBSYSTEM,
+  reorder = FALSE
+)
+
+n_rxn <- table(subsystem_map$SUBSYSTEM)
+
+pathway_score <- sweep(
+  pathway_sum,
+  1,
+  n_rxn[rownames(pathway_sum)],
+  "/"
+)
+
+pathway_score |>
+  as.data.frame() |>
+  rownames_to_column("flux") |>
+  fwrite("output/tables/LUAD_METAFlux_pathway_score.csv")
+
+
+```
+
+## Transcription Factor Activity
+
+### decoupleR
+
+```{r}
+
+
+set.seed(RANDOM_SEED)
+net <- decoupleR::get_collectri(organism = 'human', 
+                                split_complexes = FALSE)
+
+net
+
+sample_acts <- decoupleR::run_mlm(mat = rna_mat, 
+                                  net = net, 
+                                  .source = 'source', 
+                                  .target = 'target',
+                                  .mor = 'mor', 
+                                  minsize = 5)
+
+sample_acts
+
+sample_acts_mat <- sample_acts %>%
+  tidyr::pivot_wider(
+    id_cols = source,
+    names_from = condition,
+    values_from = score
+  )
+
+fwrite(sample_acts_mat, "input/tables/TF_activity_TCGA_TUMOR_MATCHED.csv")
+
+```
+
+## Cytokine Activity
+
+### SecAct
+
+```{r}
+library(SecAct)
+set.seed(RANDOM_SEED)
+# SecAct infers cytokine activity from the matched RNA-seq matrix.
+SecAct_scores <- SecAct.activity.inference(rna_mat, sigMatrix = "SecAct-Lung-Adeno")$zscore |>
+  t() |>
+  as.data.frame() |>
+  tibble::rownames_to_column("sample") |>
+  as_tibble()
+
+SecAct_scores
+
+fwrite(SecAct_scores, "input/tables/TCGA_SecAct_scores.csv")
+
+```
+
+
+# RNA Deconvolution
+
+## ConsensusTME
+
+### Run ConsensusTME Across Methods
+
+```{r}
+library(ConsensusTME)
+
+CTME_deconv_ssgsea <- consensusTMEAnalysis(rna_logcpm, cancer = "LUAD", statMethod = "ssgsea") |>
+  as.data.frame()
+head(CTME_deconv_ssgsea)
+
+CTME_deconv_gsva <- consensusTMEAnalysis(rna_logcpm, cancer = "LUAD", statMethod = "gsva") |>
+  as.data.frame()
+head(CTME_deconv_gsva)
+
+CTME_deconv_singScore <- consensusTMEAnalysis(rna_logcpm, cancer = "LUAD", statMethod = "singScore") |>
+  as.data.frame()
+head(CTME_deconv_singScore)
+
+```
+
+
+### Compare ConsensusTME Methods
+
+```{r}
+
+library(tidyverse)
+library(patchwork)
+
+# Extract matrices
+CTME_gsva <- as.matrix(CTME_deconv_gsva)
+CTME_ssgsea <- as.matrix(CTME_deconv_ssgsea)
+
+CTME_sing <- if (is.list(CTME_deconv_singScore) && "Scores" %in% names(CTME_deconv_singScore)) {
+  as.matrix(CTME_deconv_singScore$Scores)
+} else {
+  as.matrix(CTME_deconv_singScore)
+}
+
+# Fix sample names if singScore was converted with as.data.frame()
+colnames(CTME_sing) <- gsub("^Scores\\.", "", colnames(CTME_sing))
+colnames(CTME_sing) <- gsub("\\.", "-", colnames(CTME_sing))
+
+# Match features and samples
+common_celltypes <- Reduce(
+  intersect,
+  list(
+    rownames(CTME_gsva),
+    rownames(CTME_ssgsea),
+    rownames(CTME_sing)
+  )
+)
+
+common_samples <- Reduce(
+  intersect,
+  list(
+    colnames(CTME_gsva),
+    colnames(CTME_ssgsea),
+    colnames(CTME_sing)
+  )
+)
+
+CTME_gsva <- CTME_gsva[common_celltypes, common_samples, drop = FALSE]
+CTME_ssgsea <- CTME_ssgsea[common_celltypes, common_samples, drop = FALSE]
+CTME_sing <- CTME_sing[common_celltypes, common_samples, drop = FALSE]
+
+same_celltype_cor <- tibble(
+  cell_type = common_celltypes,
+  gsva_vs_singScore = diag(cor(
+    t(CTME_gsva),
+    t(CTME_sing),
+    method = "spearman",
+    use = "pairwise.complete.obs"
+  )),
+  ssgsea_vs_singScore = diag(cor(
+    t(CTME_ssgsea),
+    t(CTME_sing),
+    method = "spearman",
+    use = "pairwise.complete.obs"
+  )),
+  ssgsea_vs_gsva = diag(cor(
+    t(CTME_ssgsea),
+    t(CTME_gsva),
+    method = "spearman",
+    use = "pairwise.complete.obs"
+  ))
+) |>
+  pivot_longer(
+    cols = -cell_type,
+    names_to = "comparison",
+    values_to = "spearman_rho"
+  ) |>
+  mutate(
+    comparison = recode(
+      comparison,
+      gsva_vs_singScore = "GSVA vs singScore",
+      ssgsea_vs_singScore = "ssGSEA vs singScore",
+      ssgsea_vs_gsva = "ssGSEA vs GSVA"
+    )
+  )
+
+same_celltype_cor
+
+same_celltype_cor |>
+  group_by(comparison) |>
+  summarise(
+    mean_rho = mean(spearman_rho, na.rm = TRUE),
+    median_rho = median(spearman_rho, na.rm = TRUE),
+    min_rho = min(spearman_rho, na.rm = TRUE),
+    max_rho = max(spearman_rho, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_same <- ggplot(
+  same_celltype_cor,
+  aes(x = reorder(cell_type, spearman_rho), y = spearman_rho)
+) +
+  geom_col(width = 0.75) +
+  coord_flip() +
+  facet_wrap(~ comparison, nrow = 1) +
+  ylim(0, 1) +
+  labs(
+    title = "Same-cell-type agreement across ConsensusTME scoring methods",
+    x = NULL,
+    y = "Spearman rho across samples"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+p_same
+
+```
+
+### Export the ConsensusTME singScore Matrix
+
+```{r}
+
+CTME_deconv_singScore <- consensusTMEAnalysis(rna_logcpm, cancer = "LUAD", statMethod = "singScore") |>
+  as.data.frame()
+
+colnames(CTME_deconv_singScore) <- colnames(rna_logcpm)
+
+CTME_deconv_singScore <- CTME_deconv_singScore |>
+  rownames_to_column("consensusTME") |>
+  as_tibble()
+
+head(CTME_deconv_singScore)
+
+vroom::vroom_write(x = CTME_deconv_singScore, file = "input/tables/consensusTME_TCGA_TUMOR_MATCHED.csv")
+
+
+```
+
+### ConsensusTME by C1-Core Group
+
+```{r}
+
+library(tidyverse)
+library(ggsci)
+library(ggpubr)
+library(rstatix)
+
+# Convert deconvolution matrix from wide to long format
+ctme_long <- CTME_deconv_singScore %>%
+  pivot_longer(
+    cols = -consensusTME,
+    names_to = "sample",
+    values_to = "score"
+  ) %>%
+  left_join(
+    c1_score_tbl %>%
+      select(sample, C1_consensus, C1_consensus_group),
+    by = "sample"
+  ) %>%
+  filter(!is.na(C1_consensus_group))
+
+# Check group order
+levels(ctme_long$C1_consensus_group)
+
+ctme_long <- ctme_long %>%
+  mutate(
+    C1_consensus_group = factor(
+      C1_consensus_group,
+      levels = c(
+        "Not-C1-like",
+        "Not-C1-intermediate",
+        "C1-intermediate",
+        "C1-like"
+      )
+    )
+  ) |>
+    filter(consensusTME != "Immune_Score")
+
+p_ctme_violin <- ggplot(
+  ctme_long,
+  aes(
+    x = C1_consensus_group,
+    y = score,
+    fill = C1_consensus_group
+  )
+) +
+  geom_violin(
+    trim = TRUE,
+    alpha = 0.75,
+    color = "grey30",
+    linewidth = 0.25
+  ) +
+  geom_boxplot(
+    width = 0.16,
+    outlier.shape = NA,
+    alpha = 0.85,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  facet_wrap(
+    ~ consensusTME,
+    scales = "free_y",
+    ncol = 4
+  ) +
+  scale_fill_npg() +
+  labs(
+    title = "ConsensusTME singScore deconvolution by C1 consensus group",
+    x = NULL,
+    y = "ConsensusTME singScore",
+    fill = "C1 consensus group"
+  ) +
+  stat_compare_means() +
+  theme_pubclean(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+p_ctme_violin
+
+ggsave(filename = "output/figures/TCGA_LUAD_consensusTME.png",plot = p_ctme_violin,width = 24,height = 20,dpi = 600)
+
+```
+
+### ConsensusTME Dunn Post-hoc Testing
+
+```{r}
+
+
+CTME_dunn <- ctme_long %>%
+  group_by(consensusTME) %>%
+  dunn_test(
+    score ~ C1_consensus_group,
+    p.adjust.method = "BH"
+  ) %>%
+  ungroup() %>%
+  add_significance("p.adj") %>%
+  filter(p.adj.signif != "ns") |>
+  arrange(consensusTME, p.adj)
+
+CTME_dunn
+
+vroom::vroom_write(
+  CTME_dunn,
+  "output/tables/TCGA_LUAD_consensusTME_dunn_by_C1_group.csv"
+)
+
+consensusTME_dunn_gt <- plot_deconv_dunn_table(
+  dunn_tbl = CTME_dunn,
+  deconv_col = "consensusTME",
+  title = "consensusTME immune cell differences across C1 consensus groups",
+  subtitle = "Dunn post-hoc test after Kruskal-Wallis; BH-adjusted significant comparisons only",
+  output_html = "consensusTME_Dunn_significant_comparisons.html",
+  save_html = TRUE,
+  table_id = "consensusTME_dunn_table"
+)
+
+consensusTME_dunn_gt
+
+```
+
+### ConsensusTME Extreme-Group Comparison
+
+```{r}
+
+ctme_extreme <- ctme_long %>%
+  filter(C1_consensus_group %in% c("Not-C1-like", "C1-like")) %>%
+  mutate(
+    C1_consensus_group = factor(
+      C1_consensus_group,
+      levels = c("Not-C1-like", "C1-like")
+    )
+  )
+
+p_ctme_extreme <- ggplot(
+  ctme_extreme,
+  aes(
+    x = C1_consensus_group,
+    y = score,
+    fill = C1_consensus_group
+  )
+) +
+  geom_violin(
+    trim = FALSE,
+    alpha = 0.75,
+    color = "grey30",
+    linewidth = 0.25
+  ) +
+  geom_boxplot(
+    width = 0.18,
+    outlier.shape = NA,
+    alpha = 0.85,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  stat_compare_means(
+    size = 4
+  ) +
+  facet_wrap(
+    ~ consensusTME,
+    scales = "free_y",
+    ncol = 4
+  ) +
+  scale_fill_npg() +
+  labs(
+    title = "ConsensusTME singScore deconvolution: Not-C1-like vs C1-like",
+    x = NULL,
+    y = "ConsensusTME singScore",
+    fill = "C1 consensus group"
+  ) +
+  theme_pubclean(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+p_ctme_extreme
+
+ggsave(
+  filename = "output/figures/TCGA_LUAD_consensusTME_Not_C1_like_vs_C1_like.png",
+  plot = p_ctme_extreme,
+  width = 24,
+  height = 20,
+  dpi = 600
+)
+
+```
+
+
+## CIBERSORTx
+
+### Load CIBERSORTx Results
+
+```{r}
+
+CIBERSORTx <- vroom("input/CIBERSORTx_Job6_Results.csv") |>
+  as.data.frame() |>
+  column_to_rownames("Mixture") |>
+  select(-`P-value`, -`Absolute score (sig.score)`, -RMSE, -Correlation)
+
+```
+
+### CIBERSORTx by C1-Core Group
+
+```{r}
+
+library(tidyverse)
+library(ggsci)
+library(ggpubr)
+library(rstatix)
+
+# Convert deconvolution matrix from wide to long format
+ctme_long <- CIBERSORTx %>%
+  t() |>
+  as.data.frame() |>
+  rownames_to_column("consensusTME") |>
+  pivot_longer(
+    cols = -consensusTME,
+    names_to = "sample",
+    values_to = "score"
+  ) %>%
+  left_join(
+    c1_score_tbl %>%
+      select(sample, C1_consensus, C1_consensus_group),
+    by = "sample"
+  ) %>%
+  filter(!is.na(C1_consensus_group))
+
+# Check group order
+levels(ctme_long$C1_consensus_group)
+
+ctme_long <- ctme_long %>%
+  mutate(
+    C1_consensus_group = factor(
+      C1_consensus_group,
+      levels = c(
+        "Not-C1-like",
+        "Not-C1-intermediate",
+        "C1-intermediate",
+        "C1-like"
+      )
+    )
+  ) |>
+    filter(consensusTME != "Immune_Score")
+
+p_ctme_violin <- ggplot(
+  ctme_long,
+  aes(
+    x = C1_consensus_group,
+    y = score,
+    fill = C1_consensus_group
+  )
+) +
+  geom_violin(
+    trim = TRUE,
+    alpha = 0.75,
+    color = "grey30",
+    linewidth = 0.25
+  ) +
+  geom_boxplot(
+    width = 0.16,
+    outlier.shape = NA,
+    alpha = 0.85,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  facet_wrap(
+    ~ consensusTME,
+    scales = "free_y",
+    ncol = 4
+  ) +
+  scale_fill_npg() +
+  labs(
+    title = "CIBERSORTx singScore deconvolution by C1 consensus group",
+    x = NULL,
+    y = "CIBERSORTx singScore",
+    fill = "C1 consensus group"
+  ) +
+  stat_compare_means() +
+  theme_pubclean(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+p_ctme_violin
+
+ggsave(filename = "output/figures/TCGA_LUAD_CIBERSORTx.png",plot = p_ctme_violin,width = 24,height = 20,dpi = 600)
+
+```
+
+### CIBERSORTx Dunn Post-hoc Testing
+
+```{r}
+
+library(gt)
+library(gtExtras)
+
+CIBERSORTx_dunn <- ctme_long %>%
+  dplyr::rename("CIBERSORTx" = "consensusTME")|>
+  group_by(CIBERSORTx) %>%
+  dunn_test(
+    score ~ C1_consensus_group,
+    p.adjust.method = "BH"
+  ) %>%
+  ungroup() %>%
+  add_significance("p.adj") %>%
+  filter(p.adj.signif != "ns") |>
+  arrange(CIBERSORTx, p.adj)
+
+CIBERSORTx_dunn
+
+vroom::vroom_write(
+  CIBERSORTx_dunn,
+  "output/tables/TCGA_LUAD_CIBERSORTx_dunn_by_C1_group.csv"
+)
+
+library(tidyverse)
+library(gt)
+library(gtExtras)
+library(scales)
+
+plot_cibersortx_dunn_table <- function(
+  ctme_dunn,
+  title = "CIBERSORTx Dunn post-hoc comparisons across C1 consensus groups",
+  subtitle = "Only BH-adjusted significant pairwise comparisons are shown",
+  output_html = "CIBERSORTx_Dunn_significant_comparisons.html",
+  save_html = TRUE
+) {
+  
+  dunn_tbl <- ctme_dunn %>%
+    mutate(
+      comparison = paste(group1, "vs", group2),
+      direction = case_when(
+        statistic > 0 ~ paste0(group1, " higher"),
+        statistic < 0 ~ paste0(group2, " higher"),
+        TRUE ~ "No direction"
+      ),
+      p = as.numeric(p),
+      p.adj = as.numeric(p.adj),
+      statistic = round(statistic, 2),
+      p_display = scales::pvalue(p, accuracy = 0.001, add_p = FALSE),
+      p_adj_display = scales::pvalue(p.adj, accuracy = 0.001, add_p = FALSE),
+      p.adj.signif = factor(
+        p.adj.signif,
+        levels = c("*", "**", "***", "****")
+      )
+    ) %>%
+    arrange(CIBERSORTx, p.adj) %>%
+    select(
+      CIBERSORTx,
+      comparison,
+      direction,
+      n1,
+      n2,
+      statistic,
+      p,
+      p.adj,
+      p_display,
+      p_adj_display,
+      p.adj.signif
+    )
+  
+  gt_tbl <- dunn_tbl %>%
+    gt(groupname_col = "CIBERSORTx") %>%
+    tab_header(
+      title = md(paste0("**", title, "**")),
+      subtitle = subtitle
+    ) %>%
+    cols_label(
+      comparison = "Comparison",
+      direction = "Direction",
+      n1 = "n1",
+      n2 = "n2",
+      statistic = "Dunn Z",
+      p_display = "p",
+      p_adj_display = "BH-adjusted p",
+      p.adj.signif = "Significance"
+    ) %>%
+    tab_spanner(
+      label = "Groups",
+      columns = c(comparison, direction, n1, n2)
+    ) %>%
+    tab_spanner(
+      label = "Statistics",
+      columns = c(statistic, p_display, p_adj_display, p.adj.signif)
+    ) %>%
+    data_color(
+      columns = statistic,
+      palette = "RdBu",
+      reverse = TRUE
+    ) %>%
+    data_color(
+      columns = p.adj,
+      colors = scales::col_numeric(
+        palette = c("#2166AC", "#F7F7F7"),
+        domain = c(0, 0.05)
+      )
+    ) %>%
+    cols_hide(columns = c(p, p.adj)) %>%
+    gtExtras::gt_theme_538() %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_column_labels(everything())
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_row_groups()
+    ) %>%
+    tab_style(
+      style = cell_fill(color = "#F3F4F6"),
+      locations = cells_row_groups()
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_body(columns = p.adj.signif)
+    ) %>%
+    tab_options(
+      table.font.names = c("Arial", "Helvetica", "sans-serif"),
+      table.font.size = px(13),
+      heading.title.font.size = px(18),
+      heading.subtitle.font.size = px(13),
+      row_group.font.size = px(13),
+      row_group.font.weight = "bold",
+      column_labels.font.weight = "bold",
+      table.border.top.width = px(2),
+      table.border.bottom.width = px(2),
+      data_row.padding = px(5)
+    ) %>%
+    cols_align(
+      align = "center",
+      columns = c(n1, n2, statistic, p_display, p_adj_display, p.adj.signif)
+    ) %>%
+    cols_align(
+      align = "left",
+      columns = c(comparison, direction)
+    )
+  
+  if (save_html) {
+    gtsave(
+      data = gt_tbl,
+      filename = output_html
+    )
+  }
+  
+  gt_tbl
+}
+
+cibersortx_dunn_gt <- plot_cibersortx_dunn_table(
+  ctme_dunn = CIBERSORTx_dunn,
+  title = "CIBERSORTx immune cell differences across C1 consensus groups",
+  subtitle = "Dunn post-hoc test after Kruskal-Wallis; BH-adjusted significant comparisons only",
+  output_html = "CIBERSORTx_Dunn_significant_comparisons.html",
+  save_html = TRUE
+)
+
+cibersortx_dunn_gt
+
+```
+
+### CIBERSORTx Extreme-Group Comparison
+
+```{r}
+
+ctme_extreme <- ctme_long %>%
+  filter(C1_consensus_group %in% c("Not-C1-like", "C1-like")) %>%
+  mutate(
+    C1_consensus_group = factor(
+      C1_consensus_group,
+      levels = c("Not-C1-like", "C1-like")
+    )
+  )
+
+p_ctme_extreme <- ggplot(
+  ctme_extreme,
+  aes(
+    x = C1_consensus_group,
+    y = score,
+    fill = C1_consensus_group
+  )
+) +
+  geom_violin(
+    trim = FALSE,
+    alpha = 0.75,
+    color = "grey30",
+    linewidth = 0.25
+  ) +
+  geom_boxplot(
+    width = 0.18,
+    outlier.shape = NA,
+    alpha = 0.85,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  stat_compare_means(
+    size = 4
+  ) +
+  facet_wrap(
+    ~ consensusTME,
+    scales = "free_y",
+    ncol = 4
+  ) +
+  scale_fill_npg() +
+  labs(
+    title = "CIBERSORTx singScore deconvolution: Not-C1-like vs C1-like",
+    x = NULL,
+    y = "CIBERSORTx singScore",
+    fill = "C1 consensus group"
+  ) +
+  theme_pubclean(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+p_ctme_extreme
+
+ggsave(
+  filename = "output/figures/TCGA_LUAD_CIBERSORTx_Not_C1_like_vs_C1_like.png",
+  plot = p_ctme_extreme,
+  width = 24,
+  height = 20,
+  dpi = 600
+)
+
+
+```
+
+# DNA Methylation Deconvolution
+
+## Methylation-Based Deconvolution Input
+
+### Load the Methylation Matrix for Deconvolution
+
+```{r}
+
+meth_mvalue <- vroom::vroom(
+  "input/tables/Methylation_TCGA_M_VALUES.csv",
+  show_col_types = FALSE
+) |>
+  column_to_rownames("probe_id") |>
+  as.matrix()
+
+meth_beta <- plogis(meth_mvalue * log(2))
+
+meth_deconv_samples <- intersect(colnames(meth_beta), C1_Core$sample)
+
+meth_beta_deconv <- meth_beta[, meth_deconv_samples, drop = FALSE]
+
+meth_deconv_input_summary <- tibble(
+  n_probes = nrow(meth_beta_deconv),
+  n_samples = ncol(meth_beta_deconv),
+  min_value = min(meth_beta_deconv, na.rm = TRUE),
+  max_value = max(meth_beta_deconv, na.rm = TRUE)
+)
+
+meth_deconv_input_summary
+
+
+```
+
+```{r}
+
+library(EpiDISH)
+data(centEpiFibIC.m)
+data(centBloodSub.m)
+frac.m <- hepidish(beta.m = meth_beta_deconv, ref1.m = centEpiFibIC.m, ref2.m = centBloodSub.m, h.CT.idx = 3, method = 'RPC')
+frac.m
+
+```
+
+### Placeholder for Methylation Deconvolution Analyses
+
+This section mirrors the RNA-based deconvolution blocks and provides a dedicated entry point for methylation-derived cell-fraction analyses.
+
+# Tumor Purity and Deconvolution Heatmaps
+
+## Build C1-Core and Purity Metadata
+
+```{r}
+
+library(TCGAbiolinks)
+
+C1_Core <- vroom::vroom(
+  "output/tables/C1_core_singscore_GSVA_consensus_scores.csv",
+  show_col_types = FALSE
+) |>
+  dplyr::select(sample, C1_consensus, C1_consensus_group) |>
+  dplyr::mutate(
+    sample = as.character(sample),
+    case_submitter_id = substr(sample, 1, 12),
+    C1_consensus = as.numeric(C1_consensus),
+    C1_consensus_group = factor(
+      C1_consensus_group,
+      levels = c(
+        "Not-C1-like",
+        "Not-C1-intermediate",
+        "C1-intermediate",
+        "C1-like"
+      )
+    )
+  ) |>
+  dplyr::distinct(sample, .keep_all = TRUE)
+
+data("Tumor.purity", package = "TCGAbiolinks")
+
+parse_purity <- function(x) {
+  x <- as.character(x)
+  x[x %in% c("NaN", "NA", "NULL", "", "nan")] <- NA_character_
+  as.numeric(gsub(",", ".", x))
+}
+
+tumor_purity_luad <- TCGAbiolinks::Tumor.purity |>
+  janitor::clean_names() |>
+  dplyr::filter(cancer_type == "LUAD") |>
+  dplyr::mutate(
+    case_submitter_id = substr(as.character(sample_id), 1, 12),
+    purity_cpe = parse_purity(cpe),
+    purity_absolute = parse_purity(absolute),
+    purity_estimate = parse_purity(estimate),
+    purity_ihc = parse_purity(ihc),
+    purity_primary = dplyr::coalesce(
+      purity_cpe,
+      purity_absolute,
+      purity_estimate,
+      purity_ihc
+    )
+  ) |>
+  dplyr::select(case_submitter_id, purity_primary) |>
+  dplyr::distinct(case_submitter_id, .keep_all = TRUE)
+
+C1_Core <- C1_Core |>
+  dplyr::left_join(
+    tumor_purity_luad,
+    by = "case_submitter_id"
+  )
+
+C1_Core
+
+CTME_deconv_singScore <- CTME_deconv_singScore |>
+  as.data.frame() |>
+  column_to_rownames("consensusTME") |>
+  t() |>
+  as.data.frame()
+  #filter(consensusTME != "Immune_Score")
+
+C1_Core <- C1_Core |>
+  as.data.frame() |>
+  column_to_rownames("sample")
+
+CIBERSORTx <- vroom("input/CIBERSORTx_Job6_Results.csv") |>
+  as.data.frame() |>
+  column_to_rownames("Mixture") |>
+  select(-`P-value`,-`Absolute score (sig.score)`, -RMSE, -Correlation)
+
+```
+
+## Deconvolution Heatmap Helper
+
+```{r}
+#| label: deconv-complexheatmap-c1-purity
+#| echo: false
+#| warning: false
+#| message: false
+#| results: hide
+
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+library(viridis)
+library(grid)
+
+plot_deconv_C1_purity_heatmap <- function(
+  deconv_mat,
+  metadata_tbl,
+  deconv_title = "Deconvolution",
+  sample_col = NULL,
+  c1_score_col = "C1_consensus",
+  c1_group_col = "C1_consensus_group",
+  purity_col = "purity_primary",
+  remove_immune_score = TRUE,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_method = "average",
+  save_png = TRUE,
+  filename = NULL,
+  width = 14,
+  height = 8,
+  dpi = 600
+) {
+  row_zscore <- function(mat) {
+    mat <- as.matrix(mat)
+
+    row_mean <- rowMeans(mat, na.rm = TRUE)
+    row_sd <- apply(mat, 1, sd, na.rm = TRUE)
+    row_sd[is.na(row_sd) | row_sd == 0] <- 1
+
+    mat_scaled <- sweep(mat, 1, row_mean, "-")
+    mat_scaled <- sweep(mat_scaled, 1, row_sd, "/")
+    mat_scaled[is.na(mat_scaled)] <- 0
+
+    mat_scaled
+  }
+
+  pearson_row_hclust <- function(mat) {
+    cor_mat <- cor(
+      t(mat),
+      method = "pearson",
+      use = "pairwise.complete.obs"
+    )
+
+    cor_mat[is.na(cor_mat)] <- 0
+
+    hclust(
+      as.dist(1 - cor_mat),
+      method = clustering_method
+    )
+  }
+
+  pearson_column_hclust <- function(mat) {
+    cor_mat <- cor(
+      mat,
+      method = "pearson",
+      use = "pairwise.complete.obs"
+    )
+
+    cor_mat[is.na(cor_mat)] <- 0
+
+    hclust(
+      as.dist(1 - cor_mat),
+      method = clustering_method
+    )
+  }
+
+  if (is.null(filename)) {
+    filename_safe <- deconv_title |>
+      stringr::str_replace_all("[^A-Za-z0-9]+", "_") |>
+      stringr::str_replace_all("_+$", "") |>
+      stringr::str_replace_all("^_+", "")
+
+    filename <- paste0(
+      "TCGA_LUAD_",
+      filename_safe,
+      "_C1_purity_heatmap.png"
+    )
+  }
+
+  deconv_df <- deconv_mat |>
+    as.data.frame()
+
+  if ("consensusTME" %in% colnames(deconv_df)) {
+    rownames(deconv_df) <- deconv_df$consensusTME
+
+    deconv_df <- deconv_df |>
+      dplyr::select(-consensusTME)
+  }
+
+  deconv_numeric <- deconv_df |>
+    dplyr::mutate(
+      dplyr::across(
+        dplyr::everything(),
+        as.numeric
+      )
+    ) |>
+    as.matrix()
+
+  sample_like_rownames <- grepl("^TCGA-", rownames(deconv_numeric)[1])
+  sample_like_colnames <- grepl("^TCGA-", colnames(deconv_numeric)[1])
+
+  if (sample_like_rownames && !sample_like_colnames) {
+    deconv_numeric <- t(deconv_numeric)
+  }
+
+  if (remove_immune_score) {
+    deconv_numeric <- deconv_numeric[
+      !rownames(deconv_numeric) %in% "Immune_Score",
+      ,
+      drop = FALSE
+    ]
+  }
+
+  metadata_df <- metadata_tbl |>
+    as.data.frame()
+
+  if (is.null(sample_col)) {
+    if ("sample" %in% colnames(metadata_df)) {
+      sample_col <- "sample"
+    } else {
+      metadata_df$sample <- rownames(metadata_df)
+      sample_col <- "sample"
+    }
+  }
+
+  metadata_df <- metadata_df |>
+    dplyr::mutate(
+      sample = as.character(.data[[sample_col]]),
+      C1_consensus = as.numeric(.data[[c1_score_col]]),
+      C1_consensus_group = factor(
+        .data[[c1_group_col]],
+        levels = c(
+          "Not-C1-like",
+          "Not-C1-intermediate",
+          "C1-intermediate",
+          "C1-like"
+        )
+      ),
+      purity_primary = as.numeric(.data[[purity_col]])
+    ) |>
+    dplyr::select(
+      sample,
+      C1_consensus,
+      C1_consensus_group,
+      purity_primary
+    ) |>
+    dplyr::distinct(sample, .keep_all = TRUE)
+
+  matched_samples <- intersect(
+    colnames(deconv_numeric),
+    metadata_df$sample
+  )
+
+  if (length(matched_samples) == 0) {
+    stop("No matching samples between deconvolution matrix and metadata.")
+  }
+
+  metadata_matched <- metadata_df |>
+    dplyr::filter(sample %in% matched_samples) |>
+    dplyr::arrange(
+      C1_consensus_group,
+      C1_consensus,
+      purity_primary
+    )
+
+  sample_order <- metadata_matched$sample
+
+  heat_mat <- deconv_numeric[
+    ,
+    sample_order,
+    drop = FALSE
+  ]
+
+  heat_mat_scaled <- row_zscore(heat_mat)
+
+  annotation_df <- metadata_matched |>
+    dplyr::select(
+      C1_consensus_group,
+      C1_consensus,
+      purity_primary
+    ) |>
+    as.data.frame()
+
+  colnames(annotation_df) <- c(
+    "C1 group",
+    "C1 score",
+    "Purity"
+  )
+
+  rownames(annotation_df) <- sample_order
+
+  group_colors <- c(
+    "Not-C1-like" = "#4D4D4D",
+    "Not-C1-intermediate" = "#A6A6A6",
+    "C1-intermediate" = "#FDB863",
+    "C1-like" = "#D73027"
+  )
+
+  c1_score_range <- range(
+    annotation_df[["C1 score"]],
+    na.rm = TRUE
+  )
+
+  c1_score_col_fun <- circlize::colorRamp2(
+    c(
+      c1_score_range[1],
+      0,
+      c1_score_range[2]
+    ),
+    c(
+      "#2166AC",
+      "white",
+      "#B2182B"
+    )
+  )
+
+  purity_range <- range(
+    annotation_df[["Purity"]],
+    na.rm = TRUE
+  )
+
+  purity_mid <- median(
+    annotation_df[["Purity"]],
+    na.rm = TRUE
+  )
+
+  purity_col_fun <- circlize::colorRamp2(
+    c(
+      purity_range[1],
+      purity_mid,
+      purity_range[2]
+    ),
+    c(
+      "#F7F7F7",
+      "#BDBDBD",
+      "#252525"
+    )
+  )
+
+  ha_col <- ComplexHeatmap::HeatmapAnnotation(
+    df = annotation_df,
+    col = list(
+      "C1 group" = group_colors,
+      "C1 score" = c1_score_col_fun,
+      "Purity" = purity_col_fun
+    ),
+    annotation_name_gp = grid::gpar(fontsize = 9),
+    na_col = "grey85"
+  )
+
+  ht <- ComplexHeatmap::Heatmap(
+    heat_mat_scaled,
+    name = "row z-score",
+    col = circlize::colorRamp2(
+      c(-2, 0, 2),
+      viridis::viridis(3)
+    ),
+    use_raster = TRUE,
+    top_annotation = ha_col,
+
+    cluster_rows = if (cluster_rows) pearson_row_hclust else FALSE,
+    cluster_columns = if (cluster_columns) pearson_column_hclust else FALSE,
+
+    column_split = annotation_df[["C1 group"]],
+    cluster_column_slices = FALSE,
+
+    show_row_names = TRUE,
+    show_column_names = FALSE,
+
+    row_names_gp = grid::gpar(fontsize = 9),
+
+    column_title = paste0(
+      deconv_title,
+      " deconvolution ordered by C1 consensus group and tumor purity"
+    ),
+    column_title_gp = grid::gpar(
+      fontsize = 12,
+      fontface = "bold"
+    ),
+
+    heatmap_legend_param = list(
+      title = "Cell type\nz-score"
+    )
+  )
+
+  ComplexHeatmap::draw(
+    ht,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right"
+  )
+
+  if (save_png) {
+    png(
+      filename = filename,
+      width = width,
+      height = height,
+      units = "in",
+      res = dpi
+    )
+
+    ComplexHeatmap::draw(
+      ht,
+      heatmap_legend_side = "right",
+      annotation_legend_side = "right"
+    )
+
+    dev.off()
+  }
+
+  invisible(ht)
+}
+
+```
+
+## Deconvolution Heatmaps Ordered by C1-Core and Purity
+
+```{r}
+
+plot_deconv_C1_purity_heatmap(
+  deconv_mat = CTME_deconv_singScore,
+  metadata_tbl = C1_Core,
+  deconv_title = "ConsensusTME singScore",
+  save_png = TRUE,
+  filename = "output/figures/TCGA_LUAD_ConsensusTME_singScore_C1_purity_heatmap.png",
+  width = 14,
+  height = 8,
+  dpi = 600
+)
+
+plot_deconv_C1_purity_heatmap(
+  deconv_mat = CIBERSORTx,
+  metadata_tbl = C1_Core,
+  deconv_title = "CIBERSORTx",
+  save_png = TRUE,
+  filename = "output/figures/TCGA_LUAD_CIBERSORTx_C1_purity_heatmap.png",
+  width = 14,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+
+# Deconvolution Association with C1-Core
+
+## ConsensusTME Association Analysis
+
+```{r}
+#| label: c1-core-consensustme-factor-correlations
+
+# Convert deconvolution matrix from wide to long format
+ctme_long <- CTME_deconv_singScore %>%
+  pivot_longer(
+    cols = -consensusTME,
+    names_to = "sample",
+    values_to = "score"
+  ) %>%
+  left_join(
+    c1_score_tbl %>%
+      select(sample, C1_consensus, C1_consensus_group),
+    by = "sample"
+  ) %>%
+  filter(!is.na(C1_consensus_group))
+
+# Check group order
+levels(ctme_long$C1_consensus_group)
+
+ctme_long <- ctme_long %>%
+  mutate(
+    C1_consensus_group = factor(
+      C1_consensus_group,
+      levels = c(
+        "Not-C1-like",
+        "Not-C1-intermediate",
+        "C1-intermediate",
+        "C1-like"
+      )
+    )
+  ) |>
+    filter(consensusTME != "Immune_Score")
+
+# Test each MOFA factor against the continuous C1-core score.
+cor_tbl <- ctme_long |>
+  dplyr::group_by(consensusTME) |>
+  dplyr::summarise(
+    n = sum(stats::complete.cases(score, C1_consensus)),
+
+    spearman_rho = stats::cor(
+      score,
+      C1_consensus,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+
+    pearson_r = stats::cor(
+      score,
+      C1_consensus,
+      method = "pearson",
+      use = "complete.obs"
+    ),
+
+    spearman_p = stats::cor.test(
+      score,
+      C1_consensus,
+      method = "spearman",
+      exact = FALSE
+    )$p.value,
+
+    pearson_p = stats::cor.test(
+      score,
+      C1_consensus,
+      method = "pearson"
+    )$p.value,
+
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    spearman_fdr = stats::p.adjust(spearman_p, method = "BH"),
+    pearson_fdr = stats::p.adjust(pearson_p, method = "BH"),
+    abs_spearman_rho = abs(spearman_rho)
+  ) |>
+  dplyr::arrange(dplyr::desc(abs_spearman_rho))
+
+cor_tbl
+
+
+
+```
+
+
+### Correlation Summary
+
+```{r}
+#| label: c1-core-consensustme-correlation-barplot
+
+p_cor_bar <- cor_tbl |>
+  dplyr::mutate(
+    consensusTME = forcats::fct_reorder(consensusTME, spearman_rho),
+    significant = spearman_fdr < 0.05,
+    direction = dplyr::if_else(spearman_rho >= 0, "Positive", "Negative"),
+    label = dplyr::if_else(
+      significant,
+      sprintf("rho = %.2f", spearman_rho),
+      ""
+    ),
+    label_y = spearman_rho + dplyr::if_else(spearman_rho >= 0, 0.035, -0.035),
+    label_hjust = dplyr::if_else(spearman_rho >= 0, 0, 1)
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = consensusTME,
+      y = spearman_rho,
+      fill = direction,
+      alpha = significant
+    )
+  ) +
+  ggplot2::geom_hline(yintercept = 0, linewidth = 0.4, colour = "grey35") +
+  ggplot2::geom_col(width = 0.72, colour = "black", linewidth = 0.15) +
+  ggplot2::geom_text(
+    ggplot2::aes(y = label_y, label = label, hjust = label_hjust),
+    size = 3.1,
+    lineheight = 0.9
+  ) +
+  ggplot2::coord_flip(clip = "off") +
+  ggsci::scale_fill_npg(name = "Direction") +
+  ggplot2::scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.35), guide = "none") +
+  ggplot2::scale_y_continuous(
+    limits = c(
+      min(cor_tbl$spearman_rho, na.rm = TRUE) - 0.18,
+      max(cor_tbl$spearman_rho, na.rm = TRUE) + 0.18
+    ),
+    breaks = scales::pretty_breaks(n = 6)
+  ) +
+  ggplot2::labs(
+    title = "C1-Core-associated consensusTMEs",
+    subtitle = "Spearman association between consensusTME and continuous C1-Core score",
+    x = NULL,
+    y = expression("Spearman " * rho),
+    caption = "Labels are shown only for FDR-significant associations."
+  ) +
+  ggpubr::theme_pubclean(base_size = 12) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold", size = 14),
+    plot.subtitle = ggplot2::element_text(size = 11, colour = "grey25"),
+    plot.caption = ggplot2::element_text(size = 9, colour = "grey35", hjust = 0),
+    axis.text.y = ggplot2::element_text(face = "bold", colour = "black"),
+    axis.text.x = ggplot2::element_text(colour = "black"),
+    axis.title.x = ggplot2::element_text(face = "bold"),
+    legend.position = "right",
+    legend.title = ggplot2::element_text(face = "bold"),
+    plot.margin = ggplot2::margin(8, 35, 8, 8)
+  )
+
+p_cor_bar
+
+ggsave(
+  p_cor_bar,
+  filename = "output/figures/consensusTME_correlation_barplot.png",
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+
+## CIBERSORTx Association Analysis
+
+```{r}
+#| label: c1-core-cibersortx-factor-correlations
+
+
+# Convert deconvolution matrix from wide to long format
+CIBERSORTx_dunn <- CIBERSORTx %>%
+  t() |>
+  as.data.frame() |>
+  rownames_to_column("CIBERSORTx") |>
+  pivot_longer(
+    cols = -CIBERSORTx,
+    names_to = "sample",
+    values_to = "score"
+  ) %>%
+  left_join(
+    c1_score_tbl %>%
+      select(sample, C1_consensus, C1_consensus_group),
+    by = "sample"
+  ) %>%
+  filter(!is.na(C1_consensus_group))
+
+# Check group order
+levels(CIBERSORTx_dunn$C1_consensus_group)
+
+CIBERSORTx_dunn <- CIBERSORTx_dunn %>%
+  mutate(
+    C1_consensus_group = factor(
+      C1_consensus_group,
+      levels = c(
+        "Not-C1-like",
+        "Not-C1-intermediate",
+        "C1-intermediate",
+        "C1-like"
+      )
+    )
+  )
+
+# Test each MOFA factor against the continuous C1-core score.
+cor_tbl <- CIBERSORTx_dunn |>
+  dplyr::group_by(CIBERSORTx) |>
+  dplyr::summarise(
+    n = sum(stats::complete.cases(score, C1_consensus)),
+
+    spearman_rho = stats::cor(
+      score,
+      C1_consensus,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+
+    pearson_r = stats::cor(
+      score,
+      C1_consensus,
+      method = "pearson",
+      use = "complete.obs"
+    ),
+
+    spearman_p = stats::cor.test(
+      score,
+      C1_consensus,
+      method = "spearman",
+      exact = FALSE
+    )$p.value,
+
+    pearson_p = stats::cor.test(
+      score,
+      C1_consensus,
+      method = "pearson"
+    )$p.value,
+
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    spearman_fdr = stats::p.adjust(spearman_p, method = "BH"),
+    pearson_fdr = stats::p.adjust(pearson_p, method = "BH"),
+    abs_spearman_rho = abs(spearman_rho)
+  ) |>
+  dplyr::arrange(dplyr::desc(abs_spearman_rho))
+
+cor_tbl
+
+
+
+```
+
+
+### Correlation Summary
+
+```{r}
+#| label: c1-core-cibersortx-correlation-barplot
+
+p_cor_bar <- cor_tbl |>
+  dplyr::mutate(
+    CIBERSORTx = forcats::fct_reorder(CIBERSORTx, spearman_rho),
+    significant = spearman_fdr < 0.05,
+    direction = dplyr::if_else(spearman_rho >= 0, "Positive", "Negative"),
+    label = dplyr::if_else(
+      significant,
+      sprintf("rho = %.2f", spearman_rho),
+      ""
+    ),
+    label_y = spearman_rho + dplyr::if_else(spearman_rho >= 0, 0.035, -0.035),
+    label_hjust = dplyr::if_else(spearman_rho >= 0, 0, 1)
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = CIBERSORTx,
+      y = spearman_rho,
+      fill = direction,
+      alpha = significant
+    )
+  ) +
+  ggplot2::geom_hline(yintercept = 0, linewidth = 0.4, colour = "grey35") +
+  ggplot2::geom_col(width = 0.72, colour = "black", linewidth = 0.15) +
+  ggplot2::geom_text(
+    ggplot2::aes(y = label_y, label = label, hjust = label_hjust),
+    size = 3.1,
+    lineheight = 0.9
+  ) +
+  ggplot2::coord_flip(clip = "off") +
+  ggsci::scale_fill_npg(name = "Direction") +
+  ggplot2::scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.35), guide = "none") +
+  ggplot2::scale_y_continuous(
+    limits = c(
+      min(cor_tbl$spearman_rho, na.rm = TRUE) - 0.18,
+      max(cor_tbl$spearman_rho, na.rm = TRUE) + 0.18
+    ),
+    breaks = scales::pretty_breaks(n = 6)
+  ) +
+  ggplot2::labs(
+    title = "C1-Core-associated CIBERSORTx",
+    subtitle = "Spearman association between CIBERSORTx and continuous C1-Core score",
+    x = NULL,
+    y = expression("Spearman " * rho),
+    caption = "Labels are shown only for FDR-significant associations."
+  ) +
+  ggpubr::theme_pubclean(base_size = 12) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold", size = 14),
+    plot.subtitle = ggplot2::element_text(size = 11, colour = "grey25"),
+    plot.caption = ggplot2::element_text(size = 9, colour = "grey35", hjust = 0),
+    axis.text.y = ggplot2::element_text(face = "bold", colour = "black"),
+    axis.text.x = ggplot2::element_text(colour = "black"),
+    axis.title.x = ggplot2::element_text(face = "bold"),
+    legend.position = "right",
+    legend.title = ggplot2::element_text(face = "bold"),
+    plot.margin = ggplot2::margin(8, 35, 8, 8)
+  )
+
+p_cor_bar
+
+ggsave(
+  p_cor_bar,
+  filename = "output/figures/CIBERSORTx_correlation_barplot.png",
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```

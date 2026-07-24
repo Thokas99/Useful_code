@@ -1,0 +1,1516 @@
+---
+title: "MAP 04 - C1 Gene Programs and tradeSeq"
+format: html
+---
+
+# Section 1. Overview
+
+This notebook turns the C1 plasticity gradient into a trajectory-style analysis and identifies genes that vary along that axis.
+
+**MAP role:** mandatory gene-program notebook, but only the C1-associated gene evidence is core. Keep Spearman, GAM/tradeSeq, direction concordance, and compact enrichment. Treat Slingshot visualizations as support, not as the state definition.
+
+## Section 1.1. Reader Guide
+
+- Input is the processed Seurat object with C1 score, plasticity labels, and dimensional reductions.
+- The notebook fits Slingshot pseudotime and uses tradeSeq-style models to find genes changing along C1.
+- It also compares correlation-based and GAM-based gene evidence, exports dynamic-gene tables, and runs enrichment analyses.
+- Read this as the gene-dynamics notebook: it asks which genes change as cells move along the plasticity axis.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Setup and load scored object.
+2. Fit C1-associated tradeSeq GAMs using the continuous C1 score as pseudotime.
+3. Extract genes changing along the C1 axis.
+4. Run Spearman gene-C1 correlations.
+5. Merge GAM and Spearman evidence.
+6. Compare C1-associated genes with core signatures and external marker context.
+7. Keep enrichment compact and tied to the dynamic gene evidence.
+8. Keep the self-GAM section at the end as a draft sensitivity layer.
+
+## Section 1.3. Setup
+
+This section loads the required packages and restores the Seurat object used as the starting point for downstream analyses.
+
+```{r include=FALSE}
+
+packages <- c(
+  "tidyverse",
+  "Seurat",
+  "SeuratWrappers",
+  "harmony",
+  "patchwork",
+  "data.table",
+  "fst",
+  "UCell",
+  "CytoTRACE2",
+  "slingshot",
+  "tradeSeq",
+  "viridis",
+  "RColorBrewer",
+  "scran",
+  "qs2",
+  "ggsci",
+  "scCustomize", 
+  "future",
+  "ggpubr",
+  "GGally"
+)
+
+
+purrr::walk(packages, library, character.only = TRUE)
+
+plan(multicore, workers = 4)
+
+umap_theme <- cowplot::theme_cowplot() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    axis.title = element_text(size = 13),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+css_combined <- qs_read(file = "output/objects/css_combined_processed.qs2",nthreads = 10)
+
+```
+
+
+# Section 2. Fit C1-Associated tradeSeq GAMs
+
+This block treats the continuous C1 score as a one-lineage pseudotime axis. The goal is not to redefine cell states, but to test which genes vary smoothly across the C1 plasticity gradient.
+
+```{r}
+
+library(tradeSeq)
+library(SingleCellExperiment)
+library(BiocParallel)
+
+
+# Parallel backend (real control)
+
+#BPPARAM <- MulticoreParam(workers = 5)
+
+
+# Raw counts only
+
+DefaultAssay(css_combined) <- "RNA"
+counts <- GetAssayData(css_combined, layer  = "counts")
+
+
+# Pseudotime (1 lineage)
+
+pt <- css_combined$C1_score
+
+pseudotime_mat <- matrix(
+  pt,
+  ncol = 1,
+  dimnames = list(colnames(css_combined), "lineage1")
+)
+
+
+# Cell weights
+
+cellweights_mat <- matrix(
+  1,
+  nrow = ncol(css_combined),
+  ncol = 1,
+  dimnames = list(colnames(css_combined), "lineage1")
+)
+
+
+# Gene selection (IMPORTANT)
+
+# keep expressed genes first
+keep <- Matrix::rowSums(counts > 0) > 20
+counts_filt <- counts[keep, ]
+
+# then HVGs if available
+genes_use <- VariableFeatures(css_combined,nfeatures = 3000)
+genes_use <- intersect(genes_use, rownames(counts_filt))
+
+# HARD CAP
+genes_use <- head(genes_use, 2500)
+
+
+# Fit GAM
+
+library(BiocParallel)
+#BPPARAM <- SnowParam(workers = 2, type = "SOCK")  # safer on big matrices
+
+BPPARAM <- MulticoreParam(workers = 3)
+
+set.seed(1234)
+DEGs_along_pseudotime <- fitGAM(
+  counts = counts[genes_use, ],
+  pseudotime = pseudotime_mat,
+  cellWeights = cellweights_mat,
+  nknots = 5,
+  verbose = TRUE,
+  parallel = TRUE,
+  BPPARAM = BPPARAM,
+  family = "nb"
+)
+
+qs_save(object = DEGs_along_pseudotime,file = "output/objects/fitGAM_tradeSeq.qs",compress_level = 10,nthreads = 10)
+
+```
+
+# Section 3. Genes Changing Along Pseudotime
+
+This section extracts significant dynamic genes from the fitted GAM object and visualizes the strongest changing genes across cells ordered by C1 score.
+
+```{r}
+
+library(ComplexHeatmap)
+library(magick)
+library(circlize)
+library(viridis)
+
+# This can be interpreted as testing whether the average gene expression is significantly changing along pseudotime.
+assoRes <- startVsEndTest(DEGs_along_pseudotime) 
+head(assoRes)
+
+assoRes <- assoRes |>
+  rownames_to_column("gene") |>
+  mutate(FDR = p.adjust(pvalue, method = "BH")) |>
+  filter(FDR < 0.05)
+
+#assoRes <- assoRes[order(-abs(assoRes$logFClineage1)), ]
+
+library(tradeSeq)
+
+#yhat <- predictSmooth(DEGs_along_pseudotime, nPoints = 100, gene = 1:2500)
+
+fwrite(x = assoRes, file = "output/tables/along_DEGs.csv")
+
+along_DEGs <- read_csv("output/tables/along_DEGs.csv") 
+
+top_genes <- along_DEGs %>% 
+  arrange(desc(waldStat)) %>% 
+  #arrange(FDR) |>
+  pull(gene) %>% head(50)
+
+# Order cells by pseudotime
+cell_ord <- order(css_combined@meta.data$C1_score)
+
+# Expression matrix
+mat <- GetAssayData(css_combined, assay = "SCT", layer = "data")[top_genes, cell_ord]
+mat_dense <- as.matrix(mat)
+
+# Column annotation: numeric continuous
+col_ha <- HeatmapAnnotation(
+  "C1 score" = css_combined$C1_score[cell_ord],
+  col = list(
+    "C1 score" = colorRamp2(
+      seq(min(css_combined$C1_score, na.rm = TRUE),
+          max(css_combined$C1_score, na.rm = TRUE),
+          length.out = 100),
+      viridis(100)
+    )
+  ),
+  annotation_height = unit(6, "mm")
+)
+
+# Row annotation (optional distribution)
+row_ha <- rowAnnotation(
+  ExprDist = anno_boxplot(mat_dense, type = "violin", gp = gpar(fill = "lightblue"))
+)
+
+colors <- rev(RColorBrewer::brewer.pal(n = 11, name = "RdBu"))
+colors.use <- grDevices::colorRampPalette(colors = colors)(100)
+
+
+# Scale rows (z-score per gene) like pheatmap
+mat_scaled <- t(scale(t(mat_dense)))
+
+# Symmetric color scale centered at 0 for z-scores
+col_zscore <- colorRamp2(c(-2, 0, 2), c("#313695", "white", "#a50026"))
+
+# PNG
+png(
+  "output/figures/top_50_genes_complex_logFC.png",
+  width = 10,
+  height = 7,
+  units = "in",
+  res = 600
+)
+
+ht <- Heatmap(
+  mat_scaled,
+  name = "Z-score",
+  col = col_zscore,
+  top_annotation = col_ha,
+  left_annotation = row_ha,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  clustering_distance_rows = "pearson",
+  show_column_names = FALSE,
+  show_row_names = TRUE,
+  use_raster = TRUE,
+  row_names_gp = gpar(fontsize = 8),
+  column_title = "Top 50 genes along trajectory (genes by FDR, cells by C1 score)",
+  heatmap_legend_param = list(title = "Z-score")
+)
+
+draw(ht)
+
+dev.off()
+
+# PDF
+  pdf("output/figures/top_50_genes_complex.pdf", width = 10, height = 8)
+Heatmap(
+  mat_scaled,
+  name = "Z-score",
+  col = col_zscore,
+  top_annotation = col_ha,
+  left_annotation = row_ha,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  show_column_names = FALSE,
+  show_row_names = TRUE,
+  use_raster = TRUE,
+  row_names_gp = gpar(fontsize = 8),
+  column_title = "Top 50 genes along trajectory",
+  heatmap_legend_param = list(title = "Z-score")
+)
+dev.off()
+
+```
+
+# Section 4. Correlation of Genes Along the C1 Axis
+
+The correlation layer provides a simpler monotonic check for the GAM results. Genes that agree by both methods are stronger C1-program candidates.
+
+```{r}
+
+css_combined <- qs_read(file = "output/objects/css_combined_processed.qs2",nthreads = 10)
+
+```
+
+```{r}
+
+
+library(tradeSeq)
+library(SingleCellExperiment)
+library(BiocParallel)
+
+
+# Parallel backend (real control)
+
+#BPPARAM <- MulticoreParam(workers = 5)
+
+
+# Use SCT
+DefaultAssay(css_combined) <- "SCT"
+mat <- GetAssayData(css_combined, layer = "data")
+
+# Subset genes
+genes_use <- VariableFeatures(css_combined,nfeatures = 3000)
+mat <- mat[genes_use, ]
+
+# Rank pseudotime once
+pt_rank <- rank(pt)
+
+# Rank expression matrix (row-wise)
+mat_rank <- t(apply(mat, 1, rank))
+
+library(matrixStats)
+
+# Rank
+mat_rank <- rowRanks(as.matrix(mat))
+pt_rank <- rank(pt)
+
+# Center
+mat_centered <- mat_rank - rowMeans(mat_rank)
+pt_centered <- pt_rank - mean(pt_rank)
+
+# Correlation
+rho <- as.vector(mat_centered %*% pt_centered) /
+       sqrt(rowSums(mat_centered^2) * sum(pt_centered^2))
+
+names(rho) <- rownames(mat)
+
+# P-values
+n <- length(pt)
+tstat <- rho * sqrt((n - 2) / (1 - rho^2))
+pvals <- 2 * pt(-abs(tstat), df = n - 2)
+
+res <- tibble(
+  gene = rownames(mat),
+  rho = rho,
+  pval = pvals ) |>
+  mutate(FDR = p.adjust(pval, method = "BH")) |>
+  filter(FDR < 0.05)
+
+head(res)
+
+fwrite(x = res, file = "output/tables/COR_along_C1.csv")
+
+```
+
+```{r}
+
+library(Seurat)
+library(ComplexHeatmap)
+library(circlize)
+library(viridis)
+library(RColorBrewer)
+library(readr)
+library(dplyr)
+library(grid)
+
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+n_genes <- 50
+
+along_DEGs <- readr::read_csv(
+  "output/tables/tradeSeq_gam_on_genes_along_C1.csv",
+  show_col_types = FALSE
+)
+
+# Select top genes along C1 trajectory
+# Here genes are ranked by Wald statistic
+top_genes <- along_DEGs %>%
+  dplyr::arrange(desc(waldStat)) %>%
+  dplyr::pull(gene) %>%
+  unique() %>%
+  head(n_genes)
+
+# Keep only genes present in the SCT assay
+expr_mat_all <- GetAssayData(
+  css_combined,
+  assay = "SCT",
+  layer = "data"
+)
+
+top_genes_found <- intersect(top_genes, rownames(expr_mat_all))
+top_genes_missing <- setdiff(top_genes, rownames(expr_mat_all))
+
+if (length(top_genes_missing) > 0) {
+  message(
+    "Missing genes not plotted: ",
+    paste(top_genes_missing, collapse = ", ")
+  )
+}
+
+stopifnot(length(top_genes_found) > 1)
+
+# Order cells by C1 score
+cell_ord <- order(css_combined@meta.data$C1_score, na.last = NA)
+cells_ordered <- rownames(css_combined@meta.data)[cell_ord]
+
+# Extract expression matrix
+# Rows = genes
+# Columns = cells ordered by C1 score
+mat_raw <- expr_mat_all[top_genes_found, cells_ordered, drop = FALSE]
+mat_raw <- as.matrix(mat_raw)
+
+# Row-scale genes
+# Equivalent to pheatmap(scale = "row")
+mat_scaled <- t(scale(t(mat_raw)))
+mat_scaled[is.na(mat_scaled)] <- 0
+
+# C1 annotation values
+c1_values <- css_combined@meta.data[cells_ordered, "C1_score_raw"]
+
+# Top annotation: continuous C1 score
+col_ha <- HeatmapAnnotation(
+  `C1 score` = c1_values,
+  col = list(
+    `C1 score` = colorRamp2(
+      c(
+        min(c1_values, na.rm = TRUE),
+        median(c1_values, na.rm = TRUE),
+        max(c1_values, na.rm = TRUE)
+      ),
+      viridis(3)
+    )
+  ),
+  annotation_height = unit(5, "mm"),
+  annotation_name_gp = gpar(fontsize = 8)
+)
+
+# Left annotation: raw expression distribution per gene
+row_ha <- rowAnnotation(
+  `Exp.` = anno_boxplot(
+    mat_raw,
+    which = "row",
+    type = "violin",
+    border = FALSE,
+    outline = FALSE,
+    width = unit(2.0, "cm"),
+    gp = gpar(fill = "grey75", col = "grey35")
+  ),
+  annotation_name_rot = 0,
+  annotation_name_gp = gpar(fontsize = 8)
+)
+
+# Color scale for gene z-scores
+col_zscore <- colorRamp2(
+  c(-2, -1, 0, 1, 2),
+  c("#053061", "#4393C3", "#F7F7F7", "#D6604D", "#67001F")
+)
+
+# Heatmap title
+heatmap_title <- paste0(
+  "Top genes changing along C1 trajectory\n",
+  nrow(mat_scaled),
+  " genes displayed | cells ordered by C1 score | Pearson distance | average linkage"
+)
+
+ht_opt$TITLE_PADDING = unit(c(8, 8), "points")
+
+ht <- Heatmap(
+  mat_scaled,
+  name = "Expression (SCT)",
+  col = col_zscore,
+
+  top_annotation = col_ha,
+  left_annotation = row_ha,
+
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+
+  clustering_distance_rows = "pearson",
+  clustering_method_rows = "average",
+
+  show_row_dend = TRUE,
+  show_column_dend = FALSE,
+
+  show_column_names = FALSE,
+  show_row_names = TRUE,
+
+  use_raster = TRUE,
+  raster_quality = 5,
+
+  row_names_gp = gpar(fontsize = 8),
+
+  row_title = "Genes",
+  column_title = heatmap_title,
+
+  column_title_gp = gpar(
+    fontsize = 13,
+    fontface = "bold",
+    lineheight = 1.15
+  ),
+  row_title_gp = gpar(
+    fontsize = 11,
+    fontface = "bold"
+  ),
+
+  border = TRUE,
+  rect_gp = gpar(col = NA),
+
+  heatmap_legend_param = list(
+    title = "Row z-score",
+    at = c(-2, -1, 0, 1, 2),
+    labels = c("Low", "-1", "0", "+1", "High")
+  )
+)
+
+png(
+  filename = "output/figures/top_50_genes_along_C1_heatmap.png",
+  width = 12,
+  height = 8,
+  units = "in",
+  res = 600,
+  type = "cairo-png"
+)
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+
+dev.off()
+
+pdf(
+  file = "output/figures/top_50_genes_along_C1_heatmap.pdf",
+  width = 12,
+  height = 14,
+  useDingbats = FALSE
+)
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+
+dev.off()
+
+ht_opt(RESET = TRUE)
+
+```
+
+```{r}
+
+library(Seurat)
+library(ComplexHeatmap)
+library(circlize)
+library(viridis)
+library(readr)
+library(dplyr)
+library(grid)
+
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+n_genes <- 50
+
+along_DEGs <- readr::read_csv(
+  "output/tables/tradeSeq_gam_on_genes_along_C1.csv",
+  show_col_types = FALSE
+)
+
+# Select top genes along C1 trajectory
+# Here genes are ranked by Wald statistic
+top_genes <- along_DEGs %>%
+  dplyr::arrange(desc(waldStat)) %>%
+  dplyr::pull(gene) %>%
+  unique() %>%
+  head(n_genes)
+
+# Extract SCT expression matrix
+# Rows = genes
+# Columns = cells
+expr_mat_all <- GetAssayData(
+  css_combined,
+  assay = "SCT",
+  layer = "data"
+)
+
+# Keep only genes present in the SCT assay
+top_genes_found <- intersect(top_genes, rownames(expr_mat_all))
+top_genes_missing <- setdiff(top_genes, rownames(expr_mat_all))
+
+if (length(top_genes_missing) > 0) {
+  message(
+    "Missing genes not plotted: ",
+    paste(top_genes_missing, collapse = ", ")
+  )
+}
+
+stopifnot(length(top_genes_found) > 1)
+
+# Align metadata to expression matrix columns
+meta <- css_combined@meta.data
+meta <- meta[colnames(expr_mat_all), , drop = FALSE]
+
+stopifnot(all(rownames(meta) == colnames(expr_mat_all)))
+
+# Cluster labels
+cluster <- as.character(meta$seurat_clusters)
+
+# Count cells per cluster
+cluster_counts <- table(cluster)
+
+# Extract selected expression matrix
+# Cells x genes for efficient rowsum aggregation
+expr_cell_gene <- t(as.matrix(expr_mat_all[top_genes_found, , drop = FALSE]))
+
+# Sum expression by cluster
+cluster_sum_mat <- rowsum(
+  expr_cell_gene,
+  group = cluster,
+  reorder = FALSE
+)
+
+# Convert cluster sums into cluster means
+# Result: clusters x genes
+cluster_mean_mat <- sweep(
+  cluster_sum_mat,
+  MARGIN = 1,
+  STATS = as.numeric(cluster_counts[rownames(cluster_sum_mat)]),
+  FUN = "/"
+)
+
+# Raw heatmap matrix
+# Rows = genes
+# Columns = clusters
+plot_mat_raw <- t(cluster_mean_mat)
+
+# Row-scale genes across clusters
+# Equivalent to pheatmap(scale = "row")
+plot_mat <- t(scale(t(plot_mat_raw)))
+plot_mat[is.na(plot_mat)] <- 0
+
+# Cluster-level annotations
+cluster_annot <- meta %>%
+  dplyr::group_by(seurat_clusters) %>%
+  dplyr::summarise(
+    mean_C1_score_raw = mean(C1_Core, na.rm = TRUE),
+    n_cells = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  as.data.frame()
+
+cluster_annot$seurat_clusters <- as.character(cluster_annot$seurat_clusters)
+
+# Match annotation order to heatmap columns
+cluster_annot <- cluster_annot[
+  match(colnames(plot_mat), cluster_annot$seurat_clusters),
+  ,
+  drop = FALSE
+]
+
+rownames(cluster_annot) <- cluster_annot$seurat_clusters
+
+stopifnot(!any(is.na(cluster_annot$seurat_clusters)))
+stopifnot(identical(rownames(cluster_annot), colnames(plot_mat)))
+
+# Top annotation: mean C1 raw and cell count
+c1_col_fun <- colorRamp2(
+  c(
+    min(cluster_annot$mean_C1_score_raw, na.rm = TRUE),
+    median(cluster_annot$mean_C1_score_raw, na.rm = TRUE),
+    max(cluster_annot$mean_C1_score_raw, na.rm = TRUE)
+  ),
+  c("#313695", "#F7F7F7", "#A50026")
+)
+
+top_ha <- HeatmapAnnotation(
+  `Mean C1 raw` = cluster_annot$mean_C1_score_raw,
+  `Cells` = anno_barplot(
+    cluster_annot$n_cells,
+    gp = gpar(fill = "grey40", col = NA),
+    border = FALSE,
+    height = unit(1.0, "cm")
+  ),
+  col = list(
+    `Mean C1 raw` = c1_col_fun
+  ),
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 8),
+  annotation_legend_param = list(
+    `Mean C1 raw` = list(title = "Mean C1 raw")
+  )
+)
+
+# Left annotation: raw cluster-level expression distribution per gene
+row_ha <- rowAnnotation(
+  `Exp.` = anno_boxplot(
+    plot_mat_raw,
+    which = "row",
+    type = "violin",
+    border = FALSE,
+    outline = FALSE,
+    width = unit(2.0, "cm"),
+    gp = gpar(fill = "grey75", col = "grey35")
+  ),
+  annotation_name_rot = 0,
+  annotation_name_gp = gpar(fontsize = 8)
+)
+
+# Color scale for gene z-scores
+col_zscore <- colorRamp2(
+  c(-2, -1, 0, 1, 2),
+  c("#053061", "#4393C3", "#F7F7F7", "#D6604D", "#67001F")
+)
+
+# Heatmap title
+heatmap_title <- paste0(
+  "Top genes changing along C1 trajectory by cluster\n",
+  nrow(plot_mat),
+  " genes displayed | cluster mean SCT expression | row z-score | Pearson distance | average linkage"
+)
+
+ht_opt$TITLE_PADDING = unit(c(8, 8), "points")
+
+ht <- Heatmap(
+  plot_mat,
+  name = "Expression (SCT)",
+  col = col_zscore,
+
+  top_annotation = top_ha,
+  left_annotation = row_ha,
+
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+
+  clustering_distance_rows = "pearson",
+  clustering_distance_columns = "pearson",
+  clustering_method_rows = "average",
+  clustering_method_columns = "average",
+
+  show_row_dend = TRUE,
+  show_column_dend = TRUE,
+
+  show_column_names = TRUE,
+  show_row_names = TRUE,
+
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 10, fontface = "bold"),
+  column_names_rot = 0,
+
+  row_title = "Genes",
+  column_title = heatmap_title,
+
+  column_title_gp = gpar(
+    fontsize = 13,
+    fontface = "bold",
+    lineheight = 1.15
+  ),
+  row_title_gp = gpar(
+    fontsize = 11,
+    fontface = "bold"
+  ),
+
+  border = TRUE,
+  rect_gp = gpar(col = "grey90", lwd = 0.3),
+
+  heatmap_legend_param = list(
+    title = "Row z-score",
+    at = c(-2, -1, 0, 1, 2),
+    labels = c("Low", "-1", "0", "+1", "High")
+  )
+)
+
+png(
+  filename = "output/figures/top_50_genes_along_C1_by_cluster_heatmap.png",
+  width = 12,
+  height = 8,
+  units = "in",
+  res = 600,
+  type = "cairo-png"
+)
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+
+dev.off()
+
+pdf(
+  file = "output/figures/top_50_genes_along_C1_by_cluster_heatmap.pdf",
+  width = 12,
+  height = 14,
+  useDingbats = FALSE
+)
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+
+dev.off()
+
+ht_opt(RESET = TRUE)
+
+```
+
+# Section 5. Merge Correlation and GAM Results
+
+This section joins the model-based and correlation-based evidence so each gene can be read with both dynamic and monotonic support.
+
+```{r}
+
+library(dplyr)
+library(readr)
+
+along_DEGs <- read_csv("output/tables/along_DEGs.csv") 
+Corr_DEGs  <- read_csv("output/tables/COR_along_C1.csv") 
+
+gam_df <- along_DEGs %>%
+    dplyr::rename(
+    waldStat_GAM = waldStat,
+    df_GAM = df,
+    pvalue_GAM = pvalue,
+    logFC_GAM = logFClineage1,
+    FDR_GAM = FDR
+  )
+
+corr_df <- Corr_DEGs %>%
+    dplyr::rename(
+    rho_corr = rho,
+    pval_corr = pval,
+    FDR_corr = FDR
+  )
+
+Corr_and_GAMs <- gam_df %>%
+  left_join(corr_df, by = "gene")
+
+Corr_and_GAMs <- Corr_and_GAMs %>%
+  mutate(
+    sig_GAM = FDR_GAM < 0.05,
+    sig_corr = FDR_corr < 0.05,
+    
+    concordant = case_when(
+      sig_GAM & sig_corr & sign(logFC_GAM) == sign(rho_corr) ~ TRUE,
+      sig_GAM & sig_corr ~ FALSE,
+      TRUE ~ NA
+    )
+  )
+
+Corr_and_GAMs <- Corr_and_GAMs %>%
+  mutate(
+    score = -log10(FDR_GAM + 1e-300) * sign(logFC_GAM) +
+            -log10(FDR_corr + 1e-300) * sign(rho_corr)
+  )
+
+fwrite(x = Corr_and_GAMs, file = "output/tables/Corr_and_GAMs_along_C1.csv")
+
+```
+
+# Section 6. Overlap Between C1-Associated and tradeSeq Genes
+
+The overlap checks ask whether the C1-associated dynamic genes recover the original C1 signature and related gene sets.
+
+```{r}
+
+library(ggvenn)
+
+# Load C1 core signature genes used for the overlap check.
+Core_genes_tidy <- read_csv("input/Signatures/Core_genes_tidy.csv")
+
+# Prepare gene sets for the Venn diagram.
+x <- list(
+  "C1 core genes UP"     = na.omit(Core_genes_tidy$Core_genes_UP),
+  "C1 core genes DOWN"   = na.omit(Core_genes_tidy$Core_genes_DOWN),
+  "DEGs along C1 score" = along_DEGs$gene
+)
+
+# Plot and display the overlap between the original C1 genes and dynamic genes.
+p <- ggvenn(
+  x,
+  fill_color   = c("grey90", "red"),
+  stroke_size  = 0.5,
+  set_name_size = 5
+)
+
+p
+
+# Save the Venn diagram as a high-resolution PNG.
+ggsave(
+  filename = "output/figures/DEGs_along_C1_ggvenn.png",
+  plot     = p,
+  width    = 6,
+  height   = 6,
+  dpi      = 600,
+  bg       = "white"
+)
+
+
+# Prepare gene sets for enrichment tests.
+up_genes      <- na.omit(Core_genes_tidy$Core_genes_UP)
+down_genes    <- na.omit(Core_genes_tidy$Core_genes_DOWN)
+merged_genes  <- unique(c(up_genes, down_genes))
+degs          <- along_DEGs$gene
+
+# Use all genes in the Seurat object as the enrichment universe.
+universe <- rownames(css_combined)
+
+
+# Fisher's Exact Test Function
+run_fisher <- function(sig, degs, universe) {
+  a <- sum(sig %in% degs)                         # in sig & in DEGs
+  b <- sum(sig %in% universe & !(sig %in% degs)) # in sig & not DEGs
+  c <- sum(!(universe %in% sig) & universe %in% degs) # not sig & in DEGs
+  d <- sum(!(universe %in% sig) & !(universe %in% degs)) # not sig & not DEGs
+  
+  mat <- matrix(
+    c(a, b, c, d),
+    nrow = 2,
+    dimnames = list(
+      Signature = c("InSig", "NotInSig"),
+      DEGs      = c("InDEGs", "NotInDEGs")
+    )
+  )
+  
+  fisher.test(mat)
+}
+
+
+# Run Fisher Tests
+fisher_up      <- run_fisher(up_genes, degs, universe)
+fisher_down    <- run_fisher(down_genes, degs, universe)
+
+
+# Collect Results
+results <- data.frame(
+  Signature = c("UP", "DOWN"),
+  logOddsRatio = c(fisher_up$estimate, fisher_down$estimate),
+  Pvalue    = c(fisher_up$p.value, fisher_down$p.value)
+)
+
+# Log-transform odds ratios
+results$logOddsRatio <- log(results$logOddsRatio)
+
+# View results
+results
+
+library(dplyr)
+
+results <- data.frame(
+  Signature = c("UP", "DOWN"),
+  logOddsRatio = c(fisher_up$estimate, fisher_down$estimate),
+  Pvalue = c(fisher_up$p.value, fisher_down$p.value)
+) %>%
+  mutate(
+    logOddsRatio = log(logOddsRatio),
+    negLog10P = -log10(Pvalue),
+    significance = case_when(
+      Pvalue < 1e-10 ~ "****",
+      Pvalue < 1e-5  ~ "***",
+      Pvalue < 1e-3  ~ "**",
+      Pvalue < 0.05  ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+write_csv(x = results,file = "output/tables/330_along_C1.csv")
+
+library(gt)
+pretty_table <- results %>%
+  select(Signature, logOddsRatio, Pvalue, significance) %>%
+  gt() %>%
+  
+  tab_header(
+    title = "Fisher Enrichment of Gene Signatures",
+    subtitle = "Enrichment of UP and DOWN genes within DEG universe"
+  ) %>%
+  
+  fmt_number(columns = logOddsRatio, decimals = 2) %>%
+  fmt_scientific(columns = Pvalue, decimals = 2)
+
+
+small_genes <- tibble(genes = c(
+  "HOXB7",
+  "THY1",
+  "SCGB1A1",
+  "TEAD4",
+  "E2F4",
+  "MCM6",
+  "SF3B1",
+  "E2F1",
+  "RRM2",
+  "NUDCD1",
+  "HSPG2",
+  "SCGB3A1",
+  "NKX2-1",
+  "SFTPC",
+  "TFF1"
+))
+
+write_csv(x = small_genes,file = "output/tables/!0_genes.csv")
+
+
+```
+
+
+# Section 7. HPA-Based Marker Context
+
+This section adds external marker context from Human Protein Atlas-derived annotations. Treat this as annotation support, not as a primary statistical filter.
+
+```{r}
+
+library(HPAanalyze)
+
+hpaListParam()
+
+data <- hpaDownload(
+  downloadList = c("normal_tissue", "pathology", "subcellular_location")
+)
+
+hpaVis(
+  data,
+  targetGene = top_genes$gene,
+  targetCancer = "lung cancer"
+)
+
+
+subset_data <- hpaSubset(
+  data,
+  targetGene = top_genes$gene,
+  targetCancer = "lung cancer"
+)
+
+View(subset_data$subcellular_location)
+
+top_genes <- read_csv("output/tables/C1_seudotime_DEGs_UP_ordered.csv")
+
+library(biomaRt)
+
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+ids <- getBM(
+  attributes = c("hgnc_symbol", "ensembl_gene_id"),
+  filters = "hgnc_symbol",
+  values = top_genes$gene,
+  mart = mart
+)
+
+ids
+
+library(HPAanalyze)
+library(purrr)
+library(dplyr)
+
+antibody_list <- map2(
+  ids$ensembl_gene_id,
+  ids$hgnc_symbol,
+  function(ensg, symbol) {
+    
+    message("Downloading: ", symbol, " (", ensg, ")")
+    
+    tryCatch({
+      x <- hpaXml(ensg)
+      ab <- x$Antibody
+      
+      if (is.null(ab) || nrow(ab) == 0) return(NULL)
+      
+      ab %>%
+        mutate(
+          ensembl_gene_id = ensg,
+          hgnc_symbol = symbol
+        )
+      
+    }, error = function(e) {
+      message("Failed: ", symbol)
+      NULL
+    })
+  }
+)
+
+antibodies_df <- bind_rows(antibody_list)
+
+final_table <- antibodies_df %>%
+  left_join(
+    subset_data$subcellular_location,
+    by = c("ensembl_gene_id" = "ensembl")
+  )
+
+write_csv(x = final_table,file = "output/tables/IHC_antibody_table.csv")
+
+```
+
+
+# Section 8. ORA for Genes Increasing Along Pseudotime
+
+This compact enrichment step translates increasing C1 genes into pathway-level hypotheses.
+
+```{r}
+
+library(gprofiler2) 
+
+along_DEGs <- read_csv("output/tables/along_DEGs.csv")  |>
+  filter(FDR < 0.05)
+
+
+# Run GSEA using gprofiler2
+
+along_gsea <- gost(
+  query = along_DEGs$gene,
+  organism = "hsapiens",       # 
+  ordered_query = TRUE,        #
+  multi_query = FALSE,
+  significant = TRUE,
+  sources = c("GO:BP","KEGG","TF","MIRNA") # databases to query
+)
+
+qs_save(object = along_gsea, file = "output/objects/gProfiler_along.qs2", compress_level = 5, nthreads = 10)
+
+
+# View results
+
+along_gsea$result %>% head(20)
+
+
+# Plot top enriched terms
+
+gostplot(along_gsea, capped = TRUE, interactive = FALSE) +
+  theme_bw()
+
+fwrite(along_gsea$result, file = "output/tables/gprofiler2_along_gsea.csv")
+
+
+```
+
+# Section 9. GSEA for GO Biological Processes
+
+This section tests whether ranked C1-dynamic genes are enriched for GO biological processes.
+
+```{r}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+
+# Keep unique genes and filter NA waldStat
+ranked_genes <- along_DEGs %>%
+  filter(!is.na(waldStat)) %>%
+  distinct(gene, .keep_all = TRUE) %>%
+  arrange(desc(logFClineage1))   # or waldStat
+
+# Create numeric vector for GSEA
+gene_list <- ranked_genes$logFClineage1   # numeric vector
+names(gene_list) <- ranked_genes$gene  # assign gene symbols as names
+
+# Sort decreasing
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Check
+head(gene_list)
+
+
+# Run GSEA on GO BP
+gsea_res_GO <- gseGO(
+  geneList = gene_list,
+  OrgDb = org.Hs.eg.db,
+  ont = "BP",
+  keyType = "SYMBOL",
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  verbose = TRUE
+)
+
+
+qs_save(object = gsea_res_GO, file = "output/objects/clusterProfiler_GO_tradeSEQ.qs2", compress_level = 5, nthreads = 15)
+
+dotplot(gsea_res_GO, showCategory = 15) +
+  theme_bw(base_size = 11) +
+  labs(title = "GSEA of BP for genes along the Pseudotime")
+
+ggsave(filename = "output/figures/clusterProfiler_GO_tradeSEQ.svg", width = 9, height = 7,dpi = 600)
+
+fwrite(as.data.frame(gsea_res_GO), "output/tables/GSEA_along_C1.csv")
+
+```
+
+# Section 10. GSEA for KEGG Pathways
+
+This section repeats the ranked enrichment logic using KEGG pathways for a pathway-level view of the C1 gradient.
+
+```{r}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(data.table)
+
+
+# Keep unique genes and filter NA waldStat
+ranked_genes <- along_DEGs %>%
+  filter(!is.na(waldStat)) %>%
+  distinct(gene, .keep_all = TRUE) %>%
+  arrange(desc(logFClineage1))
+
+# Create numeric vector for GSEA
+gene_list <- ranked_genes$logFClineage1
+names(gene_list) <- ranked_genes$gene
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Map gene symbols to Entrez IDs for KEGG
+gene_df <- bitr(names(gene_list), fromType = "SYMBOL", 
+                toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+gene_list_entrez <- gene_list[gene_df$SYMBOL]
+names(gene_list_entrez) <- gene_df$ENTREZID
+
+# Run GSEA for KEGG
+gsea_res_KEGG <- gseKEGG(
+  geneList = gene_list_entrez,
+  organism = "hsa",
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  verbose = TRUE
+  #keyType = "ncbi-geneid",
+)
+
+# Save object
+qs_save(object = gsea_res_KEGG, 
+        file = "output/objects/clusterProfiler_KEGG_tradeSEQ.qs2", 
+        compress_level = 5, nthreads = 10)
+
+# Plot
+dotplot(gsea_res_KEGG, showCategory = 15) +
+  theme_bw(base_size = 11) +
+  labs(title = "GSEA KEGG Pathways for genes along Pseudotime")
+
+ggsave(filename = "output/figures/clusterProfiler_KEGG_tradeSEQ.svg", width = 9, height = 7)
+
+# Save results as CSV
+fwrite(as.data.frame(gsea_res_KEGG), "output/tables/tradeSeq_GSEA_KEGG_results.csv")
+
+
+library(ReactomePA)
+
+gsea_res_Reactome <- gsePathway(
+  geneList = gene_list_entrez,
+  organism = "human",
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  verbose = TRUE
+)
+
+# Convert Entrez IDs to symbols
+gsea_res_Reactome <- setReadable(gsea_res_Reactome, OrgDb = org.Hs.eg.db)
+
+dotplot(gsea_res_Reactome, showCategory = 15)  +
+  theme_bw(base_size = 11) +
+  labs(title = "GSEA ReactomePA Pathways for genes along Pseudotime")
+
+ggsave(filename = "output/figures/clusterProfiler_ReactomePA_tradeSEQ.svg", width = 10, height = 8)
+
+# Save results as CSV
+fwrite(as.data.frame(gsea_res_Reactome), "output/tables/tradeSeq_GSEA_ReactomePA_results.csv")
+
+
+```
+
+# Section 11. Draft Sensitivity: Self-Implemented GAMs Over Genes
+
+This draft section is intentionally placed after the main overlap and enrichment results. It implements a minimal in-house GAM layer over genes, independent of `tradeSeq`, as a transparent sensitivity check rather than as a replacement for the main `tradeSeq` result.
+
+## Section 11.1. R or Python?
+
+For this project, **R is the better default** for self-implemented gene-wise GAMs because `mgcv` is mature, well-tested, supports penalized splines, negative-binomial families, REML fitting, offsets, fixed covariates, and clean model summaries. Python can do GAM-like models through `pyGAM`, `statsmodels`, or custom `sklearn` pipelines, but the single-cell RNA-seq use case is less standardized for negative-binomial gene-wise models with robust spline inference. Python remains useful for AnnData handling and plotting; R is stronger for this specific statistical layer.
+
+This draft should be biologically motivated, not just a generic "fit a curve to every gene" exercise. The key question is whether **C1-EpiCore/C1 biology explains expression after accounting for library size, sample structure, and major cell-cycle effects**. Therefore the model uses raw RNA counts, tests Seurat-selected highly variable genes directly, keeps a 4,000-gene cap for a realistic sensitivity run, models `C1_score` as the primary smooth term, includes a library-size offset, adds sample and optional cell-cycle covariates, and exports interpretable high-versus-low C1 effects.
+
+For progress reporting, use `progressr` with `furrr`. For parallel execution, the robust default remains `future::multisession`; if `future.mirai`/`mirai` is installed, the notebook can use the mirai-backed future plan for cleaner worker management. This keeps the code notebook-friendly while making the parallel layer easy to upgrade.
+
+```{r eval=FALSE}
+library(mgcv)
+library(furrr)
+library(broom)
+library(progressr)
+library(future)
+library(parallelly)
+
+set.seed(1234)
+
+# Parallel and progress setup
+# Keep workers conservative in a notebook. GAM fitting is CPU-heavy and each
+# worker receives the count matrix and metadata.
+n_workers <- max(1, min(4, parallelly::availableCores(omit = 1)))
+
+# Use a mirai-backed future plan when available. This is optional and guarded:
+# the same code still runs with plain multisession on machines without mirai.
+mirai_plan <- NULL
+if (
+  requireNamespace("future.mirai", quietly = TRUE) &&
+  exists("mirai_multisession", envir = asNamespace("future.mirai"))
+) {
+  mirai_plan <- get("mirai_multisession", envir = asNamespace("future.mirai"))
+}
+
+if (!is.null(mirai_plan)) {
+  future::plan(mirai_plan, workers = n_workers)
+  parallel_backend <- "future.mirai::mirai_multisession"
+} else {
+  future::plan(future::multisession, workers = n_workers)
+  parallel_backend <- "future::multisession"
+}
+
+# Use a visible progress bar in interactive sessions.
+# In Quarto/terminal rendering, progressr will fall back to a text handler.
+progressr::handlers(global = TRUE)
+progressr::handlers("progress")
+
+message("Self-GAM draft will use ", n_workers, " parallel workers via ", parallel_backend, ".")
+
+DefaultAssay(css_combined) <- "RNA"
+counts_mat <- GetAssayData(css_combined, assay = "RNA", slot = "counts")
+
+# Gene set: Seurat HVGs, capped at 4,000
+# This avoids testing arbitrary expressed genes. The sensitivity layer should
+# focus on the variable transcriptome that Seurat already considers informative.
+if (length(VariableFeatures(css_combined)) < 4000) {
+  css_combined <- FindVariableFeatures(
+    css_combined,
+    assay = "RNA",
+    selection.method = "vst",
+    nfeatures = 4000,
+    verbose = FALSE
+  )
+}
+
+seurat_hvgs <- VariableFeatures(css_combined)
+
+genes_to_test <- seurat_hvgs[seurat_hvgs %in% rownames(counts_mat)]
+
+# Keep genes with enough detected cells for a negative-binomial smooth fit.
+genes_to_test <- genes_to_test[Matrix::rowSums(counts_mat[genes_to_test, , drop = FALSE] > 0) >= 50]
+
+# A 4K cap is appropriate here: broad enough to cover the variable transcriptome,
+# small enough to keep an exploratory draft tractable on a laptop/workstation.
+genes_to_test <- head(genes_to_test, 4000)
+
+message("Genes selected for self-GAM draft from Seurat HVGs: ", length(genes_to_test))
+
+# Metadata and biologically motivated covariates
+meta_cols <- c(
+  "C1_score",
+  "nCount_RNA",
+  "sample",
+  "S.Score",
+  "G2M.Score",
+  "percent.mt"
+)
+
+meta_cols <- intersect(meta_cols, colnames(css_combined@meta.data))
+
+gam_meta <- css_combined@meta.data |>
+  dplyr::select(dplyr::all_of(meta_cols))
+
+if (!"sample" %in% colnames(gam_meta)) {
+  gam_meta$sample <- "all"
+}
+
+gam_meta <- gam_meta |>
+  dplyr::mutate(
+    C1_score = as.numeric(C1_score),
+    log_library = log(pmax(nCount_RNA, 1)),
+    sample = factor(sample)
+  )
+
+# Optional covariates are included only if present and informative. Sample is
+# treated as a fixed effect because there are only four samples in this dataset.
+linear_terms <- c()
+
+if ("sample" %in% colnames(gam_meta) && nlevels(gam_meta$sample) > 1) {
+  linear_terms <- c(linear_terms, "sample")
+}
+
+if ("S.Score" %in% colnames(gam_meta)) {
+  linear_terms <- c(linear_terms, "S.Score")
+}
+
+if ("G2M.Score" %in% colnames(gam_meta)) {
+  linear_terms <- c(linear_terms, "G2M.Score")
+}
+
+if ("percent.mt" %in% colnames(gam_meta)) {
+  linear_terms <- c(linear_terms, "percent.mt")
+}
+
+rhs_terms <- c("s(C1_score, k = 6)", linear_terms, "offset(log_library)")
+gam_formula <- stats::as.formula(paste("y ~", paste(rhs_terms, collapse = " + ")))
+
+message("Self-GAM formula: ", deparse(gam_formula))
+
+fit_one_gene_gam <- function(gene, progressor = NULL) {
+  if (!is.null(progressor)) {
+    progressor(sprintf("Fitting %s", gene))
+  }
+
+  y <- as.numeric(counts_mat[gene, ])
+
+  df <- gam_meta |>
+    dplyr::mutate(y = y) |>
+    tidyr::drop_na(C1_score, log_library, y)
+
+  if (sum(df$y > 0) < 50) {
+    return(tibble(gene = gene, status = "too_sparse"))
+  }
+
+  # bam() is preferred here over gam() because this is a gene-wise screen.
+  # nthreads = 1 prevents nested parallelism inside each worker.
+  fit <- tryCatch(
+    mgcv::bam(
+      gam_formula,
+      data = df,
+      family = nb(),
+      method = "fREML",
+      discrete = TRUE,
+      nthreads = 1
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(fit)) {
+    return(tibble(gene = gene, status = "fit_failed"))
+  }
+
+  low_df <- df
+  low_df$C1_score <- stats::quantile(df$C1_score, 0.1, na.rm = TRUE)
+
+  high_df <- df
+  high_df$C1_score <- stats::quantile(df$C1_score, 0.9, na.rm = TRUE)
+
+  pred_low <- mean(predict(fit, newdata = low_df, type = "response"), na.rm = TRUE)
+  pred_high <- mean(predict(fit, newdata = high_df, type = "response"), na.rm = TRUE)
+
+  smooth_table <- summary(fit)$s.table
+  c1_row <- grep("^s\\(C1_score\\)", rownames(smooth_table), value = TRUE)
+
+  if (length(c1_row) != 1) {
+    return(tibble(gene = gene, status = "no_C1_smooth"))
+  }
+
+  tibble(
+    gene = gene,
+    status = "ok",
+    mean_count = mean(df$y),
+    pct_detected = mean(df$y > 0),
+    smooth_p_C1 = smooth_table[c1_row, "p-value"],
+    edf_C1 = smooth_table[c1_row, "edf"],
+    deviance_explained = summary(fit)$dev.expl,
+    pred_low_C1 = pred_low,
+    pred_high_C1 = pred_high,
+    logFC_high_vs_low = log2((pred_high + 1e-6) / (pred_low + 1e-6)),
+    direction_at_high_C1 = dplyr::case_when(
+      logFC_high_vs_low > 0 ~ "higher_at_high_C1",
+      logFC_high_vs_low < 0 ~ "lower_at_high_C1",
+      TRUE ~ "flat"
+    )
+  )
+}
+
+# Parallel model fitting with progress
+# progressr::with_progress() gives a single progress bar for all parallel jobs.
+# furrr_options(seed = TRUE) keeps any stochastic parts reproducible.
+self_gam_started <- Sys.time()
+
+self_gam_results <- progressr::with_progress({
+  p <- progressr::progressor(along = genes_to_test)
+
+  furrr::future_map_dfr(
+    genes_to_test,
+    ~ fit_one_gene_gam(.x, progressor = p),
+    .options = furrr::furrr_options(seed = TRUE),
+    .progress = FALSE
+  )
+}) |>
+  dplyr::mutate(
+    FDR_C1 = p.adjust(smooth_p_C1, method = "BH"),
+    Direction = dplyr::case_when(
+      status != "ok" ~ NA_character_,
+      logFC_high_vs_low > 0 ~ "C1_positive",
+      logFC_high_vs_low < 0 ~ "C1_negative",
+      TRUE ~ "flat"
+    )
+  )
+
+self_gam_runtime <- difftime(Sys.time(), self_gam_started, units = "mins")
+message("Self-GAM draft completed in ", round(as.numeric(self_gam_runtime), 2), " minutes.")
+
+# Compact run summary for notebook readability.
+self_gam_summary <- self_gam_results |>
+  dplyr::count(status, name = "n_genes") |>
+  dplyr::arrange(desc(n_genes))
+
+self_gam_summary
+
+readr::write_csv(
+  self_gam_results,
+  "output/tables/MAP_self_GAM_HVG4000_along_C1_mgcv_draft.csv"
+)
+
+readr::write_csv(
+  self_gam_summary,
+  "output/tables/MAP_self_GAM_HVG4000_along_C1_mgcv_draft_summary.csv"
+)
+
+# Reset the future plan after the draft run so later notebook chunks do not
+# unexpectedly inherit parallel workers.
+future::plan(future::sequential)
+```

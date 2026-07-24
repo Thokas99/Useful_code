@@ -1,0 +1,84 @@
+---
+title: "MOFA Template: Project Setup"
+format: html
+editor: source
+---
+
+# Overview
+
+This notebook defines the shared contract for the distilled MOFA workflow:
+
+1. Build matched multi-omics inputs under `input/tables/`.
+2. Create score-augmented metadata and aligned matrices.
+3. Fit or inspect the MOFA model under `output/objects/`.
+4. Keep project-specific feature choices and biological interpretation inline.
+
+# Setup
+
+```{r}
+set.seed(1234)
+
+Sys.setenv(
+  OPENBLAS_NUM_THREADS = 1,
+  OMP_NUM_THREADS = 1,
+  MKL_NUM_THREADS = 1,
+  VECLIB_MAXIMUM_THREADS = 1,
+  NUMEXPR_NUM_THREADS = 1
+)
+
+options(future.globals.maxSize = 25 * 1024^3)
+
+paths <- list(
+  input_tables = "input/tables",
+  input_objects = "input/objects",
+  output_tables = "output/tables",
+  output_figures = "output/figures",
+  output_objects = "output/objects",
+  helpers = "helpers/helpers_from_MOFA.R"
+)
+
+invisible(lapply(paths, dir.create, recursive = TRUE, showWarnings = FALSE))
+
+project <- list(
+  project_id = "PROJECT_ID",
+  cohort_label = "COHORT_LABEL",
+  sample_id_length = 16,
+  score_column = "C1_score",
+  class_column = "C1_class"
+)
+```
+
+# Notebook Order
+
+```{r}
+workflow_order <- c(
+  "00_project_setup.qmd",
+  "01_multiomics_input_prep.qmd",
+  "02_signature_scoring.qmd",
+  "03_mofa_model.qmd"
+)
+workflow_order
+```
+
+# Object Contract
+
+```{r}
+object_contract <- list(
+  matched_inputs = file.path(paths$input_tables, paste0(project$project_id, "_matched_multiomics_manifest.tsv")),
+  scored_metadata = file.path(paths$output_tables, paste0(project$project_id, "_scored_metadata.tsv")),
+  mofa_input = file.path(paths$output_objects, paste0(project$project_id, "_mofa_input.qs2")),
+  mofa_model = file.path(paths$output_objects, paste0(project$project_id, "_mofa_model.hdf5")),
+  mofa_factors = file.path(paths$output_tables, paste0(project$project_id, "_mofa_factors.tsv"))
+)
+
+knitr::kable(
+  data.frame(name = names(object_contract), path = unlist(object_contract)),
+  caption = "Shared MOFA template outputs"
+)
+```
+
+# Notes
+
+- Keep assay-specific file names and download queries visible in the prep notebook.
+- Keep score thresholds and subtype labels visible in the scoring notebook.
+- Keep model dimensions, view selection, and factor interpretation visible in the MOFA notebook.

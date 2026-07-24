@@ -1,0 +1,176 @@
+---
+title: "scATAC Quality Control and Integration"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Filter ATAC cells, run TF-IDF/LSI, cluster, and save a reusable Signac object.
+
+## Packages
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/signac_created.qs"
+output_object <- "path/to/signac_integrated.qs"
+results_dir <- "results/signac_qc_integration"
+figures_dir <- "figures/signac_qc_integration"
+assay_name <- "peaks"
+sample_column <- "sample_column"
+group_column <- "group_column"
+min_tss_enrichment <- 2
+max_nucleosome_signal <- 4
+n_lsi_dims <- 30
+cluster_resolution <- 0.5
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(sample_column, group_column, "TSS.enrichment", "nucleosome_signal") %in% colnames(object[[]])))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+readr::write_tsv(tibble::tibble(cells_before = ncol(object), peaks = nrow(object)), file.path(results_dir, "atac_qc_input_summary.tsv"))
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+object$qc_pass <- object$TSS.enrichment >= min_tss_enrichment & object$nucleosome_signal <= max_nucleosome_signal
+object <- subset(object, subset = qc_pass)
+object <- RunTFIDF(object)
+object <- FindTopFeatures(object, min.cutoff = "q0")
+object <- RunSVD(object)
+object <- FindNeighbors(object, reduction = "lsi", dims = 2:n_lsi_dims)
+object <- FindClusters(object, resolution = cluster_resolution)
+object <- RunUMAP(object, reduction = "lsi", dims = 2:n_lsi_dims, reduction.name = "umap.atac")
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+readr::write_tsv(object[[]] |> tibble::rownames_to_column("cell_id"), file.path(results_dir, "atac_filtered_metadata.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "atac_umap_clusters.pdf"), width = 6, height = 5)
+print(DimPlot(object, reduction = "umap.atac", group.by = "seurat_clusters", label = TRUE))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$template <- list(step = "scatac_quality_control_integration", lsi_dims = n_lsi_dims, resolution = cluster_resolution)
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(object[[]] |> tibble::as_tibble() |> count(seurat_clusters, .data[[sample_column]], name = "n_cells"), file.path(results_dir, "atac_cluster_counts.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scatac-02-quality-control-integration-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, cells = ncol(object), clusters = length(levels(Idents(object))))
+```

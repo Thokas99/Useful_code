@@ -1,0 +1,73 @@
+---
+title: "MOFA Template: Signature Scoring and Metadata"
+format: html
+editor: source
+---
+
+# Overview
+
+This notebook computes the phenotype or signature scores that will later be tested against MOFA factors.
+
+# Setup
+
+```{r}
+library(dplyr)
+library(readr)
+library(tibble)
+library(ggplot2)
+library(edgeR)
+
+source("helpers/helpers_from_MOFA.R")
+
+project_id <- "PROJECT_ID"
+score_column <- "C1_score"
+class_column <- "C1_class"
+
+dir.create("output/tables", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+rna <- readr::read_tsv("input/tables/RNA_MATCHED.tsv", show_col_types = FALSE)
+metadata <- readr::read_tsv("input/tables/sample_metadata.tsv", show_col_types = FALSE)
+signature_tbl <- readr::read_csv("input/tables/signature_genes.csv", show_col_types = FALSE)
+```
+
+# Score Construction
+
+```{r}
+feature_col <- colnames(rna)[1]
+sample_ids <- setdiff(colnames(rna), feature_col)
+count_mat <- as.matrix(rna[, sample_ids, drop = FALSE])
+rownames(count_mat) <- rna[[feature_col]]
+
+logcpm <- compute_logcpm(count_mat)
+signature_genes <- intersect(signature_tbl$gene, rownames(logcpm))
+stopifnot(length(signature_genes) > 0)
+
+score_vec <- colMeans(logcpm[signature_genes, , drop = FALSE], na.rm = TRUE)
+score_tbl <- tibble::tibble(
+  sample_id = names(score_vec),
+  !!score_column := as.numeric(scale(score_vec))
+)
+
+score_tbl[[class_column]] <- class_from_z(score_tbl[[score_column]])
+metadata_scored <- dplyr::left_join(metadata, score_tbl, by = "sample_id")
+
+readr::write_tsv(
+  metadata_scored,
+  file.path("output/tables", paste0(project_id, "_scored_metadata.tsv"))
+)
+```
+
+# Quick Checks
+
+```{r}
+ggplot(metadata_scored, aes(x = .data[[class_column]], y = .data[[score_column]], fill = .data[[class_column]])) +
+  geom_violin(alpha = 0.5) +
+  geom_jitter(width = 0.15, alpha = 0.2, size = 0.4) +
+  theme_bw(11)
+```
+
+# Notes
+
+- Keep alternate score definitions, deconvolution summaries, and purity correlations inline here when needed.
+- Do not hide threshold choices; the class cutoffs should stay visible.

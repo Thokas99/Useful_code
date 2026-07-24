@@ -1,0 +1,188 @@
+---
+title: "Group Summary and Association Tests"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Summarize object metadata and run simple association tests between reusable grouping variables.
+
+## Packages
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(qs2)
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/object_with_metadata.qs"
+output_object <- "path/to/object_with_statistics.qs"
+results_dir <- "results/group_statistics"
+figures_dir <- "figures/group_statistics"
+assay_name <- "RNA"
+sample_column <- "sample_column"
+group_column <- "group_column"
+numeric_columns <- c("numeric_feature_1")
+categorical_columns <- c("categorical_feature_1")
+condition_1 <- "condition_1"
+condition_2 <- "condition_2"
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+metadata <- if (inherits(object, "Seurat")) object[[]] else as.data.frame(object)
+```
+
+## Validation
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(all(c(sample_column, group_column) %in% colnames(metadata)))
+numeric_columns <- intersect(numeric_columns, colnames(metadata))
+categorical_columns <- intersect(categorical_columns, colnames(metadata))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+group_counts <- metadata |> count(.data[[group_column]], name = "n")
+readr::write_tsv(group_counts, file.path(results_dir, "group_counts.tsv"))
+group_counts
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+numeric_tests <- lapply(numeric_columns, function(column) {
+  x <- metadata |> filter(.data[[group_column]] %in% c(condition_1, condition_2))
+  test <- wilcox.test(x[[column]] ~ x[[group_column]])
+  tibble::tibble(feature = column, method = "wilcox", p_value = test$p.value)
+}) |> bind_rows()
+categorical_tests <- lapply(categorical_columns, function(column) {
+  tbl <- table(metadata[[group_column]], metadata[[column]])
+  test <- suppressWarnings(chisq.test(tbl))
+  tibble::tibble(feature = column, method = "chisq", p_value = test$p.value)
+}) |> bind_rows()
+association_tests <- bind_rows(numeric_tests, categorical_tests) |> mutate(p_adj = p.adjust(p_value, method = "BH"))
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+missing_tbl <- tibble::tibble(column = c(numeric_columns, categorical_columns), missing = vapply(metadata[c(numeric_columns, categorical_columns)], function(x) sum(is.na(x)), integer(1)))
+readr::write_tsv(missing_tbl, file.path(results_dir, "metadata_missingness.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+if (length(numeric_columns) > 0) {
+  p <- ggplot(metadata, aes(x = .data[[group_column]], y = .data[[numeric_columns[1]]])) + geom_boxplot() + theme_bw()
+  ggsave(file.path(figures_dir, "numeric_feature_by_group.pdf"), p, width = 6, height = 4)
+}
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+if (inherits(object, "Seurat")) {
+  object@misc$group_statistics <- list(association_tests = association_tests, group_column = group_column)
+} else {
+  attr(object, "group_statistics") <- list(association_tests = association_tests, group_column = group_column)
+}
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(association_tests, file.path(results_dir, "association_tests.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-general-statistics-01-group-summary-and-association-tests-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, tests = nrow(association_tests))
+```
+

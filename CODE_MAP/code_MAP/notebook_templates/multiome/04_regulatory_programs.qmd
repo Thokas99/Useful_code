@@ -1,0 +1,180 @@
+---
+title: "Multiome Regulatory Programs"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Combine motif activity, linked peaks, and gene expression summaries into reusable regulatory program tables.
+
+## Packages
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/multiome_rna_atac_links.qs"
+program_file <- "path/to/regulatory_programs.tsv"
+output_object <- "path/to/multiome_regulatory_programs.qs"
+results_dir <- "results/regulatory_programs"
+figures_dir <- "figures/regulatory_programs"
+rna_assay <- "RNA"
+atac_assay <- "peaks"
+sample_column <- "sample_column"
+group_column <- "group_column"
+program_column <- "program_name"
+gene_column <- "gene_symbol"
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+programs <- readr::read_tsv(program_file, show_col_types = FALSE)
+```
+
+## Validation
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(rna_assay, atac_assay) %in% Assays(object)))
+stopifnot(all(c(sample_column, group_column) %in% colnames(object[[]])))
+stopifnot(all(c(program_column, gene_column) %in% colnames(programs)))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+program_summary <- programs |> count(.data[[program_column]], name = "n_genes")
+readr::write_tsv(program_summary, file.path(results_dir, "regulatory_program_input_summary.tsv"))
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+DefaultAssay(object) <- rna_assay
+program_sets <- split(programs[[gene_column]], programs[[program_column]])
+program_sets <- lapply(program_sets, intersect, rownames(object[[rna_assay]]))
+program_sets <- program_sets[lengths(program_sets) > 0]
+object <- AddModuleScore(object, features = program_sets, assay = rna_assay, name = "regulatory_program_")
+program_score_cols <- tail(colnames(object[[]]), length(program_sets))
+names(program_score_cols) <- names(program_sets)
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+score_tbl <- object[[]] |> tibble::rownames_to_column("cell_id") |> select(cell_id, all_of(program_score_cols), all_of(c(sample_column, group_column)))
+readr::write_tsv(score_tbl, file.path(results_dir, "regulatory_program_scores.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "regulatory_program_scores.pdf"), width = 8, height = 4)
+print(VlnPlot(object, features = program_score_cols, group.by = group_column, pt.size = 0))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$regulatory_programs <- list(program_file = program_file, score_columns = program_score_cols)
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(program_summary, file.path(results_dir, "regulatory_program_gene_counts.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-multiome-04-regulatory-programs-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, programs_scored = length(program_score_cols))
+```
+

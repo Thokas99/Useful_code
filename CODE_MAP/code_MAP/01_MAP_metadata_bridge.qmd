@@ -1,0 +1,99 @@
+---
+title: "MAP 01 - Metadata Bridge"
+format: html
+---
+
+# Section 1. Overview
+
+This bridge notebook restores patient-level metadata that was not carried forward in the first integrated Seurat object, then checks how those labels relate to the plasticity score.
+
+**MAP role:** metadata bridge. Keep this notebook small and use it only to restore sample or patient fields that are required for downstream state summaries, statistics, or multiome matching.
+
+## Section 1.1. Reader Guide
+
+- Inputs are the processed Seurat object and the manually entered sample metadata table.
+- The notebook joins sample-level labels to each cell through `orig.ident`.
+- The immediate check is a sex-stratified comparison of `C1_score`.
+- Read this as a metadata repair and sanity-check step, not as the main statistical interpretation notebook.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Load processed object.
+2. Define and join sample-level metadata.
+3. Run only minimal metadata sanity checks.
+4. Save the updated object if the metadata fields are needed downstream.
+
+## Section 1.3. Setup
+```{r include=FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(scCustomize)
+library(RColorBrewer)
+library(future)
+library(qs2)
+
+#plan(multicore, workers = 5)
+#purrr::walk(packages, pak)
+
+css_combined <- qs_read(file="output/objects/css_combined_processed.qs2", nthreads = 10)
+#qs_save(object = css_combined, file = "output/objects/css_combined_processed.qs2", nthreads = 10,compress_level = 10)
+
+```
+
+# Section 2. Add Patient-Level Metadata
+```{r}
+
+df <- tribble(
+  ~`Negedia code`, ~`Line primarie`, ~`Stage TNM (8th ed)`, ~`Classification from Oncogene`, ~Sex, ~`Sample type`,
+  "ROC-25-0075",   "FD",             "IB-IIA",              "C1",                                                "M",  "Serum",
+  "ROC-25-0074",   "CV",             "IIIA",                "C1",                                              "F",  "Serum",
+  "ROC-25-0077",   "BB",             "IIIB",                "Not_determine",                                                  "M",  "Serum",
+  "ROC-25-0076",   "MC",             "IIB",                 "nonC1",                                       "F",  "Serum"
+) |>
+    janitor::clean_names() |>
+    mutate(orig.ident = c("S2_CSS", "S1_CSS", "S4_CSS", "S3_CSS"))
+
+df
+
+meta <- css_combined@meta.data
+
+head(meta) 
+
+
+meta_joined <- meta %>%
+  left_join(df, by = "orig.ident")
+
+head(meta_joined)
+
+```
+
+
+# Section 3. Quick Comparison by Sex
+```{r}
+
+meta_joined$sex <- factor(meta_joined$sex, levels = c("M","F"))
+
+rcompanion::wilcoxonRG(x = meta_joined$C1_score, g = meta_joined$sex,verbose = T)
+
+meta_joined %>%
+  group_by(orig.ident, sex) %>%
+  summarise(
+    n_cells = n(),
+    mean_C1 = mean(C1_score, na.rm = TRUE),
+    median_C1 = median(C1_score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(meta_joined, aes(x = orig.ident, y = C1_score, fill = sex)) +
+  geom_violin(alpha = 0.3, trim = TRUE, linewidth = 0) +
+  geom_boxplot(width = 0.15, fill = "white", color = "black",
+               outlier.shape = NA, linewidth = 0.4) +
+  scale_fill_brewer(palette = "Set2") +
+  stat_compare_means() +
+  theme_bw(base_size = 14)
+
+```

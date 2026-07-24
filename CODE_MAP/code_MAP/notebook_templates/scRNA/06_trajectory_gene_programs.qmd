@@ -1,0 +1,177 @@
+---
+title: "scRNA Trajectory and Gene Programs"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Fit trajectory-aware gene programs and store pseudotime summaries in a Seurat object.
+
+## Packages
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/seurat_clustered.qs"
+output_object <- "path/to/seurat_trajectory_programs.qs"
+results_dir <- "results/trajectory_gene_programs"
+figures_dir <- "figures/trajectory_gene_programs"
+assay_name <- "RNA"
+reduction_name <- "umap"
+sample_column <- "sample_column"
+group_column <- "group_column"
+pseudotime_column <- "pseudotime"
+features_of_interest <- c("GENE1", "GENE2")
+n_bins <- 20
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(sample_column, group_column, pseudotime_column) %in% colnames(object[[]])))
+stopifnot(reduction_name %in% names(object@reductions))
+features_of_interest <- intersect(features_of_interest, rownames(object))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+input_summary <- object[[]] |> tibble::as_tibble() |> summarise(cells = n(), pseudotime_min = min(.data[[pseudotime_column]], na.rm = TRUE), pseudotime_max = max(.data[[pseudotime_column]], na.rm = TRUE))
+readr::write_tsv(input_summary, file.path(results_dir, "trajectory_input_summary.tsv"))
+input_summary
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+expr <- FetchData(object, vars = c(features_of_interest, pseudotime_column, group_column))
+expr$pseudotime_bin <- cut(expr[[pseudotime_column]], breaks = n_bins, include.lowest = TRUE)
+program_tbl <- expr |>
+  group_by(pseudotime_bin, .data[[group_column]]) |>
+  summarise(across(all_of(features_of_interest), mean, na.rm = TRUE), .groups = "drop")
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+bin_counts <- expr |> count(pseudotime_bin, .data[[group_column]], name = "n_cells")
+readr::write_tsv(bin_counts, file.path(results_dir, "pseudotime_bin_counts.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "trajectory_features.pdf"), width = 7, height = 5)
+if (length(features_of_interest) > 0) print(FeaturePlot(object, features = features_of_interest, reduction = reduction_name))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$trajectory_gene_programs <- list(features = features_of_interest, pseudotime_column = pseudotime_column, n_bins = n_bins)
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(program_tbl, file.path(results_dir, "trajectory_gene_programs.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scrna-06-trajectory-gene-programs-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, features_used = length(features_of_interest))
+```

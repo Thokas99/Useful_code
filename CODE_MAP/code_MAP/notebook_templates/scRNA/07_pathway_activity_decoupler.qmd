@@ -1,0 +1,178 @@
+---
+title: "Pathway Activity with Decoupler Output"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Import pathway or regulator activity scores, validate cell alignment, and store scores in Seurat metadata.
+
+## Packages
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/seurat_clustered.qs"
+activity_file <- "path/to/pathway_activity.tsv"
+output_object <- "path/to/seurat_pathway_activity.qs"
+results_dir <- "results/pathway_activity"
+figures_dir <- "figures/pathway_activity"
+assay_name <- "RNA"
+sample_column <- "sample_column"
+group_column <- "group_column"
+cell_column <- "cell_id"
+features_of_interest <- c("pathway_1", "pathway_2")
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+activity <- readr::read_tsv(activity_file, show_col_types = FALSE)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(cell_column %in% colnames(activity))
+stopifnot(all(c(sample_column, group_column) %in% colnames(object[[]])))
+stopifnot(all(activity[[cell_column]] %in% colnames(object)))
+features_of_interest <- intersect(features_of_interest, setdiff(colnames(activity), cell_column))
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+activity_summary <- tibble::tibble(cells_with_scores = nrow(activity), score_columns = ncol(activity) - 1)
+readr::write_tsv(activity_summary, file.path(results_dir, "activity_input_summary.tsv"))
+activity_summary
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+score_mat <- activity |> tibble::column_to_rownames(cell_column)
+object <- AddMetaData(object, metadata = score_mat[colnames(object), , drop = FALSE])
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+score_summary <- score_mat |>
+  tibble::rownames_to_column("cell_id") |>
+  summarise(across(where(is.numeric), list(mean = ~mean(.x, na.rm = TRUE), sd = ~sd(.x, na.rm = TRUE))))
+readr::write_tsv(score_summary, file.path(results_dir, "activity_score_summary.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "pathway_activity_features.pdf"), width = 7, height = 5)
+if (length(features_of_interest) > 0) print(FeaturePlot(object, features = features_of_interest))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+object@misc$pathway_activity <- list(activity_file = activity_file, score_columns = colnames(score_mat))
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(activity, file.path(results_dir, "pathway_activity_scores.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scrna-07-pathway-activity-decoupler-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, score_columns = ncol(score_mat))
+```
+

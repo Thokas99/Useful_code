@@ -1,0 +1,1054 @@
+---
+title: "MAP 07 - RNA Velocity and CellRank2"
+format: html
+---
+
+# Section 1. Overview
+
+This notebook is the Python dynamics branch of the CSS LUAD epithelial plasticity workflow, connecting the C1 axis to RNA velocity and CellRank2 transition-state analysis.
+
+**MAP role:** mandatory dynamics notebook. scVelo dynamical velocity and CellRank2 are kept as a proper MAP step because they provide directional context, latent-time metadata, velocity pseudotime, velocity confidence, stream plots, and metadata that can be exported back into Seurat for downstream R summaries.
+
+## Section 1.1. Reader Guide
+
+- Inputs are the integrated `.h5ad`, per-sample alevin velocity matrices, and gene ID mapping files.
+- The notebook rebuilds spliced and unspliced layers, aligns them to the integrated atlas, runs scVelo dynamical velocity, and then estimates CellRank2 macrostates and drivers.
+- Main outputs are velocity-ready objects, velocity streams, latent-time plots, velocity pseudotime plots, CellRank2 plots, driver-gene results, and metadata exported for re-import into Seurat.
+- Read arrows and vector fields as directional movement over the embedding. Use CellRank2 macrostates and drivers as strong hypotheses, but keep the final MAP state labels grounded in reproducible RNA clusters, markers, and C1 summaries.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Setup and integrated AnnData loading.
+2. Rebuild per-sample spliced/unspliced velocity layers.
+3. Merge velocity layers into the integrated atlas.
+4. Run scVelo dynamical velocity, latent time, pseudotime, confidence, and dynamical-gene tests.
+5. Generate required scVelo plots.
+6. Export velocity metadata for Seurat/R.
+7. Run CellRank2 kernels, macrostates, fate probabilities, and driver-gene analysis.
+
+## Section 1.3. Setup
+```{python}
+
+import random
+# Python built-in random
+random.seed(1234)
+
+# warnings
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# single-cell ecosystem
+import scanpy as sc
+import numpy as np
+np.random.seed(1234)
+
+import scvelo as scv
+
+# data handling
+import pandas as pd
+import anndata as ad
+import scipy.sparse as sp
+
+# plotting
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# statistics
+from scipy.stats import spearmanr
+
+import os
+
+# scanpy figure settings
+sc.set_figure_params(dpi=600, frameon=False, vector_friendly=True)
+
+```
+
+
+# Section 2. Load the Integrated AnnData
+
+This first import step restores the merged object that already contains the RNA velocity layers and metadata generated upstream.
+```{python}
+
+# Set seed for reproducibility
+random.seed(1234)
+
+# Load AnnData
+adata = sc.read_h5ad("output/objects/css_combined_scVelo.h5ad")
+
+# Quick inspection
+adata
+
+```
+
+```{python}
+
+import pandas as pd
+
+c1_df = pd.read_csv("output/tables/metadat_last.csv")
+
+c1_df = c1_df.set_index("cell_id")
+
+adata.obs["C1_Core"] = adata.obs_names.map(c1_df["C1_Core"])
+
+print(adata.obs["C1_Core"].isna().sum())
+print(adata.obs["C1_Core"].head())
+
+print("hello")
+
+```
+
+
+# Section 3. Rebuild and Integrate Velocity Layers
+
+The next blocks reconstruct per-sample velocity inputs, align them back to the merged atlas, and compute the dynamical quantities used later by CellRank.
+
+# Section 4. Reconstruct Per-Sample Velocity Inputs
+```{python}
+
+import os
+import numpy as np
+import pandas as pd
+import scipy.io
+import scipy.sparse as sp
+import anndata as ad
+
+# CONFIG
+BASE_DIR     = "input"
+OUT_DIR      = "output/objects"
+GENE_MAP_TSV = os.path.join(BASE_DIR, "gene_id_to_name.tsv")
+
+SAMPLES = [
+    "ROC-25-0074",
+    "ROC-25-0075",
+    "ROC-25-0076",
+    "ROC-25-0077",
+]
+
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# LOAD GENE MAP
+gene_map = (
+    pd.read_csv(GENE_MAP_TSV, sep="\t", header=None, names=["gene_id", "gene_name"])
+    .drop_duplicates("gene_id")
+    .set_index("gene_id")["gene_name"]
+    .to_dict()
+)
+
+print(f"Loaded {len(gene_map)} gene mappings")
+
+# MASTER GENE SPACE (shared across all samples)
+MASTER_GENES = None
+
+# LOOP OVER SAMPLES
+for SAMPLE_ID in SAMPLES:
+
+    print(f"\n===== {SAMPLE_ID} =====")
+
+    ALEVIN_DIR = os.path.join(BASE_DIR, SAMPLE_ID, "af_quant", "alevin")
+    OUT_FILE   = os.path.join(OUT_DIR, f"{SAMPLE_ID}_velocity.h5ad")
+
+    # ---------------------
+    # LOAD MATRIX
+    # ---------------------
+    mat = scipy.io.mmread(os.path.join(ALEVIN_DIR, "quants_mat.mtx")).tocsr()
+
+    with open(os.path.join(ALEVIN_DIR, "quants_mat_cols.txt")) as f:
+        cols = [x.strip() for x in f if x.strip()]
+
+    with open(os.path.join(ALEVIN_DIR, "quants_mat_rows.txt")) as f:
+        barcodes = [x.strip() for x in f if x.strip()]
+
+    n_genes = len(cols) // 3
+
+    # split USA matrix
+    S = mat[:, :n_genes].astype(np.float32)
+    U = mat[:, n_genes:2*n_genes].astype(np.float32)
+    A = mat[:, 2*n_genes:3*n_genes].astype(np.float32)
+
+    # ---------------------
+    # CLEAN GENE IDS
+    # ---------------------
+    gene_ids = np.array([g.replace("-U", "").replace("-A", "") for g in cols[:n_genes]])
+    gene_names = np.array([gene_map.get(g, g) for g in gene_ids])
+
+    # ---------------------
+    # INITIALIZE MASTER GENE SET
+    # ---------------------
+    if MASTER_GENES is None:
+        MASTER_GENES = pd.Index(gene_ids)
+        print(f"Initialized MASTER_GENES with {len(MASTER_GENES)} genes")
+
+    # ---------------------
+    # ALIGN TO MASTER GENE SPACE
+    # ---------------------
+    keep_mask = MASTER_GENES.isin(gene_ids)
+
+    gene_ids_f   = gene_ids[keep_mask]
+    gene_names_f = gene_names[keep_mask]
+
+    S = S[:, keep_mask]
+    U = U[:, keep_mask]
+    A = A[:, keep_mask]
+
+    # ---------------------
+    # REORDER TO MASTER GENES
+    # ---------------------
+    order = pd.Index(gene_ids_f).get_indexer(MASTER_GENES[keep_mask])
+
+    S = S[:, order]
+    U = U[:, order]
+    A = A[:, order]
+
+    # ---------------------
+    # BARCODE FIX
+    # ---------------------
+    barcodes = [f"{SAMPLE_ID}_{b}" for b in barcodes]
+
+    print(f"Final matrix: {S.shape}")
+
+    # ---------------------
+    # BUILD ANN DATA
+    # ---------------------
+    adata = ad.AnnData(
+        X=None,
+        obs=pd.DataFrame(index=barcodes),
+        var=pd.DataFrame(
+            {
+                "gene_id": gene_ids_f,
+                "gene_name": gene_names_f,
+            },
+            index=gene_ids_f
+        ),
+    )
+
+    # layers
+    adata.layers["spliced"]   = S
+    adata.layers["unspliced"] = U
+    adata.layers["ambiguous"] = A
+
+    adata.obs["sample"] = SAMPLE_ID
+
+    # ---------------------
+    # QC
+    # ---------------------
+    print(f"  spliced nonzero:   {(S > 0).mean():.4f}")
+    print(f"  unspliced nonzero: {(U > 0).mean():.4f}")
+
+    # ---------------------
+    # SAVE
+    # ---------------------
+    adata.write_h5ad(OUT_FILE, compression="gzip")
+
+    print(f"Saved -> {OUT_FILE}")
+    print(adata)
+
+```
+
+# Section 5. Merge Velocity Layers into the Integrated Atlas
+```{python}
+
+import scanpy as sc
+import anndata as ad
+import scipy.sparse as sp
+import numpy as np
+
+# SAMPLE MAP
+sample_map = {
+    "ROC-25-0074": "Css1_",
+    "ROC-25-0075": "Css2_",
+    "ROC-25-0076": "Css3_",
+    "ROC-25-0077": "Css4_",
+}
+
+# BARCODE FIX
+def fix_velocity_barcodes(vdata, prefix):
+    vdata = vdata.copy()
+
+    def clean(bc):
+        bc = str(bc)
+        barcode = bc.split("_", 1)[1] if "_" in bc else bc
+        return f"{prefix}{barcode}-1"
+
+    vdata.obs_names = [clean(x) for x in vdata.obs_names]
+    return vdata
+
+# LOAD + STANDARDIZE VELOCITY OBJECTS
+velo_list = []
+
+for sid, prefix in sample_map.items():
+    v = sc.read_h5ad(f"output/objects/{sid}_velocity.h5ad")
+    v = fix_velocity_barcodes(v, prefix)
+
+    # use gene_name as default rownames
+    if "gene_name" in v.var.columns:
+        v.var_names = v.var["gene_name"].astype(str)
+    else:
+        v.var_names = v.var_names.astype(str)
+
+    v.var_names_make_unique()
+    velo_list.append(v)
+
+velo_all = ad.concat(
+    velo_list,
+    join="outer",
+    merge="same",
+    index_unique=None
+)
+
+print(f"Velocity combined: {velo_all.n_obs} cells × {velo_all.n_vars} genes")
+
+# OPTIONAL: standardize main adata too, if needed
+# If your main adata is not already using gene names, uncomment this:
+# if "gene_name" in adata.var.columns:
+#     adata.var_names = adata.var["gene_name"].astype(str)
+#     adata.var_names_make_unique()
+
+# FIND OVERLAP
+common_cells = adata.obs_names.intersection(velo_all.obs_names)
+common_genes = adata.var_names.intersection(velo_all.var_names)
+
+print(f"Overlap: {len(common_cells)} cells × {len(common_genes)} genes")
+print("Main cells:", adata.n_obs)
+print("Velocity cells:", velo_all.n_obs)
+
+# Optional per-sample check
+for sid, prefix in sample_map.items():
+    n = np.sum(adata.obs_names.str.startswith(prefix))
+    m = np.sum(velo_all.obs_names.str.startswith(prefix))
+    print(f"{sid}: main={n}, velocity={m}")
+
+# INDEX MAPS INTO FULL adata
+cell_idx = adata.obs_names.get_indexer(common_cells)
+gene_idx = adata.var_names.get_indexer(common_genes)
+
+# SUBSET VELOCITY TO COMMON SPACE
+sub = velo_all[common_cells, common_genes].copy()
+
+# INTEGRATE LAYERS INTO FULL-SHAPE MATRICES
+for layer in ["spliced", "unspliced"]:
+    if layer not in sub.layers:
+        continue
+
+    layer_data = sub.layers[layer]
+    if not sp.issparse(layer_data):
+        layer_data = sp.csr_matrix(layer_data)
+
+    coo = layer_data.tocoo()
+
+    # map submatrix coordinates back to full adata coordinates
+    full_rows = cell_idx[coo.row]
+    full_cols = gene_idx[coo.col]
+
+    full_mat = sp.csr_matrix(
+        (coo.data, (full_rows, full_cols)),
+        shape=adata.shape
+    )
+
+    adata.layers[layer] = full_mat
+
+print("Velocity layers integrated successfully.")
+
+```
+
+
+# Section 6. Run scVelo Dynamics and Pseudotime
+
+This section computes the core `scvelo` products: moments, velocity graph, latent time, pseudotime, and summary plots.
+```{python}
+
+# set seed
+import random
+import scvelo as scv
+random.seed(1234)
+
+adata.X = adata.layers["counts_RNA"].copy()
+
+# scvelo settings
+scv.settings.verbosity = 3
+
+# neighbors & moments
+sc.pp.neighbors(adata, use_rep="X_harmony")
+
+scv.pp.filter_and_normalize(
+    adata,
+    min_shared_counts=3,
+    enforce=True
+)
+scv.pp.moments(adata,n_pcs=41,use_rep = "X_harmony")
+
+# velocity proportions
+# Make leiden_paga a proper categorical
+adata.obs["seurat_clusters"] = adata.obs["seurat_clusters"].astype("category")
+
+# Now the proportions plot works
+scv.pl.proportions(adata, groupby="seurat_clusters")
+plt.close()
+
+scv.pl.proportions(adata, groupby="plasticity")
+plt.close()
+#  velocity
+
+scv.tl.recover_dynamics(adata,n_jobs=10,show_progress_bar=True)
+
+scv.tl.velocity(adata,mode="dynamical") # stochastic dynamical ,min_r2= 0.001
+
+# velocity graph
+scv.tl.velocity_graph(adata, n_jobs=10,show_progress_bar=False)
+
+# velocity pseudotime
+scv.tl.velocity_pseudotime(adata)
+
+# latent time inferred by the dynamical RNA velocity model
+scv.tl.latent_time(adata)
+
+# velocities in cycling progenitors
+#scv.tl.score_genes_cell_cycle(adata)
+
+# Speed and coherence
+scv.tl.velocity_confidence(adata)
+
+```
+
+```{python}
+
+metadata = pd.read_csv("output/tables/MEATADATA.csv", index_col=0)
+
+# make sure indices align
+metadata.index = metadata.index.astype(str)
+adata.obs_names = adata.obs_names.astype(str)
+
+# (optional but smart) reorder metadata
+metadata = metadata.loc[adata.obs_names]
+
+# overwrite the column
+adata.obs["seurat_clusters"] = metadata["seurat_clusters"]
+
+# velocity proportions
+# Make leiden_paga a proper categorical
+adata.obs["seurat_clusters"] = adata.obs["seurat_clusters"].astype("category")
+
+top_genes = adata.var['fit_likelihood'].sort_values(ascending=False).index[:300]
+scv.pl.heatmap(adata, var_names=top_genes, sortby='latent_time',col_color='C1_score', n_convolve=200)
+
+top_genes = adata.var['fit_likelihood'].sort_values(ascending=False).index
+scv.pl.scatter(adata, basis=top_genes[:9], ncols=3, frameon=False)
+
+scv.tl.rank_dynamical_genes(adata, groupby='seurat_clusters')
+df = scv.get_df(adata, 'rank_dynamical_genes/names')
+df.head(5)
+
+df.to_csv("output/tables/rank_dynamical_genes.csv")
+
+adata.obs["seurat_clusters"] = (
+    adata.obs["seurat_clusters"]
+    .astype(str)
+    .astype("category")
+)
+
+scv.tl.differential_kinetic_test(adata, groupby='seurat_clusters')
+dfk = scv.get_df(adata, ['fit_diff_kinetics', 'fit_pval_kinetics'])
+dfk.head(5)
+dfk.to_csv("output/tables/differential_kinetic_test.csv")
+
+import pandas as pd
+
+df = dfk.copy()
+
+# split into lists
+df["fit_diff_kinetics"] = df["fit_diff_kinetics"].astype(str).str.split(",")
+
+# explode into long format
+df_long = df.explode("fit_diff_kinetics")
+
+# clean whitespace + numeric conversion if needed
+df_long["fit_diff_kinetics"] = df_long["fit_diff_kinetics"].str.strip().astype(int)
+
+df_long.to_csv("output/tables/differential_kinetic_test_long.csv")
+
+
+```
+
+```{python}
+
+scv.tl.paga(adata, groups='seurat_clusters')
+
+scv.pl.paga(adata, basis='harmony', size=50, alpha= 0.1,
+            min_edge_width=2, node_size_scale=0.3)
+
+fig = plt.gcf()
+fig.set_size_inches(12, 8)
+
+plt.savefig("output/figures/PAGA_velo_clusters.png", dpi=600, bbox_inches="tight")
+plt.close()
+
+plt.close("all")
+
+adata.obsm["X_umap_harmony"] = adata.obsm["X_umap"].copy()
+
+sc.pp.neighbors(adata, use_rep="X_harmony",n_pcs=41)
+sc.tl.paga(adata,groups='seurat_clusters')
+sc.tl.umap(adata, init_pos='paga')
+
+plt.close("all")
+
+```
+
+# Section 7. Velocity Diagnostic and Embedding Plots
+```{python}
+
+import scvelo as scv
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+sc.set_figure_params(
+    dpi=600,
+    dpi_save=600,
+    frameon=False,
+    vector_friendly=True,
+    fontsize=12,
+    color_map="viridis"
+)
+
+sns.set_theme(
+    style="white",
+    context="notebook",
+    font_scale=1.1
+)
+
+scv.settings.set_figure_params(
+    dpi=600,
+    dpi_save=600,
+    frameon=False,
+    vector_friendly=True
+)
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
+plt.style.use("default")
+mpl.rcParams.update(mpl.rcParamsDefault)
+
+plt.close("all")
+
+# Velocity embedding streams
+scv.pl.velocity_embedding_stream(adata, basis="umap", color=["C1_score","CytoTRACE2_Potency"],cmap="viridis", legend_loc="right", figsize=(10,8),show=True)
+plt.savefig("output/figures/stream_C1_score_cytotrace2_potency.jpg", dpi=600, bbox_inches='tight')
+plt.close()
+
+scv.pl.velocity_embedding_stream(adata, basis="umap", color=["C1_score","CytoTRACE2"],cmap="viridis", legend_loc="right", figsize=(10,8))
+plt.savefig("output/figures/velocity_stream_C1_score_index_cytotrace2.jpg", dpi=600, bbox_inches='tight')
+plt.close()
+
+scv.pl.velocity_embedding_stream(adata, basis="umap", color=["C1_score"], cmap="viridis", legend_loc="right", figsize=(8,6),title= "UMAP: Velocity colored by C1 score")
+plt.savefig("output/figures/umap_velocity_stream_C1_score.png", dpi=600)
+plt.close()
+
+scv.pl.velocity_embedding_stream(adata, basis="harmony", color=["C1_score"], cmap="viridis", legend_loc="right", figsize=(8,6),title= "HARMONY PCA: Velocity colored by C1 score")
+plt.savefig("output/figures/harmony_velocity_stream_C1_scoreH.png", dpi=600, bbox_inches='tight')
+plt.close()
+
+# Velocity latent time scatter
+scv.pl.velocity_embedding_stream(adata, basis="umap", color="latent_time", cmap="viridis", figsize=(8,6),title= "UMAP PCA: Velocity colored by Latent Time")
+plt.savefig("output/figures/velocity_latent_time_umap.png", dpi=600, bbox_inches='tight')
+plt.close()
+
+scv.pl.velocity_embedding_stream(adata, basis="harmony", color="latent_time", cmap="viridis", figsize=(10,8), title= "HARMONY PCA: Velocity colored by Latent Time")
+plt.savefig("output/figures/velocity_latent_time_harmony.png", dpi=600, bbox_inches='tight')
+plt.close()
+
+# Velocity pseudotime scatter
+scv.pl.velocity_embedding_stream(adata, basis="umap", color="velocity_pseudotime", cmap="viridis", figsize=(8,6),title= "UMAP PCA: Velocity colored by Pseudotime ")
+plt.savefig("output/figures/velocity_pseudotime_umap.png", dpi=600, bbox_inches='tight')
+plt.close()
+
+scv.pl.velocity_embedding_stream(adata, basis="harmony", color=["velocity_pseudotime"], cmap="viridis", legend_loc="right", figsize=(8,6), title= "HARMONY PCA: Velocity colored by Pseudotime")
+plt.savefig("output/figures/velocity_pseudotime_harmony.jpg", dpi=600, bbox_inches='tight')
+plt.close()
+
+#adata.obs['velocity_quantile'] = pd.qcut(adata.obs['velocity_length'], 4, labels=False)
+#scv.pl.scatter(adata, color='velocity_quantile', palette='viridis', figsize=(8,6))
+#scv.pl.scatter(adata, c='velocity_length', size=adata.obs['velocity_confidence']*50, cmap='coolwarm_r', figsize=(8,6))
+
+
+```
+
+# Section 8. Correlation with Plasticity and Potency Scores
+```{python}
+
+Xh = adata.obsm["X_harmony"]
+
+adata.obs["harmony_1"] = Xh[:, 0]
+adata.obs["harmony_2"] = Xh[:, 1]
+
+vars_of_interest = [
+    "C1_score",
+    #"C1_residual",
+    "CytoTRACE2",
+    "velocity_pseudotime",
+    "latent_time",
+    "velocity_confidence",
+    "velocity_length",
+    "harmony_1",
+    "harmony_2"
+]
+
+df = adata.obs[vars_of_interest].copy()
+df = df.dropna()
+
+corr_spearman = df.corr(method="spearman")
+corr_spearman
+
+corr_spearman.to_csv("output/tables/corr_spearman_metadata.csv")
+
+```
+
+# Section 9. Export Velocity Metadata for Seurat and R
+
+This export is a required MAP output. It stores the scVelo metadata that should be joined back to the Seurat object in R: `latent_time`, `velocity_pseudotime`, `velocity_length`, `velocity_confidence`, velocity root/end-point flags, and Harmony coordinates.
+
+```{python}
+
+velocity_metadata_cols = [
+    "sample",
+    "seurat_clusters",
+    "C1_score",
+    "CytoTRACE2",
+    "CytoTRACE2_Potency",
+    "velocity_pseudotime",
+    "latent_time",
+    "velocity_length",
+    "velocity_confidence",
+    "velocity_confidence_transition",
+    "root_cells",
+    "end_points",
+    "harmony_1",
+    "harmony_2"
+]
+
+velocity_metadata_cols = [c for c in velocity_metadata_cols if c in adata.obs.columns]
+
+velocity_metadata_for_seurat = (
+    adata.obs[velocity_metadata_cols]
+    .copy()
+    .reset_index()
+    .rename(columns={"index": "cell_id"})
+)
+
+velocity_metadata_for_seurat.to_csv(
+    "output/tables/MAP_velocity_metadata_for_seurat.csv",
+    index=False
+)
+
+```
+
+# Section 10. Save Velocity-Annotated AnnData
+```{python}
+
+# save AnnData
+adata.write("output/objects/css_combined_scVelo.h5ad", compression="gzip")
+
+adata.obs.to_csv("output/tables/adata_obs_metadata.csv")
+
+```
+
+
+# Section 11. CellRANK2
+
+These blocks use the velocity and neighborhood kernels to estimate macrostates, fate probabilities, and lineage drivers along the plasticity landscape.
+# Section 12. Load the Velocity Object for CellRank
+
+```{python}
+
+adata = sc.read_h5ad("output/objects/css_combined_scVelo.h5ad")
+
+```
+
+# Section 13. Configure CellRank Kernels
+```{python}
+
+# set seed
+import random
+random.seed(1234)
+
+# pseudotime kernel
+import cellrank as cr
+from cellrank.kernels import PseudotimeKernel, ConnectivityKernel,VelocityKernel
+from scipy.ndimage.filters import convolve
+
+# use Palantir pseudotime
+#ptk = PseudotimeKernel(adata, time_key="C1_score")
+#ptk.compute_transition_matrix(n_jobs=8)
+
+# connectivity kernel
+ck = ConnectivityKernel(adata).compute_transition_matrix()
+
+# Velocity kernel
+vk = VelocityKernel(adata).compute_transition_matrix()
+
+# combine kernels
+velocity_kernel = 0.7 * vk + 0.3 * ck
+
+
+```
+
+
+```{python}
+
+import random
+random.seed(1234)
+
+import matplotlib.pyplot as plt
+
+plt.rcParams["axes.grid"] = False
+
+adata.uns["seurat_clusters_colors"] = sc.pl.palettes.default_102[:10]
+
+# UMAP velocity projection
+velocity_kernel.plot_projection(
+    basis="X_umap",
+    color="C1_score",
+    cmap="viridis",
+    recompute=False,
+    figsize=(8,6),
+    dpi=600,
+    alpha=0.2,
+    title="UMAP: Velocity and Connectivity projection colored by C1 score"
+)
+plt.savefig("output/figures/umap_velocity_C1_score_projection.png", dpi=600)
+plt.close()
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter
+
+c1_min = np.nanmin(adata.obs["C1_Core"])
+c1_max = np.nanmax(adata.obs["C1_Core"])
+
+ax = velocity_kernel.plot_projection(
+    basis="X_umap",
+    color="C1_Core",
+    cmap="magma",
+    vmin=c1_min,
+    vmax=c1_max,
+    recompute=False,
+    figsize=(8, 6),
+    dpi=600,
+    alpha=0.4,
+    title="UMAP: Velocity and Connectivity projection colored by C1-Core"
+)
+
+fig = plt.gcf()
+
+# Find colorbar axis and force min/max ticks
+cbar_ax = fig.axes[-1]
+cbar_ax.set_yticks([c1_min, c1_max])
+cbar_ax.set_yticklabels([
+    f"Low",
+    f"High"
+])
+
+plt.savefig(
+    "output/figures/umap_velocity_C1_Core_projection.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+plt.close()
+
+velocity_kernel.plot_projection(
+    basis="X_umap",
+    color="seurat_clusters",
+    recompute=False,
+    figsize=(8,6),
+    dpi=600,
+    alpha=0.2,
+    title="UMAP: Velocity and Connectivity projection colored by clusters"
+)
+plt.savefig("output/figures/umap_velocity_seurat_clusters_projection.png", dpi=600)
+plt.close()
+
+velocity_kernel.plot_projection(
+    basis="X_harmony",
+    color="C1_score",
+    cmap="viridis",
+    recompute=False,
+    figsize=(8,6),
+    dpi=600,
+    alpha=0.2,
+    title="HARMONY PCA: Velocity and Connectivity projection colored by C1 score"
+)
+
+plt.savefig("output/figures/HARMONY_velocity_C1_score_projection.png", dpi=600, bbox_inches='tight')
+plt.close()
+
+velocity_kernel.plot_projection(
+    basis="X_tsne",
+    color="seurat_clusters",
+    recompute=False,
+    figsize=(8,6),
+    dpi=600,
+    alpha=0.2,
+    title="TSNE: Velocity and Connectivity projection colored by clusters"
+)
+
+plt.savefig("output/figures/TSNE_velocity_seurat_clusters_projection.png", dpi=600, bbox_inches='tight')
+plt.close()
+
+velocity_kernel.plot_projection(
+    basis="X_tsne",
+    color="C1_score",
+    cmap="viridis",
+    recompute=False,
+    figsize=(8,6),
+    dpi=600,
+    alpha=0.2,
+    title="TSNE: Velocity and Connectivity projection colored by C1 score"
+)
+
+plt.savefig("output/figures/TSNE_velocity_C1_score_projection.png", dpi=600, bbox_inches='tight')
+plt.close()
+
+
+# latent_time 
+velocity_kernel.plot_projection(
+    basis="X_umap",
+    color="latent_time",
+    cmap="viridis",
+    recompute=False,
+    figsize=(8,6),
+    dpi=600,
+    alpha=0.2,
+    title="UMAP: Velocity and Connectivity projection colored by C1 score"
+)
+plt.savefig("output/figures/umap_velocity_latent_time_projection.png", dpi=600)
+plt.close()
+
+velocity_kernel.plot_projection(
+    basis="X_harmony",
+    color="latent_time",
+    cmap="viridis",
+    recompute=False,
+    figsize=(8,6),
+    dpi=600,
+    alpha=0.2,
+    title="HARMONY PCA: Velocity and Connectivity projection colored by C1 score"
+)
+
+plt.savefig("output/figures/HARMONY_velocity_latent_time_projection.png", dpi=600, bbox_inches='tight')
+plt.close()
+
+
+plt.close("all")
+
+
+```
+
+
+```{python}
+
+# Setup.
+import os
+import random
+import matplotlib.pyplot as plt
+from cellrank.estimators import GPCCA
+
+random.seed(1234)
+import numpy as np
+np.random.seed(1234)
+
+# Create output directory
+OUTDIR = "output/figures"
+os.makedirs(OUTDIR, exist_ok=True)
+
+# Initialize GPCCA model.
+g = GPCCA(velocity_kernel, method="krylov")
+
+g.compute_schur()
+
+g.plot_spectrum()
+
+savefig(
+    name="spectrum",
+    outdir=OUTDIR,
+    figsize=(8, 6)
+)
+
+
+# Macrostates.
+#g.compute_macrostates(n_states=2)
+# Alternative fitting approach (optional)
+g.fit(cluster_key="seurat_clusters", n_states=3)
+
+# Initial / terminal states.
+g.predict_initial_states(allow_overlap=True)
+
+# Select low C1_score cells (e.g. bottom 10%)
+threshold = adata.obs["C1_score"].quantile(0.1)
+root_cells = adata.obs["C1_score"] <= threshold
+
+# Store as a boolean mask
+adata.obs["root_cells"] = root_cells
+
+import pandas as pd
+
+adata.obs["root_cells"] = pd.Categorical(
+    ["initial" if x else None for x in root_cells]
+)
+
+g.set_initial_states(adata.obs["root_cells"])
+
+g.predict_terminal_states(allow_overlap=True)
+
+
+# Fate probabilities.
+g.compute_fate_probabilities(tol=1e-5, preconditioner="ilu", n_jobs=5)
+#g.compute_fate_probabilities(n_jobs=5)
+
+g.fate_probabilities.names
+
+fp = g.fate_probabilities
+
+fp
+
+
+# Macrostates plots.
+g.plot_macrostates(
+    basis="X_umap",
+    which="initial",
+    legend_loc="right margin"
+)
+savefig("macrostates_initial")
+
+g.plot_macrostates(
+    basis="umap",
+    which="terminal",
+    legend_loc="right margin"
+)
+savefig(
+    name="macrostates_terminal",
+    outdir=OUTDIR,
+    figsize=(8, 6)
+)
+
+
+
+# Fate probabilities plots.
+g.fate_probabilities.columns = [
+    f"State_{i}" for i in range(1, g.fate_probabilities.shape[1] + 1)
+]
+
+g.plot_fate_probabilities(
+    basis="X_umap",
+    cmap="viridis",
+    same_plot=False
+)
+savefig(
+    name="fate_probabilities",
+    outdir=OUTDIR,
+    figsize=(12, 4)
+)
+
+
+# Coarse transitions.
+g.plot_coarse_T()
+savefig("coarse_T", figsize=(10, 6))
+
+g.fate_probabilities.sum(1)
+
+
+```
+
+# Section 14. Identify Lineage Driver Genes
+```{python}
+
+# Lineage drivers.
+driver_df = g.compute_lineage_drivers(seed=1234)
+driver_df.to_csv(os.path.join(OUTDIR, "compute_lineage_drivers.csv"))
+
+
+# Driver gene correlation plot.
+adata.var["mean_expression"] = np.asarray(adata.X.mean(axis=0)).flatten()
+
+g.plot_lineage_drivers_correlation(
+    lineage_x="0",
+    lineage_y="1",
+    adjust_text=True,
+    color="mean_expression",
+    legend_loc="none",
+    dpi=600,
+    fontsize=6,
+    size=50
+)
+savefig(
+    name="plot_lineage_drivers_correlation_0_1",
+    outdir=OUTDIR,
+    title="Lineage 0 vs Lineage 1 Drivers",
+    figsize=(6, 6),grid=True
+)
+
+
+g.plot_lineage_drivers_correlation(
+    lineage_x="2",
+    lineage_y="1",
+    adjust_text=True,
+    color="mean_expression",
+    legend_loc="none",
+    dpi=600,
+    fontsize=6,
+    size=50
+)
+
+savefig(
+    name="lineage_driver_correlation_2_1",
+    outdir=OUTDIR,
+    title="Lineage 2 vs Lineage 1 Drivers",
+    figsize=(6, 6)
+)
+
+g.plot_lineage_drivers_correlation(
+    lineage_x="2",
+    lineage_y="0",
+    adjust_text=True,
+    color="mean_expression",
+    legend_loc="none",
+    figsize=(5, 5),
+    dpi=600,
+    fontsize=9,
+    size=50,
+)
+
+savefig(
+    name="lineage_driver_correlation_0_2",
+    outdir=OUTDIR,
+    title="Lineage 0 vs Lineage 2 Drivers",
+    figsize=(6, 6)
+)
+
+```
+
+# Section 15. Export CellRank2-Aware Velocity Metadata
+
+This final export is written after the CellRank2 block so that the Seurat/R side can recover the latest velocity metadata, root-cell annotations, terminal-state calls, and any CellRank-related fields stored in `adata.obs`.
+
+```{python}
+
+cellrank_velocity_metadata_for_seurat = (
+    adata.obs
+    .copy()
+    .reset_index()
+    .rename(columns={"index": "cell_id"})
+)
+
+cellrank_velocity_metadata_for_seurat.to_csv(
+    "output/tables/MAP_velocity_cellrank_metadata_for_seurat.csv",
+    index=False
+)
+
+driver_df.to_csv("output/tables/MAP_cellrank2_lineage_drivers.csv", index=True)
+
+# Optional: save model.
+# from joblib import dump, load
+# dump(g, os.path.join(OUTDIR, "gpcca_model.joblib"))
+
+```

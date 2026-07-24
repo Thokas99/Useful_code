@@ -1,0 +1,168 @@
+---
+title: "Velocity and CellRank"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Run an AnnData velocity workflow, store velocity and fate summaries, and save the updated `.h5ad`.
+
+## Packages
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+import os
+import pandas as pd
+import scanpy as sc
+import scvelo as scv
+import cellrank as cr
+```
+
+## User Config
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object = "path/to/previous_step.h5ad"
+output_object = "path/to/velocity_cellrank.h5ad"
+results_dir = "results/velocity_cellrank"
+figures_dir = "figures/velocity_cellrank"
+sample_column = "sample_column"
+group_column = "group_column"
+basis = "umap"
+n_pcs = 30
+n_neighbors = 30
+seed = 1
+```
+
+## Input Loading
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+os.makedirs(results_dir, exist_ok=True)
+os.makedirs(figures_dir, exist_ok=True)
+adata = sc.read_h5ad(input_object)
+```
+
+## Validation
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+required = {sample_column, group_column}
+missing = required.difference(adata.obs.columns)
+if missing:
+    raise ValueError(f"Missing obs columns: {sorted(missing)}")
+```
+
+## Input Summary
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+pd.DataFrame({"n_cells": [adata.n_obs], "n_features": [adata.n_vars]}).to_csv(f"{results_dir}/velocity_input_summary.tsv", sep="\t", index=False)
+```
+
+## Main Analysis
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+scv.pp.filter_and_normalize(adata)
+scv.pp.moments(adata, n_pcs=n_pcs, n_neighbors=n_neighbors)
+scv.tl.velocity(adata)
+scv.tl.velocity_graph(adata)
+scv.tl.velocity_pseudotime(adata)
+kernel = cr.kernels.VelocityKernel(adata).compute_transition_matrix()
+adata.uns["cellrank_kernel"] = {"type": "VelocityKernel"}
+```
+
+## QC Checks
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+adata.obs[[sample_column, group_column, "velocity_pseudotime"]].to_csv(f"{results_dir}/velocity_obs.tsv", sep="\t")
+```
+
+## Visualization
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+scv.pl.velocity_embedding_stream(adata, basis=basis, save=None, show=False)
+```
+
+## Object Result Storage
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+adata.uns["template"] = {"step": "velocity_scvelo_cellrank", "basis": basis, "n_neighbors": n_neighbors}
+```
+
+## Result Export
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+adata.obs.groupby(group_column, observed=True)["velocity_pseudotime"].describe().to_csv(f"{results_dir}/velocity_pseudotime_by_group.tsv", sep="\t")
+```
+
+## Final Save
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+adata.write_h5ad(output_object)
+```
+
+## Output Summary
+
+```{python}
+#| label: tpl-scrna-09-velocity-scvelo-cellrank-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+print({"output_object": output_object, "n_cells": adata.n_obs, "n_features": adata.n_vars})
+```
+

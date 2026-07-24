@@ -1,0 +1,1277 @@
+---
+title: "MAP 02 - C1 Plasticity Scoring"
+format: html
+---
+
+# Section 1. Overview
+
+This notebook creates the central C1 plasticity score used throughout the CSS LUAD epithelial plasticity workflow.
+
+**MAP role:** mandatory C1 scoring notebook. Preserve the continuous `C1_score`, the UP/DOWN UCell components, CytoTRACE2 comparison, sample/cluster summaries, and cell-cycle checks.
+
+## Section 1.1. Reader Guide
+
+- Inputs are the processed Seurat object from step 01 and the curated signature table `input/Signatures/Core_genes_tidy.csv`.
+- The notebook scores UP and DOWN plasticity signatures with UCell, smooths them on the Harmony graph, and combines them into `C1_score`.
+- It cross-checks the score against CytoTRACE2, sample identity, clusters, annotation labels, and cell-cycle metadata.
+- Main outputs are score plots, signature presence tables, annotation comparisons, and updated Seurat metadata.
+- Read this as the step where the biological idea of plasticity becomes a numeric gradient.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Setup and load processed object.
+2. Score UP and DOWN C1 signatures.
+3. Build the continuous `C1_score`.
+4. Validate C1 against CytoTRACE2 and annotations.
+5. Generate essential UMAP, violin, and distribution plots.
+6. Export score summaries and updated object metadata.
+
+## Section 1.3. Setup
+
+This section loads the required packages and restores the Seurat object used as the starting point for downstream analyses.
+
+```{r include=FALSE}
+
+packages <- c(
+  "tidyverse",
+  "Seurat",
+  "SeuratWrappers",
+  "harmony",
+  "patchwork",
+  "data.table",
+  "fst",
+  "UCell",
+  "CytoTRACE2",
+  "slingshot",
+  "tradeSeq",
+  "viridis",
+  "RColorBrewer",
+  "scran",
+  "qs2",
+  "ggsci",
+  "scCustomize", 
+  "future",
+  "ggpubr",
+  "GGally"
+)
+
+purrr::walk(packages, library, character.only = TRUE)
+
+plan(multicore, workers = 5)
+
+umap_theme <- ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(size = 16, face = "bold"),
+    plot.subtitle = ggplot2::element_text(size = 11, color = "grey30"),
+    panel.grid = ggplot2::element_blank(),
+    axis.title = ggplot2::element_text(size = 13),
+    axis.text = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    legend.title = ggplot2::element_text(size = 11),
+    legend.text = ggplot2::element_text(size = 10)
+  )
+
+GSE274934 <- qs_read(file = "output/scRNA/objects/GSE274934_merged_RNA_QC.qs2",nthreads = 10)
+
+```
+
+# Cell-Cycle Scoring
+```{r}
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+GSE274934 <- CellCycleScoring(GSE274934, s.features = s.genes, g2m.features = g2m.genes, set.ident = F)
+
+# Phase
+p1 <- DimPlot_scCustom(
+  GSE274934,
+  group.by = c("Phase"),
+  reduction = "umap",
+) +
+  umap_theme +
+  labs(x = "UMAP1", y = "UMAP2", title = "Cell-Cycle Phase", subtitle = "Cell-Cycle Scoring")
+
+p1
+
+ggsave("output/scRNA/figures/CC_Phase.png", plot = p1, width = 12, height = 8)
+
+p1 <- FeaturePlot_scCustom(
+  GSE274934,
+  features = c("G2M.Score","S.Score"),
+  reduction = "umap",
+  na_cutoff = NA
+) &
+  scale_color_viridis_c(option = "magma") &
+  umap_theme &
+  labs(x = "UMAP1", y = "UMAP2")
+
+p1
+
+ggsave("output/scRNA/figures/G2M_S_score.png", plot = p1, width = 16, height = 10)
+
+```
+
+
+# Section 2. Plasticity Scoring with UCell
+
+Plasticity-related signatures are scored with UCell, smoothed on the Harmony graph, and collapsed into a single `C1_score` used throughout the notebook.
+
+C1_Core_UCell_native     = native UCell directional UP+/DOWN- score
+C1_Core_UCell_native_kNN = smoothed native UCell directional score
+C1_Core                  = raw signed z(UP) - z(DOWN) contrast
+C1_Core_kNN              = smoothed signed z(UP_kNN) - z(DOWN_kNN) contrast
+
+```{r UCell score}
+
+set.seed(1234)
+
+library(dplyr)
+library(UCell)
+library(BiocParallel)
+library(qs)
+
+BPPARAM <- MulticoreParam(workers = 9)
+register(BPPARAM)
+
+zscore <- function(x) as.numeric(scale(x))
+
+class_from_z <- function(x) {
+  case_when(
+    x > 1 ~ "C1-like",
+    x > 0 & x <= 1 ~ "C1-intermediate",
+    x >= -1 & x <= 0 ~ "Not-C1-intermediate",
+    x < -1 ~ "Not-C1-like",
+    TRUE ~ NA_character_
+  )
+}
+
+check_signature <- function(gene_vector, object_genes, signature_name) {
+  genes_input <- unique(na.omit(gene_vector))
+  genes_found <- intersect(genes_input, object_genes)
+  genes_lost  <- setdiff(genes_input, object_genes)
+
+  message(
+    signature_name, ": ",
+    length(genes_found), "/", length(genes_input),
+    " genes found in object."
+  )
+
+  if (length(genes_found) < 5) {
+    stop(signature_name, " has fewer than 5 genes present in the object.")
+  }
+
+  list(genes_found = genes_found, genes_lost = genes_lost)
+}
+
+C1_Core_signature <- vroom::vroom(
+  "input/C1_Core_signature.csv",
+  show_col_types = FALSE
+)
+
+C1_Core_UP <- C1_Core_signature |>
+  filter(C1_Core_direction == "UP")
+
+C1_Core_DOWN <- C1_Core_signature |>
+  filter(C1_Core_direction == "DOWN")
+
+object_genes <- rownames(GSE274934)
+
+up_checked <- check_signature(
+  gene_vector = C1_Core_UP$gene,
+  object_genes = object_genes,
+  signature_name = "C1_Core_UP"
+)
+
+down_checked <- check_signature(
+  gene_vector = C1_Core_DOWN$gene,
+  object_genes = object_genes,
+  signature_name = "C1_Core_DOWN"
+)
+
+missing_signature_genes <- list(
+  C1_Core_UP_missing = up_checked$genes_lost,
+  C1_Core_DOWN_missing = down_checked$genes_lost
+)
+
+missing_signature_genes
+
+gene_list_split <- list(
+  C1_Core_UP = up_checked$genes_found,
+  C1_Core_DOWN = down_checked$genes_found
+)
+
+gene_list_native <- list(
+  C1_Core_UCell_native = c(
+    paste0(up_checked$genes_found, "+"),
+    paste0(down_checked$genes_found, "-")
+  )
+)
+
+GSE274934 <- AddModuleScore_UCell(
+  obj = GSE274934,
+  features = gene_list_split,
+  BPPARAM = BPPARAM,
+  name = NULL
+)
+
+GSE274934 <- AddModuleScore_UCell(
+  obj = GSE274934,
+  features = gene_list_native,
+  BPPARAM = BPPARAM,
+  name = NULL
+)
+
+GSE274934$C1_Core <- zscore(GSE274934$C1_Core_UP_UCell) -
+  zscore(GSE274934$C1_Core_DOWN_UCell)
+
+GSE274934 <- SmoothKNN(
+  obj = GSE274934,
+  signature.names = c(
+    "C1_Core_UCell_native",
+    "C1_Core_UP_UCell",
+    "C1_Core_DOWN_UCell"
+  ),
+  reduction = "harmony"
+)
+
+GSE274934$C1_Core_kNN <- zscore(GSE274934$C1_Core_UP_UCell_kNN) -
+  zscore(GSE274934$C1_Core_DOWN_UCell_kNN)
+
+c1_group_levels <- c(
+  "Not_C1_like",
+  "Not_C1_intermediate",
+  "C1_intermediate",
+  "C1_like"
+)
+
+GSE274934$C1_Core_Class <- factor(
+  class_from_z(GSE274934$C1_Core_kNN),
+  levels = c1_group_levels
+)
+
+cols_remove <- c(
+  "C1_Core_UP_UCell",
+  "C1_Core_DOWN_UCell",
+  "C1_Core_UP_UCell_kNN",
+  "C1_Core_DOWN_UCell_kNN"
+)
+
+GSE274934@meta.data <- GSE274934@meta.data[
+  ,
+  setdiff(colnames(GSE274934@meta.data), cols_remove),
+  drop = FALSE
+]
+
+GSE274934$C1_Core_2Class <- case_when(
+  GSE274934$C1_Core_kNN > 1 ~ "C1_like",
+  TRUE ~ "C1_not_enriched"
+)
+
+GSE274934@misc$C1_Core_missing_genes <- missing_signature_genes
+
+bpstop(BPPARAM)
+
+qs_save(
+  GSE274934,
+  file = file.path("output/scRNA/objects/GSE274934_merged_RNA_QC.qs2"),
+  nthreads = 10,
+  compress_level = 10
+)
+
+```
+standardized difference between smoothed UP-UCell and smoothed DOWN-UCell. Derived z-contrast
+
+```{r}
+
+hlca_epithelial_finest <- c(
+  "AT1",
+  "AT2",
+  "AT2 proliferating",
+  "Transitional Club-AT2",
+  "Suprabasal",
+  "Basal resting",
+  "Multiciliated (non-nasal)",
+  "Multiciliated (nasal)",
+  "Deuterosomal",
+  "Goblet (nasal)",
+  "Goblet (bronchial)",
+  "Goblet (subsegmental)",
+  "Club (nasal)",
+  "Club (non-nasal)",
+  "Neuroendocrine",
+  "Ionocyte",
+  "Tuft",
+  "SMG serous (bronchial)",
+  "SMG serous (nasal)",
+  "SMG mucous",
+  "SMG duct"
+)
+
+condense_C1_labels <- function(
+  obj,
+  sample_name,
+  epithelial_finest_labels = hlca_epithelial_finest
+) {
+  
+  cat("\n==============================\n")
+  cat("C1 Core epithelial filtering:", sample_name, "\n")
+  cat("==============================\n")
+  
+  required_cols <- c("predicted.ann_finest_level", "C1_Core_Class")
+  missing_cols <- setdiff(required_cols, colnames(obj@meta.data))
+  
+  if (length(missing_cols) > 0) {
+    stop("Missing metadata columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  original_class <- as.character(obj@meta.data[["C1_Core_Class"]])
+  finest_label <- as.character(obj@meta.data[["predicted.ann_finest_level"]])
+  
+  is_epithelial <- finest_label %in% epithelial_finest_labels
+  is_epithelial[is.na(is_epithelial)] <- FALSE
+  
+  obj@meta.data[["C1_Core_Class"]] <- dplyr::case_when(
+    !is_epithelial ~ "filtered",
+    TRUE ~ original_class
+  )
+  
+  obj@meta.data[["C1_Core_Class"]] <- as.character(obj@meta.data[["C1_Core_Class"]])
+  
+  cat("\nFinal C1 Core labels:\n")
+  print(table(obj@meta.data[["C1_Core_Class"]], useNA = "ifany"))
+  
+  cat("\nFinal labels by finest annotation:\n")
+  print(table(
+    C1_Core_Class = obj@meta.data[["C1_Core_Class"]],
+    finest = obj@meta.data[["predicted.ann_finest_level"]],
+    useNA = "ifany"
+  ))
+  
+  cat("\nDone:", sample_name, "\n")
+  
+  return(obj)
+}
+
+GSE274934 <- condense_C1_labels(GSE274934, "GSE274934")
+
+add_C1_Core_Epi <- function(
+  obj,
+  sample_name,
+  epithelial_finest_labels = hlca_epithelial_finest
+) {
+  
+  cat("\n==============================\n")
+  cat("C1 Core continuous epithelial filtering:", sample_name, "\n")
+  cat("==============================\n")
+  
+  required_cols <- c("predicted.ann_finest_level", "C1_Core")
+  missing_cols <- setdiff(required_cols, colnames(obj@meta.data))
+  
+  if (length(missing_cols) > 0) {
+    stop("Missing metadata columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  finest_label <- as.character(obj@meta.data[["predicted.ann_finest_level"]])
+  
+  is_epithelial <- finest_label %in% epithelial_finest_labels
+  is_epithelial[is.na(is_epithelial)] <- FALSE
+  
+  original_score <- as.numeric(obj@meta.data[["C1_Core"]])
+  
+  obj@meta.data[["C1_Core_Epi"]] <- dplyr::case_when(
+    !is_epithelial ~ NA_real_,
+    TRUE ~ original_score
+  )
+  
+  cat("\nEpithelial status:\n")
+  print(table(is_epithelial, useNA = "ifany"))
+  
+  cat("\nC1_Core summary, original:\n")
+  print(summary(obj@meta.data[["C1_Core"]]))
+  
+  cat("\nC1_Core_Epi summary, epithelial only:\n")
+  print(summary(obj@meta.data[["C1_Core_Epi"]]))
+  
+  cat("\nNumber of NA in C1_Core_Epi:\n")
+  print(sum(is.na(obj@meta.data[["C1_Core_Epi"]])))
+  
+  cat("\nC1_Core_Epi NA status by finest annotation:\n")
+  print(table(
+    C1_Core_Epi_is_NA = is.na(obj@meta.data[["C1_Core_Epi"]]),
+    finest = obj@meta.data[["predicted.ann_finest_level"]],
+    useNA = "ifany"
+  ))
+  
+  cat("\nDone:", sample_name, "\n")
+  
+  return(obj)
+}
+
+GSE274934 <- add_C1_Core_Epi(GSE274934, "GSE274934")
+
+```
+
+
+# Section 4. UCell Plots
+
+These plots summarize the spatial distribution of the UCell-derived signatures and compare the resulting `C1_score` across samples and Leiden clusters.
+
+```{r UCell plots}
+
+set.seed(1234)
+
+library(ggsci)
+
+# Extract NPG colors for the non-filtered classes
+classes <- levels(factor(GSE274934$C1_Core_Class))
+classes_non_filtered <- setdiff(classes, "filtered")
+
+npg_cols <- pal_npg("nrc")(length(classes_non_filtered))
+
+c1_cols <- c(
+  filtered = "grey80",
+  setNames(npg_cols, classes_non_filtered)
+)
+
+p1 <- DimPlot_scCustom(
+  GSE274934,
+  group.by = "C1_Core_Class",
+  reduction = "umap"
+) &
+  scale_color_manual(values = c1_cols) &
+  umap_theme &
+  theme(legend.position = "bottom") &
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "C1 Core Class",
+    subtitle = "113 core genes"
+  )
+
+p1
+
+ggsave(
+  "output/scRNA/figures/C1_Core_Class.png",
+  plot = p1,
+  width = 12,
+  height = 8
+)
+
+p1 <- FeaturePlot_scCustom(
+  GSE274934,
+  features = c("C1_Core"),
+  reduction = "umap",
+  na_cutoff = NA
+) +
+  scale_color_viridis_c(option = "magma") +
+  umap_theme +
+  labs(x = "UMAP1", y = "UMAP2", title = "C1 Core score", subtitle = "113 core genes")
+
+p1
+
+ggsave("output/scRNA/figures/CytoTRACE2_score.png", plot = p1, width = 12, height = 8)
+
+p1 <- FeaturePlot_scCustom(
+  GSE274934,
+  features = "C1_Core_Epi",
+  reduction = "umap"
+) &
+    scale_color_viridis_c(option = "magma") &
+  umap_theme &
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "C1 Core score",
+    subtitle = "Epithelial cells only; non-epithelial cells set to NA"
+  )
+
+p1
+
+ggsave("output/scRNA/figures/C1_Core_Epi.png", plot = p1, width = 12, height = 8)
+
+umap_df <- FetchData(GSE274934, vars = c("C1_score", "orig.ident", "seurat_clusters"))
+
+p1 <- ggplot(umap_df, aes(x = orig.ident, y = C1_score, fill = orig.ident)) +
+  geom_violin(trim = TRUE, alpha = 0.7, fill = "white") +
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.5) +
+  ggpubr::stat_compare_means() +
+  umap_theme +
+  labs(
+    x = "Sample",
+    y = "C1 score",
+    title = "C1 score distribution across samples",
+    subtitle = "Violin and boxplot comparison by sample identity"
+  ) + 
+  scale_fill_brewer(palette = "Set2") +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "none"
+  )
+
+p1
+
+ggsave("output/figures/C1_score_violin.png", p1, width = 10, height = 6)
+
+p2 <- ggplot(umap_df, aes(x = SCT_snn_res.0.1, y = C1_score, fill = SCT_snn_res.0.1)) +
+  geom_violin(trim = TRUE, alpha = 0.7, fill = "white") +
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.5) +
+  ggpubr::stat_compare_means() +
+  umap_theme +
+  labs(
+    x = "Leiden cluster",
+    y = "C1 score",
+    title = "C1 score across Leiden clusters",
+    subtitle = "Distribution of C1 program activity by transcriptional state"
+  ) + 
+  scale_fill_brewer(palette = "Set2") +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "none"
+  )
+
+p2
+
+ggsave("output/figures/leiden_paga_violin.png", p2, width = 10, height = 6)
+
+```
+
+# Section 5. Discrete Plasticity Strata from C1 Score
+
+The continuous `C1_score` is converted into low, medium, and high plasticity strata using the 25th and 75th percentiles.
+
+```{r plasticity strata}
+
+set.seed(1234)
+library(fitdistrplus)
+library(diptest)
+
+x <- GSE274934$C1_Core
+
+descdist(x, discrete = FALSE, boot = 1000)
+
+plotdist(x, histo = TRUE, demp = TRUE)
+
+fw <- fitdist(x, "norm", discrete = FALSE)
+plot(fw)
+
+summary(fw)
+
+dip.test(x)
+
+q <- quantile(x, c(.25, .75), type = 8)
+q_low  <- q[1]
+q_high <- q[2]
+
+GSE274934$plasticity <- cut(
+  x,
+  breaks = c(-Inf, q_low, q_high, Inf),
+  labels = c("low", "medium", "high"),
+  ordered_result = TRUE
+)
+
+df <- data.frame(C1_Core = x)
+
+p <- ggplot(df, aes(x = C1_Core)) +
+  geom_density(linewidth = 1.2, fill = "steelblue", alpha = 0.3) +
+  geom_vline(xintercept = q_low, linetype = "dashed", linewidth = 1, color = "red") +
+  geom_vline(xintercept = q_high, linetype = "dashed", linewidth = 1, color = "red") +
+  annotate("text", x = q_low, y = 0.3 * max(density(x)$y), label = "Q25", color = "red", hjust = 1.1) +
+  annotate("text", x = q_high, y = 0.3 * max(density(x)$y), label = "Q75", color = "red", hjust = -0.1) +
+  labs(
+    title = "Distribution of C1 score (kNN-smoothed)",
+    subtitle = "Dashed red lines indicate Q25 and Q75 thresholds",
+    x = "C1 score",
+    y = "Density"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text( size = 12)
+  )
+
+p
+
+ggsave("output/scRNA/figures/C1_Core_distribution.png", plot = p, width = 10, height = 6)
+
+
+
+```
+
+
+# Section 6. CytoTRACE2 Potency Scoring
+
+CytoTRACE2 is run on raw RNA counts to provide an orthogonal estimate of differentiation potency that can be compared against the UCell-derived plasticity score.
+
+```{r}
+
+set.seed(1234)
+library(BiocParallel)
+library(CytoTRACE2)
+
+cts <- GetAssayData(GSE274934, assay="RNA", layer="counts")
+
+ct <- cytotrace2(cts, is_seurat=FALSE, species="human", seed=1234,ncores = 5)
+
+GSE274934$CytoTRACE2 <- ct$CytoTRACE2_Score
+GSE274934$CytoTRACE2_Potency <- factor(ct$CytoTRACE2_Potency)
+
+library(janitor)
+GSE274934@meta.data %>%
+  tabyl(CytoTRACE2_Potency,SCEVAN_class) %>%
+  adorn_totals("col") %>%
+  adorn_percentages("row") %>%
+  adorn_pct_formatting(digits = 2) %>%
+  adorn_ns() %>%
+  adorn_title()
+
+qs_save(GSE274934, file = file.path("output/scRNA/objects/GSE274934_merged_RNA_QC.qs2"), nthreads = 10, compress_level = 10)
+
+```
+
+# Section 7. Plot CytoTRACE
+
+These figures assess agreement between CytoTRACE2 and `C1_score`, while also checking that CytoTRACE2 potency is not merely tracking sample identity.
+
+```{r}
+
+set.seed(1234)
+
+print(paste("Adjusted Rand Index CytoTRACE2 vs batch:", round(mclust::adjustedRandIndex(GSE274934$CytoTRACE2_Potency, GSE274934$orig.ident), 3)))
+chisq.test(table(GSE274934$CytoTRACE2_Potency, GSE274934$orig.ident))
+rstatix::cramer_v(table(GSE274934$CytoTRACE2_Potency, GSE274934$orig.ident), correct = TRUE)
+
+print(paste("Adjusted Rand Index CytoTRACE2 vs Cell-Cycle phase:", round(mclust::adjustedRandIndex(GSE274934$CytoTRACE2_Potency, GSE274934$Phase), 3)))
+chisq.test(table(GSE274934$CytoTRACE2_Potency, GSE274934$Phase))
+rstatix::cramer_v(table(GSE274934$CytoTRACE2_Potency, GSE274934$Phase), correct = TRUE)
+
+print(paste("Adjusted Rand Index CytoTRACE2 vs C1 Core Group:", round(mclust::adjustedRandIndex(GSE274934$CytoTRACE2_Potency, GSE274934$C1_Core_Class), 3)))
+chisq.test(table(GSE274934$CytoTRACE2_Potency, GSE274934$C1_Core_Class))
+rstatix::cramer_v(table(GSE274934$CytoTRACE2_Potency, GSE274934$C1_Core_Class), correct = TRUE)
+
+# SCEVAN_class
+p1 <- DimPlot_scCustom(
+  GSE274934,
+  group.by = c("SCEVAN_class"),
+  reduction = "umap",
+) +
+  umap_theme +
+  labs(x = "UMAP1", y = "UMAP2", title = "SCEVAN class", subtitle = "Single CEll Variational Aneuploidy aNalysis on epithelial cells")
+
+p1
+
+ggsave("output/scRNA/figures/SCEVAN_class.png", plot = p1, width = 12, height = 8)
+
+# SCEVAN_class_and_CytoTRACE2
+p1 <- DimPlot_scCustom(
+  GSE274934,
+  group.by = c("CytoTRACE2_Potency", "SCEVAN_class"),
+  reduction = "umap",
+) &
+  umap_theme &
+  theme(legend.position = "bottom") &
+  labs(x = "UMAP1", y = "UMAP2")
+
+p1
+
+ggsave("output/scRNA/figures/SCEVAN_class_and_CytoTRACE2.png", plot = p1, width = 16, height = 10)
+
+p1 <- FeaturePlot_scCustom(
+  GSE274934,
+  features = c("CytoTRACE2"),
+  reduction = "umap",
+  na_cutoff = NA
+) +
+  scale_color_viridis_c(option = "magma") +
+  umap_theme +
+  labs(x = "UMAP1", y = "UMAP2")
+
+p1
+
+ggsave("output/scRNA/figures/CytoTRACE2_score.png", plot = p1, width = 12, height = 8)
+
+
+
+p1 <- FeaturePlot_scCustom(
+  GSE274934,
+  features = c("CytoTRACE2", "C1_score"),
+  reduction = "umap",
+  na_cutoff = NA
+) +
+  scale_color_viridis_c() +
+  umap_theme +
+  labs(x = "UMAP1", y = "UMAP2")
+
+p1
+
+ggsave("output/figures/UCell_and_CytoTRACE2.png", plot = p1, width = 10, height = 6)
+
+Idents(GSE274934) <- "CytoTRACE2_Potency"
+p2_feat <- FeaturePlot_scCustom(
+  GSE274934,
+  features = "C1_score",
+  reduction = "umap",
+  na_cutoff = NA
+) +
+  scale_color_viridis_c(option = "magma") +
+  ggtitle("C1 Score") +
+  labs(subtitle = "UMAP projection of C1 score (continuous program activity)") +
+  umap_theme
+
+p2_cluster <- DimPlot_scCustom(
+  GSE274934,
+  reduction = "umap",
+  group.by = "CytoTRACE2_Potency",
+  label = TRUE,
+  label.size = 5,label.box = T
+) +
+  ggtitle("CytoTRACE2 Potency") +
+  labs(subtitle = "Transcriptional potency inferred by CytoTRACE2")  +
+  umap_theme
+
+p2 <- (p2_feat + p2_cluster)
+
+ggsave(
+  "output/figures/UCell_and_CytoTRACE2_clusters.png",
+  plot = p2,
+  width = 12,
+  height = 12
+)
+
+
+VlnPlot_scCustom(
+  GSE274934,
+  features = "C1_score",
+  group.by = "CytoTRACE2_Potency"
+) + theme_bw() +
+  theme(legend.position = "none") +
+  ggpubr::stat_compare_means()
+
+
+```
+
+CytoTRACE2 potency categories showed statistically significant associations with batch, cell-cycle phase, and C1 core class. However, adjusted Rand indices were low, indicating limited concordance between CytoTRACE2 potency labels and these categorical variables. Cramér’s V values were in the weak-to-moderate range, suggesting that batch and cell cycle may contribute to CytoTRACE2 variation but are unlikely to fully explain the potency stratification.
+
+# Section 8. Correlation with C1 Score
+
+The direct association between the UCell-derived plasticity score and CytoTRACE2 is evaluated with a Spearman correlation and pairwise density/scatter panels.
+
+```{r}
+
+cor.test(x = GSE274934@meta.data$C1_score, GSE274934@meta.data$CytoTRACE2,method = "spearman")
+
+df <- data.frame(
+  C1_score = GSE274934$C1_score,
+  CytoTRACE2 = GSE274934$CytoTRACE2
+)
+
+library(GGally)
+p <- ggpairs(
+  df,columns = 1:2,
+  lower = list(continuous = wrap("smooth_loess", se = T, color = "lightblue", alpha = 0.5)),
+  upper = list(continuous = wrap("cor", size = 10,method = "spearman")),
+  diag = list(continuous = wrap("densityDiag"))
+) + 
+  theme_bw(base_size = 15)
+
+ggsave(plot = p,filename = "output/figures/UCell_and_CytoTRACE2_COR.png", width = 10, height = 6)
+
+```
+
+
+
+# Section 9. Annotation-Level Statistical Comparisons
+```{r}
+
+library(ggpubr)
+library(FSA)
+library(rcompanion)
+
+# data
+meta <- GSE274934@meta.data
+
+# analysis of global differences (Kruskal-Wallis)
+kruskal.test(C1_score ~ predicted.ann_finest_level, data = meta)
+
+# analysis of pairwise differences (Wilcoxon)
+pairwise.wilcox.test(
+  meta$C1_score,
+  meta$predicted.ann_finest_level,
+  p.adjust.method = "BH"
+)
+
+# analysis of post-hoc Dunn test
+dunn_res <- dunnTest(
+  C1_score ~ predicted.ann_finest_level,
+  data = meta,
+  method = "bh"
+)
+
+dunn_df <- dunn_res$res
+
+sig_dunn <- dunn_df %>%
+  as_tibble() %>%
+  separate(Comparison, into = c("group1", "group2"), sep = " - ") %>%
+  filter(P.adj < 0.05) %>%
+  arrange(P.adj) %>%
+  mutate(direction = ifelse(Z > 0, "higher", "lower"))
+
+write_csv(sig_dunn, "output/tables/C1_dunn_cells.csv")
+
+# data prep for plotting (global)
+meta <- meta %>%
+  mutate(
+    predicted.ann_finest_level = reorder(
+      predicted.ann_finest_level,
+      C1_score,
+      FUN = max
+    )
+  )
+
+# plot of C1 score across all cell types
+p1 <- ggplot(meta, aes(
+  x = predicted.ann_finest_level,
+  y = C1_score,
+  fill = predicted.ann_finest_level
+)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.8) +
+  geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white") +
+  stat_compare_means(label = "p.signif", hide.ns = TRUE) +
+  labs(
+    x = "Azimuth annotation",
+    y = "C1 score",
+    title = "C1 program activity across cell states",
+    subtitle = "Azimuth finest-level annotation"
+  ) +
+  coord_flip() +
+  cowplot::theme_cowplot() +
+  theme(
+    plot.title = element_text(size = 15, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    legend.position = "none"
+  )
+
+ggsave("output/figures/C1_by_celltype.png", p1, width = 10, height = 6, dpi = 600)
+
+# analysis subset for focused comparison
+df_focus <- meta %>%
+  filter(predicted.ann_finest_level %in%
+           c("AT2 proliferating", "Suprabasal", "AT2", "Basal resting")) %>%
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level))
+
+# plot of selected epithelial states
+ggplot(df_focus, aes(
+  x = predicted.ann_finest_level,
+  y = C1_score,
+  fill = predicted.ann_finest_level
+)) +
+  geom_violin(trim = TRUE, alpha = 0.25, color = NA) +
+  geom_boxplot(width = 0.15, fill = "white", color = "black",
+               outlier.shape = NA, linewidth = 0.4) +
+  scale_fill_brewer(palette = "Set2") +
+  stat_compare_means(
+    comparisons = list(
+      c("AT2", "AT2 proliferating"),
+      c("Suprabasal", "Basal resting")
+    )
+  ) +
+  theme_bw(base_size = 12) +
+  labs(
+    x = "Cell type",
+    y = "C1 score",
+    title = "C1 score across selected cell types",
+    subtitle = "Azimuth annotation"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "none"
+  )
+
+ggsave("output/figures/C1_by_celltype_AT2.png", width = 10, height = 6, dpi = 600)
+
+# analysis of effect size (non-parametric)
+df_focus2 <- meta %>%
+  filter(predicted.ann_finest_level %in% c("Suprabasal", "Basal resting")) %>%
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level))
+
+rcompanion::wilcoxonRG(
+  x = df_focus2$C1_score,
+  g = df_focus2$predicted.ann_finest_level,
+  verbose = TRUE
+)
+
+# analysis of effect size (non-parametric)
+df_focus2 <- meta %>%
+  filter(predicted.ann_finest_level %in% c("AT2", "AT2 proliferating")) %>%
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level))
+
+rcompanion::wilcoxonRG(
+  x = df_focus2$C1_score,
+  g = df_focus2$predicted.ann_finest_level,
+  verbose = TRUE
+)
+
+```
+
+
+# Section 11. Annotation and Cluster UMAP Views
+```{r}
+
+FeaturePlot_scCustom(GSE274934, na_cutoff = NA,
+  features = "C1_score",
+  reduction = "umap") +
+  scale_color_viridis_c() +
+    labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    title = "C1 score") +
+  umap_theme
+
+ggsave("output/figures/C1_score_UMAP.png", width=8, height=6,dpi = 600)
+
+library(scCustomize)
+library(ggsci)
+library(ggrepel)
+
+# Colors
+npg_cols <- pal_npg("nrc")(length(unique(GSE274934$seurat_clusters)))
+names(npg_cols) <- sort(unique(GSE274934$seurat_clusters))
+
+# Base UMAP
+p <- DimPlot_scCustom(
+  GSE274934,
+  group.by = "seurat_clusters",
+  reduction = "umap",
+  label = FALSE
+) +
+  scale_color_npg() +
+  labs(x = "UMAP1", y = "UMAP2", title = "UMAP by leiden clusters") +
+  umap_theme +
+  theme(legend.position = "none")
+
+# Centroids
+centroids <- Embeddings(GSE274934, "umap") %>%
+  as.data.frame() %>%
+  mutate(cluster = GSE274934$seurat_clusters) %>%
+  group_by(cluster) %>%
+  summarise(
+    UMAP_1 = median(umap_1),
+    UMAP_2 = median(umap_2),
+    .groups = "drop"
+  )
+
+# Plot + BIGGER labels
+p <- p +
+geom_label(
+  data = centroids,
+  aes(UMAP_1, UMAP_2, label = cluster, fill = cluster),
+  color = "black",
+  fontface = "bold",
+  size = 4,
+  label.size = 0.6,         # thickness of border
+  label.padding = unit(0.4, "lines"),
+  label.r = unit(0.35, "lines"),
+  show.legend = FALSE
+) +
+  scale_fill_manual(values = npg_cols)
+
+
+ggsave("output/figures/leiden_UMAP.png", width=8, height=6,dpi = 600)
+
+
+library(dplyr)
+library(ggrepel)
+
+umap_df <- Embeddings(GSE274934, "umap") %>%
+  as.data.frame() %>%
+  mutate(celltype = GSE274934$predicted.ann_finest_level)
+
+centroids <- umap_df %>%
+  group_by(celltype) %>%
+  summarise(
+    UMAP_1 = median(umap_1),
+    UMAP_2 = median(umap_2),
+    n = n(),
+    .groups = "drop"
+  )
+ 
+p <- DimPlot_scCustom(
+  GSE274934,
+  group.by = "predicted.ann_finest_level",
+  reduction = "umap",
+  label = FALSE
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Cell type annotation") +
+  umap_theme +
+  theme(legend.position = "none")
+
+p +
+  geom_label_repel(
+    data = centroids,
+    aes(
+      UMAP_1,
+      UMAP_2,
+      label = paste0(celltype, "\n(n=", n, ")")
+    ),
+    size = 4.5,
+    fontface = "bold",
+    
+    # box style
+    fill = "white",
+    label.size = 0.6,
+    label.colour = "black",
+    
+    # repelling behavior (important)
+    box.padding = 0.6,
+    point.padding = 0.4,
+    max.overlaps = Inf,
+    
+    # leader lines
+    segment.color = "black",
+    segment.size = 0.3,
+    
+    show.legend = FALSE
+  )
+
+p <- DimPlot_scCustom(
+  GSE274934,
+  group.by = "predicted.ann_finest_level",
+  reduction = "umap",
+  label = F
+) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Cell type annotation") +
+  umap_theme 
+
+p
+
+ggsave("output/figures/annotation_UMAP.png", plot = p, width=8, height=6,dpi = 600)
+ 
+```
+
+
+# Section 13. Save Updated Metadata and Annotation Outputs
+
+```{r}
+
+Idents(GSE274934) <- "seurat_clusters"
+
+cols_to_remove <- c(
+  # assay junk
+  "nCount_SCT", "nFeature_SCT",
+  "nCount_tfsulm", "nFeature_tfsulm",
+  "nCount_pathwaysulm", "nFeature_pathwaysulm",
+  
+  # clustering redundancy
+  "SCT_snn_res.0.1",
+  
+  # azimuth levels
+  "predicted.ann_level_1", "predicted.ann_level_1.score",
+  "predicted.ann_level_2", "predicted.ann_level_2.score",
+  "predicted.ann_level_3", "predicted.ann_level_3.score",
+  "predicted.ann_level_4", "predicted.ann_level_4.score",
+  "predicted.ann_level_5", "predicted.ann_level_5.score",
+  "predicted.ann_finest_level.score",
+  "mapping.score"
+)
+
+GSE274934@meta.data <- GSE274934@meta.data[ , 
+  !(colnames(GSE274934@meta.data) %in% cols_to_remove)
+]
+
+assays_to_remove <- c(
+  "prediction.score.ann_level_1",
+  "prediction.score.ann_level_2",
+  "prediction.score.ann_level_3",
+  "prediction.score.ann_level_4",
+  "prediction.score.ann_level_5",
+  "prediction.score.ann_finest_level"
+)
+
+for (assay in assays_to_remove) {
+  if (assay %in% names(GSE274934@assays)) {
+    GSE274934[[assay]] <- NULL
+  }
+}
+
+head(GSE274934@meta.data)
+
+```
+
+
+```{r}
+
+
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(RColorBrewer)
+library(patchwork)
+
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+epithelial_labels <- c(
+  "AT1",
+  "AT2",
+  "AT2 proliferating",
+  "Basal resting",
+  "Club (nasal)",
+  "Club (non-nasal)",
+  "Goblet (nasal)",
+  "Ionocyte",
+  "Multiciliated (non-nasal)",
+  "SMG duct",
+  "SMG mucous",
+  "SMG serous (bronchial)",
+  "Suprabasal",
+  "Transitional Club-AT2",
+  "Tuft"
+)
+
+
+df <- GSE274934@meta.data |>
+  as_tibble() |>
+  filter(predicted.ann_finest_level %in% epithelial_labels) |>
+  mutate(
+    predicted.ann_finest_level = factor(predicted.ann_finest_level)
+  )
+
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(RColorBrewer)
+library(patchwork)
+
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+
+cell_levels <- df |>
+  group_by(predicted.ann_finest_level) |>
+  summarise(med_C1 = median(C1_Core, na.rm = TRUE), .groups = "drop") |>
+  arrange(med_C1) |>
+  pull(predicted.ann_finest_level)
+
+df <- df |>
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level, levels = cell_levels))
+
+pastel_cols <- setNames(
+  colorRampPalette(brewer.pal(9, "Pastel1"))(length(cell_levels)),
+  cell_levels
+)
+
+base_theme <- theme_pubclean(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    legend.position = "none"
+  )
+
+p1 <- ggplot(
+  df,
+  aes(
+    x = predicted.ann_finest_level,
+    y = C1_Core,
+    fill = predicted.ann_finest_level,
+    color = predicted.ann_finest_level
+  )
+) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.75, linewidth = 0.25) +
+  geom_boxplot(
+    width = 0.13,
+    outlier.shape = NA,
+    fill = "white",
+    color = "black",
+    linewidth = 0.35
+  ) +
+  scale_fill_manual(values = pastel_cols, drop = FALSE) +
+  scale_color_manual(values = pastel_cols, drop = FALSE) +
+  coord_flip() +
+  labs(
+    x = "Cell type",
+    y = "C1-Core",
+    title = "All cell types",
+    subtitle = "Azimuth::Lung v2 (HLCA) | Kruskal–Wallis p < 2e-16"
+  ) +
+  base_theme
+
+focus_cells <- c("AT2", "AT2 proliferating", "Basal resting", "Suprabasal")
+
+df_focus <- df |>
+  filter(predicted.ann_finest_level %in% focus_cells) |>
+  mutate(predicted.ann_finest_level = factor(predicted.ann_finest_level, levels = focus_cells))
+
+p2 <- ggplot(
+  df_focus,
+  aes(
+    x = predicted.ann_finest_level,
+    y = C1_Core,
+    fill = predicted.ann_finest_level,
+    color = predicted.ann_finest_level
+  )
+) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.75, linewidth = 0.25) +
+  geom_boxplot(
+    width = 0.15,
+    outlier.shape = NA,
+    fill = "white",
+    color = "black",
+    linewidth = 0.35
+  ) +
+  stat_compare_means(
+    comparisons = list(
+      c("AT2", "AT2 proliferating"),
+      c("Basal resting", "Suprabasal")
+    ),
+    method = "wilcox.test",
+    label = "p.format",
+    size = 4
+  ) +
+  scale_fill_manual(values = pastel_cols, drop = FALSE) +
+  scale_color_manual(values = pastel_cols, drop = FALSE) +
+  labs(
+    x = "Cell type",
+    y = "C1-Core",
+    title = "Focused epithelial populations",
+    subtitle = "Wilcoxon tests between selected groups"
+  ) +
+  base_theme
+
+comb <- (p1 | p2) +
+  plot_layout(widths = c(1.35, 1)) +
+  plot_annotation(
+    title = "C1-Core distribution across Azimuth lung cell annotations",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 17),
+      plot.subtitle = element_text(size = 12, color = "grey30")
+    )
+  )
+
+p1
+p2
+comb
+
+ggsave("output/figures/C1_Core_by_celltype.png", p1, width = 12, height = 8, dpi = 600)
+ggsave("output/figures/C1_Core_by_celltype_focus.png", p2, width = 10, height = 6, dpi = 600)
+ggsave("output/figures/C1_Core_by_celltype_Combined.png", comb, width = 15, height = 8, dpi = 600)
+
+
+```
+
+# Checkpoint
+
+This checkpoint saves the Seurat object after adding regulatory, pathway, secreted-protein, and Hallmark activity layers.
+
+```{r}
+
+DefaultAssay(GSE274934) <- "RNA"
+qs_save(GSE274934, file = file.path("output/scRNA/objects/GSE274934_merged_RNA_QC.qs2"), nthreads = 10, compress_level = 10)
+
+```

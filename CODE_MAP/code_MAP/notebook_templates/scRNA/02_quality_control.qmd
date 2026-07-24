@@ -1,0 +1,177 @@
+---
+title: "scRNA Quality Control"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Purpose
+
+Filter low-quality cells, flag QC metrics, and save the filtered Seurat object.
+
+## Packages
+
+```{r}
+#| label: tpl-scrna-02-quality-control-packages
+#| echo: true
+#| warning: false
+#| message: false
+# Load only the packages used in this template.
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+})
+```
+
+## User Config
+
+```{r}
+#| label: tpl-scrna-02-quality-control-user-config
+#| echo: true
+#| warning: false
+#| message: false
+# USER INPUT:
+input_object <- "path/to/seurat_created.qs"
+output_object <- "path/to/seurat_qc.qs"
+results_dir <- "results/scrna_qc"
+figures_dir <- "figures/scrna_qc"
+assay_name <- "RNA"
+sample_column <- "sample_column"
+group_column <- "group_column"
+min_features <- 200
+max_features <- Inf
+max_percent_mito <- 20
+seed <- 1
+n_threads <- 4
+compress_level <- 6
+```
+
+## Input Loading
+
+```{r}
+#| label: tpl-scrna-02-quality-control-input-loading
+#| echo: true
+#| warning: false
+#| message: false
+# Create output folders and load configured inputs.
+set.seed(seed)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+object <- qs2::qs_read(file = input_object, nthreads = n_threads)
+DefaultAssay(object) <- assay_name
+```
+
+## Validation
+
+```{r}
+#| label: tpl-scrna-02-quality-control-validation
+#| echo: true
+#| warning: false
+#| message: false
+# Stop early when required inputs or columns are missing.
+stopifnot(inherits(object, "Seurat"))
+stopifnot(sample_column %in% colnames(object[[]]), group_column %in% colnames(object[[]]))
+if (!"percent_mito" %in% colnames(object[[]])) object[["percent_mito"]] <- PercentageFeatureSet(object, pattern = "^MT-")
+```
+
+## Input Summary
+
+```{r}
+#| label: tpl-scrna-02-quality-control-input-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Write a small TSV summary of the loaded input.
+before_tbl <- tibble::tibble(cells_before = ncol(object), features = nrow(object))
+readr::write_tsv(before_tbl, file.path(results_dir, "qc_input_summary.tsv"))
+before_tbl
+```
+
+## Main Analysis
+
+```{r}
+#| label: tpl-scrna-02-quality-control-main-analysis
+#| echo: true
+#| warning: false
+#| message: false
+# Run the reusable analysis step for this template.
+object$qc_pass <- object$nFeature_RNA >= min_features &
+  object$nFeature_RNA <= max_features &
+  object$percent_mito <= max_percent_mito
+filtered <- subset(object, subset = qc_pass)
+```
+
+## QC Checks
+
+```{r}
+#| label: tpl-scrna-02-quality-control-qc-checks
+#| echo: true
+#| warning: false
+#| message: false
+# Export checks that make failures easy to inspect.
+qc_tbl <- object[[]] |> tibble::rownames_to_column("cell_id")
+readr::write_tsv(qc_tbl, file.path(results_dir, "qc_all_cells.tsv"))
+readr::write_tsv(filtered[[]] |> tibble::rownames_to_column("cell_id"), file.path(results_dir, "qc_pass_cells.tsv"))
+```
+
+## Visualization
+
+```{r}
+#| label: tpl-scrna-02-quality-control-visualization
+#| echo: true
+#| warning: false
+#| message: false
+# Save compact figures for the main outputs.
+pdf(file.path(figures_dir, "scrna_qc_violin.pdf"), width = 8, height = 4)
+print(VlnPlot(object, features = c("nFeature_RNA", "nCount_RNA", "percent_mito"), group.by = sample_column, pt.size = 0))
+dev.off()
+```
+
+## Object Result Storage
+
+```{r}
+#| label: tpl-scrna-02-quality-control-object-result-storage
+#| echo: true
+#| warning: false
+#| message: false
+# Store reusable analysis metadata inside the object.
+filtered@misc$template <- list(step = "scrna_quality_control", thresholds = list(min_features = min_features, max_features = max_features, max_percent_mito = max_percent_mito))
+```
+
+## Result Export
+
+```{r}
+#| label: tpl-scrna-02-quality-control-result-export
+#| echo: true
+#| warning: false
+#| message: false
+# Export the main reusable tables as TSV files.
+readr::write_tsv(tibble::tibble(cells_after = ncol(filtered), cells_removed = ncol(object) - ncol(filtered)), file.path(results_dir, "qc_summary.tsv"))
+```
+
+## Final Save
+
+```{r}
+#| label: tpl-scrna-02-quality-control-final-save
+#| echo: true
+#| warning: false
+#| message: false
+# Save the updated object for the next template step.
+object <- filtered
+qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
+```
+
+## Output Summary
+
+```{r}
+#| label: tpl-scrna-02-quality-control-output-summary
+#| echo: true
+#| warning: false
+#| message: false
+# Print a compact summary of generated outputs.
+tibble::tibble(output_object = output_object, cells = ncol(object), features = nrow(object))
+```
+

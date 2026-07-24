@@ -1,0 +1,137 @@
+---
+title: "Reproducible Quarto Document"
+format: html
+engine: knitr
+references:
+  - id: canouil_jointly_2018
+    author:
+      - family: Canouil
+        given: Mickaël
+      - family: Balkau
+        given: Beverley
+      - family: Roussel
+        given: Ronan
+      - family: Froguel
+        given: Philippe
+      - family: Rocheleau
+        given: Ghislain
+    container-title: Frontiers in Genetics
+    doi: 10.3389/fgene.2018.00210
+    issued: 2018
+    title: "Jointly Modelling Single Nucleotide Polymorphisms With
+      Longitudinal and Time-to-Event Trait: An Application to Type 2
+      Diabetes and Fasting Plasma Glucose"
+    type: article-journal
+    journal-title: "Frontiers in Genetics*"
+---
+
+
+## Setup
+
+
+```{r include=FALSE}
+
+packages <- c(
+  "tidyverse",
+  "Seurat",
+  "SeuratWrappers",
+  "harmony",
+  "patchwork",
+  "data.table",
+  "qs2",
+  "future",
+  "Signac",
+  "GenomicRanges",
+  "GenomeInfoDb",
+  "EnsDb.Hsapiens.v86",
+  "AnnotationDbi"
+)
+
+library(Seurat)
+library(scCustomize)
+library(ggplot2)
+
+purrr::walk(packages, library, character.only = TRUE)
+
+options(future.globals.maxSize = 25 * 1024^3)
+plan(multicore, workers = 5, maxSizeOfObjects = 25 * 1024^3)
+
+umap_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+
+    # Remove background grid
+    panel.grid = element_blank(),
+
+    # Keep axis titles
+    axis.title = element_text(size = 13),
+
+    # Remove axis numbers, ticks, and lines
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+
+    # Legend formatting
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+```
+
+
+```{r}
+
+RNA_GSE274934 <- qs_read(file = "output/scRNA/objects/GSE274934_merged_RNA_QC.qs2",nthreads = 10)
+
+ATAC_GSE274934 <- qs_read(file = "output/scATAC/objects/GSE274934_ATAC.qs2",nthreads = 10)
+
+```
+
+```{r}
+
+# quantify gene activity
+gene.activities <- GeneActivity(ATAC_GSE274934, assay = "ATAC", features = VariableFeatures(RNA_GSE274934))
+
+# add gene activities as a new assay
+ATAC_GSE274934[["ACTIVITY"]] <- CreateAssayObject(counts = gene.activities)
+
+# normalize gene activities
+DefaultAssay(ATAC_GSE274934) <- "ACTIVITY"
+ATAC_GSE274934 <- NormalizeData(ATAC_GSE274934)
+ATAC_GSE274934 <- ScaleData(ATAC_GSE274934, features = rownames(ATAC_GSE274934))
+
+# Identify anchors
+plan(sequential)
+transfer.anchors <- FindTransferAnchors(reference = RNA_GSE274934, query = ATAC_GSE274934, features = VariableFeatures(object = RNA_GSE274934),
+    reference.assay = "RNA", query.assay = "ACTIVITY", reduction = "rpca")
+
+```
+
+```{r}
+
+celltype.predictions <- TransferData(anchorset = transfer.anchors, refdata = RNA_GSE274934$predicted.ann_finest_level,
+    weight.reduction = ATAC_GSE274934[["lsi"]], dims = 1:39)
+
+ATAC_GSE274934 <- AddMetaData(ATAC_GSE274934, metadata = celltype.predictions)
+
+qs2::qs_save(
+  ATAC_GSE274934,
+  file = "output/scATAC/objects/GSE274934_ATAC.qs2",
+  nthreads = 10,
+  compress_level = 10
+)
+
+```
+
+
+```{r}
+
+DimPlot_scCustom(ATAC_GSE274934, group.by = "predicted.id", label = TRUE, label.box = TRUE, repel = TRUE) + 
+  ggtitle("Predicted annotation") + 
+  umap_theme + 
+  NoLegend()
+
+
+```
+

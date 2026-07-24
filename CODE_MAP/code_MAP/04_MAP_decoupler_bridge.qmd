@@ -1,0 +1,388 @@
+---
+title: "MAP 04 - decoupler Bridge"
+format: html
+---
+
+# Section 1. Overview
+
+This notebook bridges the R/Seurat C1-scored checkpoint into a Python `decoupler` run and restores the resulting activity scores back into Seurat assays for the downstream regulatory notebook.
+
+## Section 1.1. Reader Guide
+
+- Input is the C1-scored Seurat object from `01_MAP_c1_scoring.qmd`.
+- The bridge exports a stable matrix and metadata payload under `output/scRNA/objects/decoupler_bridge/`.
+- Python rebuilds an AnnData object, runs `decoupler` ULM scoring for TFs and pathways, and writes stable cell-by-feature score tables.
+- R re-imports those tables, validates cell identity and ordering, creates the `tfsulm` and `pathwaysulm` assays, and saves a new regulatory-ready checkpoint.
+
+## Section 1.2. Notebook Flow
+
+1. Load the scored Seurat object.
+2. Export normalized RNA data and required metadata for Python.
+3. Build the AnnData handoff and run `decoupler` in Python.
+4. Re-import TF and pathway score tables into Seurat assays.
+5. Save the updated object for `05_MAP_regulatory_programs.qmd`.
+
+# Section 2. R Setup and Seurat Export
+
+```{r}
+
+set.seed(1234)
+
+packages <- c(
+  "tidyverse",
+  "Matrix",
+  "Seurat",
+  "qs2",
+  "data.table"
+)
+
+invisible(purrr::walk(packages, library, character.only = TRUE))
+
+bridge_object_dir <- file.path("output", "scRNA", "objects", "decoupler_bridge")
+bridge_table_dir <- file.path("output", "scRNA", "tables", "decoupler")
+
+dir.create(bridge_object_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(bridge_table_dir, recursive = TRUE, showWarnings = FALSE)
+
+input_object_path <- file.path("output", "scRNA", "objects", "GSE274934_merged_RNA_QC.qs2")
+output_object_path <- file.path("output", "scRNA", "objects", "GSE274934_regulatory_ready.qs2")
+
+matrix_path <- file.path(bridge_object_dir, "GSE274934_decoupler_input_matrix.mtx")
+obs_path <- file.path(bridge_object_dir, "GSE274934_decoupler_input_obs.csv")
+var_path <- file.path(bridge_object_dir, "GSE274934_decoupler_input_var.csv")
+input_h5ad_path <- file.path(bridge_object_dir, "GSE274934_decoupler_input.h5ad")
+output_h5ad_path <- file.path(bridge_object_dir, "GSE274934_decoupler_output.h5ad")
+tf_score_path <- file.path(bridge_table_dir, "tf_ulm_scores.csv")
+tf_padj_path <- file.path(bridge_table_dir, "tf_ulm_padj.csv")
+pathway_score_path <- file.path(bridge_table_dir, "pathway_ulm_scores.csv")
+pathway_padj_path <- file.path(bridge_table_dir, "pathway_ulm_padj.csv")
+collectri_network_path <- file.path(bridge_table_dir, "collectri_human_network.csv")
+progeny_network_path <- file.path(bridge_table_dir, "progeny_human_network.csv")
+
+required_meta <- c(
+  "sample",
+  "orig.ident",
+  "seurat_clusters",
+  "predicted.ann_level_1",
+  "predicted.ann_finest_level",
+  "SCEVAN_class"
+)
+
+first_present <- function(candidates, meta_df, label) {
+  hit <- candidates[candidates %in% colnames(meta_df)][1]
+
+  if (is.na(hit)) {
+    stop(
+      "Missing required metadata for ", label, ". Checked: ",
+      paste(candidates, collapse = ", ")
+    )
+  }
+
+  hit
+}
+
+write_bridge_payload <- function(object, matrix_path, obs_path, var_path) {
+  DefaultAssay(object) <- "RNA"
+  expr_mat <- GetAssayData(object = object, assay = "RNA", slot = "data")
+
+  if (!inherits(expr_mat, "dgCMatrix")) {
+    expr_mat <- as(expr_mat, "dgCMatrix")
+  }
+
+  if (nrow(expr_mat) == 0 || ncol(expr_mat) == 0) {
+    stop("RNA normalized matrix is empty. Cannot build decoupler bridge payload.")
+  }
+
+  missing_meta <- setdiff(required_meta, colnames(object@meta.data))
+  if (length(missing_meta) > 0) {
+    stop(
+      "Missing required metadata columns in Seurat object: ",
+      paste(missing_meta, collapse = ", ")
+    )
+  }
+
+  c1_col <- first_present(c("C1_Core", "C1_score"), object@meta.data, "C1 score")
+
+  obs <- object@meta.data |>
+    tibble::rownames_to_column("cell") |>
+    dplyr::select(
+      cell,
+      sample,
+      orig.ident,
+      seurat_clusters,
+      dplyr::all_of(c1_col),
+      predicted.ann_level_1,
+      predicted.ann_finest_level,
+      SCEVAN_class
+    )
+
+  colnames(obs)[colnames(obs) == c1_col] <- c1_col
+
+  if (!("C1_Core" %in% colnames(obs)) && "C1_score" %in% colnames(obs)) {
+    obs$C1_Core <- obs$C1_score
+  }
+
+  if (!("C1_score" %in% colnames(obs)) && "C1_Core" %in% colnames(obs)) {
+    obs$C1_score <- obs$C1_Core
+  }
+
+  obs <- obs |>
+    dplyr::select(
+      cell,
+      sample,
+      orig.ident,
+      seurat_clusters,
+      C1_Core,
+      C1_score,
+      predicted.ann_level_1,
+      predicted.ann_finest_level,
+      SCEVAN_class
+    )
+
+  stopifnot(identical(obs$cell, colnames(expr_mat)))
+
+  var_tbl <- tibble::tibble(gene = rownames(expr_mat))
+
+  Matrix::writeMM(obj = expr_mat, file = matrix_path)
+  data.table::fwrite(obs, file = obs_path)
+  data.table::fwrite(var_tbl, file = var_path)
+
+  cat(
+    "Bridge export complete:",
+    nrow(var_tbl), "genes and", nrow(obs), "cells written for Python.\n"
+  )
+}
+
+GSE274934 <- qs_read(file = input_object_path, nthreads = 10)
+
+write_bridge_payload(
+  object = GSE274934,
+  matrix_path = matrix_path,
+  obs_path = obs_path,
+  var_path = var_path
+)
+
+```
+
+# Section 3. Python decoupler Run
+
+```{python}
+
+from pathlib import Path
+
+import anndata as ad
+import decoupler as dc
+import pandas as pd
+from scipy.io import mmread
+from scipy import sparse
+
+bridge_object_dir = Path("output/scRNA/objects/decoupler_bridge")
+bridge_table_dir = Path("output/scRNA/tables/decoupler")
+
+matrix_path = bridge_object_dir / "GSE274934_decoupler_input_matrix.mtx"
+obs_path = bridge_object_dir / "GSE274934_decoupler_input_obs.csv"
+var_path = bridge_object_dir / "GSE274934_decoupler_input_var.csv"
+input_h5ad_path = bridge_object_dir / "GSE274934_decoupler_input.h5ad"
+output_h5ad_path = bridge_object_dir / "GSE274934_decoupler_output.h5ad"
+tf_score_path = bridge_table_dir / "tf_ulm_scores.csv"
+tf_padj_path = bridge_table_dir / "tf_ulm_padj.csv"
+pathway_score_path = bridge_table_dir / "pathway_ulm_scores.csv"
+pathway_padj_path = bridge_table_dir / "pathway_ulm_padj.csv"
+collectri_network_path = bridge_table_dir / "collectri_human_network.csv"
+progeny_network_path = bridge_table_dir / "progeny_human_network.csv"
+
+
+def obsm_to_df(adata, key):
+    extracted = dc.pp.get_obsm(adata=adata, key=key)
+    if isinstance(extracted, pd.DataFrame):
+        return extracted.copy()
+    if hasattr(extracted, "to_df"):
+        return extracted.to_df()
+    return pd.DataFrame(extracted, index=adata.obs_names)
+
+
+obs = pd.read_csv(obs_path)
+var = pd.read_csv(var_path)
+expr = mmread(matrix_path)
+
+if not sparse.issparse(expr):
+    expr = sparse.csr_matrix(expr)
+else:
+    expr = expr.tocsr()
+
+adata = ad.AnnData(
+    X=expr.T,
+    obs=obs.set_index("cell"),
+    var=var.set_index("gene"),
+)
+
+adata.obs_names_make_unique()
+adata.var_names_make_unique()
+adata.write_h5ad(input_h5ad_path)
+
+collectri = dc.get_network("collecTRI", collection="human")
+collectri = collectri.drop_duplicates().reset_index(drop=True)
+collectri.to_csv(collectri_network_path, index=False)
+
+dc.mt.ulm(data=adata, net=collectri)
+
+tf_scores = obsm_to_df(adata, "score_ulm")
+tf_scores.index.name = "cell"
+tf_scores.reset_index().to_csv(tf_score_path, index=False)
+
+if "padj_ulm" in adata.obsm:
+    tf_padj = obsm_to_df(adata, "padj_ulm")
+    tf_padj.index.name = "cell"
+    tf_padj.reset_index().to_csv(tf_padj_path, index=False)
+
+pathway_adata = adata.copy()
+progeny = dc.op.progeny(organism="human")
+progeny = progeny.drop_duplicates().reset_index(drop=True)
+progeny.to_csv(progeny_network_path, index=False)
+
+dc.mt.ulm(data=pathway_adata, net=progeny)
+
+pathway_scores = obsm_to_df(pathway_adata, "score_ulm")
+pathway_scores.index.name = "cell"
+pathway_scores.reset_index().to_csv(pathway_score_path, index=False)
+
+if "padj_ulm" in pathway_adata.obsm:
+    pathway_padj = obsm_to_df(pathway_adata, "padj_ulm")
+    pathway_padj.index.name = "cell"
+    pathway_padj.reset_index().to_csv(pathway_padj_path, index=False)
+
+adata.obsm["pathway_score_ulm"] = pathway_scores.loc[adata.obs_names]
+if "padj_ulm" in pathway_adata.obsm:
+    adata.obsm["pathway_padj_ulm"] = obsm_to_df(pathway_adata, "padj_ulm").loc[adata.obs_names]
+
+adata.write_h5ad(output_h5ad_path)
+
+print(
+    "decoupler outputs written:",
+    f"TF scores={tf_scores.shape}, pathway scores={pathway_scores.shape}"
+)
+
+```
+
+# Section 4. R Re-import into Seurat
+
+```{r}
+
+read_activity_matrix <- function(csv_path) {
+  score_tbl <- data.table::fread(csv_path)
+
+  if (!("cell" %in% colnames(score_tbl))) {
+    stop("Activity table is missing the required 'cell' column: ", csv_path)
+  }
+
+  cell_ids <- score_tbl$cell
+  score_tbl$cell <- NULL
+
+  if (anyDuplicated(cell_ids) > 0) {
+    stop("Duplicated cell barcodes detected in ", csv_path)
+  }
+
+  if (anyDuplicated(colnames(score_tbl)) > 0) {
+    stop("Duplicated feature names detected in ", csv_path)
+  }
+
+  score_mat <- as.matrix(score_tbl)
+  rownames(score_mat) <- cell_ids
+
+  t(score_mat)
+}
+
+align_activity_matrix <- function(feature_by_cell, seurat_cells, label) {
+  if (anyDuplicated(colnames(feature_by_cell)) > 0) {
+    stop("Duplicated cells detected in ", label, " activity matrix.")
+  }
+
+  missing_cells <- setdiff(seurat_cells, colnames(feature_by_cell))
+  extra_cells <- setdiff(colnames(feature_by_cell), seurat_cells)
+
+  if (length(missing_cells) > 0 || length(extra_cells) > 0) {
+    stop(
+      label, " cell mismatch between Seurat and imported score table. ",
+      "Missing in table: ", length(missing_cells),
+      ". Extra in table: ", length(extra_cells), "."
+    )
+  }
+
+  aligned <- feature_by_cell[, seurat_cells, drop = FALSE]
+
+  stopifnot(identical(colnames(aligned), seurat_cells))
+  aligned
+}
+
+row_zscore <- function(feature_by_cell) {
+  scaled <- t(scale(t(feature_by_cell)))
+  scaled[is.na(scaled)] <- 0
+  scaled
+}
+
+add_activity_assay <- function(object, assay_name, feature_by_cell) {
+  assay_obj <- CreateAssayObject(data = feature_by_cell)
+  object[[assay_name]] <- assay_obj
+  object <- SetAssayData(
+    object = object,
+    assay = assay_name,
+    slot = "scale.data",
+    new.data = row_zscore(feature_by_cell)
+  )
+
+  object
+}
+
+tf_scores <- read_activity_matrix(tf_score_path)
+pathway_scores <- read_activity_matrix(pathway_score_path)
+
+tf_scores <- align_activity_matrix(
+  feature_by_cell = tf_scores,
+  seurat_cells = colnames(GSE274934),
+  label = "TF"
+)
+
+pathway_scores <- align_activity_matrix(
+  feature_by_cell = pathway_scores,
+  seurat_cells = colnames(GSE274934),
+  label = "Pathway"
+)
+
+GSE274934 <- add_activity_assay(
+  object = GSE274934,
+  assay_name = "tfsulm",
+  feature_by_cell = tf_scores
+)
+
+GSE274934 <- add_activity_assay(
+  object = GSE274934,
+  assay_name = "pathwaysulm",
+  feature_by_cell = pathway_scores
+)
+
+DefaultAssay(GSE274934) <- "tfsulm"
+
+stopifnot(ncol(GSE274934) == ncol(tf_scores))
+stopifnot(identical(colnames(GSE274934), colnames(tf_scores)))
+stopifnot(identical(colnames(GSE274934), colnames(pathway_scores)))
+stopifnot(nrow(GetAssayData(GSE274934, assay = "tfsulm", slot = "data")) > 0)
+stopifnot(nrow(GetAssayData(GSE274934, assay = "pathwaysulm", slot = "data")) > 0)
+
+cat(
+  "Regulatory-ready object contains",
+  nrow(GetAssayData(GSE274934, assay = "tfsulm", slot = "data")),
+  "TF features and",
+  nrow(GetAssayData(GSE274934, assay = "pathwaysulm", slot = "data")),
+  "pathway features across",
+  ncol(GSE274934),
+  "cells.\n"
+)
+
+qs_save(
+  GSE274934,
+  file = output_object_path,
+  nthreads = 10,
+  compress_level = 10
+)
+
+```

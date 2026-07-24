@@ -1,0 +1,1661 @@
+---
+title: "MAP 00 ATAC - Signac QC"
+format: html
+---
+
+# Overview
+
+## Aim
+
+This notebook processes the independent scATAC-seq peak matrices for the five CSS samples, runs explicit per-sample Signac/fragtk QC, writes QC plots and CSV summaries, and saves one filtered ATAC object per sample. Consensus peak quantification, dimensional reduction, integration, and label transfer are left inactive for a later notebook pass.
+
+## Setup
+
+This section loads packages and sets shared execution options for the QC run.
+The global future plan is useful for plotting and package internals, but
+expensive fragment requantification is kept out of the active QC path.
+
+```{r include=FALSE}
+
+packages <- c(
+  "tidyverse",
+  "Seurat",
+  "SeuratWrappers",
+  "harmony",
+  "patchwork",
+  "data.table",
+  "qs2",
+  "future",
+  "Signac",
+  "GenomicRanges",
+  "GenomeInfoDb",
+  "EnsDb.Hsapiens.v86",
+  "AnnotationDbi"
+)
+
+library(Seurat)
+library(scCustomize)
+library(ggplot2)
+
+purrr::walk(packages, library, character.only = TRUE)
+
+options(future.globals.maxSize = 25 * 1024^3)
+plan(multicore, workers = 5, maxSizeOfObjects = 25 * 1024^3)
+
+umap_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+
+    # Remove background grid
+    panel.grid = element_blank(),
+
+    # Keep axis titles
+    axis.title = element_text(size = 13),
+
+    # Remove axis numbers, ticks, and lines
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+
+    # Legend formatting
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+```
+
+# Per-Sample ATAC QC
+
+## Configure Inputs and Outputs
+
+```{r}
+
+set.seed(1234)
+
+paths <- list(
+  input_dir = "input/GSE274934_RAW",
+  output_dir = "output/scATAC",
+  object_dir = "output/scATAC/objects",
+  figure_dir = "output/scATAC/figures",
+  table_dir = "output/scATAC/tables",
+  atac_plot_dir = "output/scATAC/figures/atac_qc_plots",
+  atac_qc_dir = "output/scATAC/tables/atac_qc_metrics",
+  rna_object_dir = "output/scRNA/objects"
+)
+
+# Cell-level QC thresholds used by every sample. These thresholds are written
+# into each per-sample summary CSV so downstream runs can be audited.
+atac_params <- list(
+  min_peak_counts = 1000,
+  min_passed_filters = 3000,
+  min_pct_reads_in_peaks = 25,
+  max_blacklist_ratio = 0.05,
+  max_nucleosome_signal = 1.5,
+  min_tss_enrichment = 6
+)
+
+# Create every output directory used by this QC notebook before helper execution.
+dir.create(paths$output_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$object_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$figure_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$table_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$atac_plot_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(paths$atac_qc_dir, showWarnings = FALSE, recursive = TRUE)
+
+samples <- c("AL05", "AL08", "AL10", "AL11", "AL12")
+
+# Input file maps are keyed by sample name. The QC helper uses these maps to
+# keep explicit per-sample execution concise without hiding sample identity.
+atac_files <- c(
+  AL05 = "GSM8462143_AL05_ATAC_filtered_peak_bc_matrix.h5",
+  AL08 = "GSM8462144_AL08_ATAC_filtered_peak_bc_matrix.h5",
+  AL10 = "GSM8462145_AL10_ATAC_filtered_peak_bc_matrix.h5",
+  AL11 = "GSM8462146_AL11_ATAC_filtered_peak_bc_matrix.h5",
+  AL12 = "GSM8462147_AL12_ATAC_filtered_peak_bc_matrix.h5"
+)
+
+atac_peak_files <- c(
+  AL05 = "GSM8462143_AL05_ATAC_peaks.bed.gz",
+  AL08 = "GSM8462144_AL08_ATAC_peaks.bed.gz",
+  AL10 = "GSM8462145_AL10_ATAC_peaks.bed.gz",
+  AL11 = "GSM8462146_AL11_ATAC_peaks.bed.gz",
+  AL12 = "GSM8462147_AL12_ATAC_peaks.bed.gz"
+)
+
+frag_files <- c(
+  AL05 = "GSM8462143_AL05_ATAC_fragments.tsv.gz",
+  AL08 = "GSM8462144_AL08_ATAC_fragments.tsv.gz",
+  AL10 = "GSM8462145_AL10_ATAC_fragments.tsv.gz",
+  AL11 = "GSM8462146_AL11_ATAC_fragments.tsv.gz",
+  AL12 = "GSM8462147_AL12_ATAC_fragments.tsv.gz"
+)
+
+atac_singlecell_files <- c(
+  AL05 = "GSM8462143_AL05_ATAC_singlecell.csv.gz",
+  AL08 = "GSM8462144_AL08_ATAC_singlecell.csv.gz",
+  AL10 = "GSM8462145_AL10_ATAC_singlecell.csv.gz",
+  AL11 = "GSM8462146_AL11_ATAC_singlecell.csv.gz",
+  AL12 = "GSM8462147_AL12_ATAC_singlecell.csv.gz"
+)
+
+### Gene annotation helper
+
+build_hg38_gene_annotations <- function() {
+  
+  annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+  GenomeInfoDb::seqlevelsStyle(annotations) <- "UCSC"
+  GenomeInfoDb::genome(annotations) <- "hg38"
+  annotations
+}
+
+gene_annotations <- build_hg38_gene_annotations()
+
+```
+
+# scATAC QC
+
+The ATAC files are processed as an independent modality because the GEX and ATAC barcodes have minimal exact overlap. This section performs per-sample cell QC only. Consensus peak construction and fragment requantification are intentionally deferred until the integration stage is redesigned.
+
+## Define ATAC QC Helpers
+
+### Numeric and Peak Helpers
+
+These small helpers support ratio calculations and later inactive common-peak construction.
+
+```{r}
+
+### Numeric and peak helpers
+
+# Safe division for Cell Ranger-derived ratios. Failed denominators are kept as
+# NA so filtering can treat missing metrics explicitly.
+
+safe_ratio <- function(numerator, denominator, scale = 1) {
+  ifelse(
+    is.na(denominator) | denominator <= 0,
+    NA_real_,
+    scale * numerator / denominator
+  )
+}
+
+read_peak_bed <- function(peak_path) {
+  
+  bed <- data.table::fread(peak_path, header = FALSE) |>
+    as.data.frame()
+  bed <- bed[, 1:3]
+  colnames(bed) <- c("chrom", "start", "end")
+  
+  GenomicRanges::GRanges(
+    seqnames = bed$chrom,
+    ranges = IRanges::IRanges(start = bed$start + 1, end = bed$end)
+  )
+}
+
+# Load a sample peak BED as GRanges. This is not used by the active QC run, but
+# is available for the inactive downstream common-peak requantification section.
+load_atac_peaks <- function(sample_name, paths) {
+  
+  peaks <- read_peak_bed(file.path(paths$input_dir, atac_peak_files[[sample_name]]))
+  GenomeInfoDb::keepStandardChromosomes(
+    peaks,
+    pruning.mode = "coarse"
+  )
+}
+
+# Build a reduced union peak set for later Signac-style merging. The active QC
+# workflow does not call this helper.
+build_unified_atac_peaks <- function(atac_peak_list) {
+  
+  cat("Building unified ATAC peak set...\n")
+  
+  combined_peaks <- GenomicRanges::GRangesList(atac_peak_list) |>
+    unlist(use.names = FALSE)
+  combined_peaks <- GenomicRanges::reduce(combined_peaks)
+  combined_peaks <- sort(combined_peaks)
+  
+  cat("Unified ATAC peaks:", length(combined_peaks), "\n")
+  
+  combined_peaks
+}
+
+```
+
+### Cell Ranger ATAC Metadata
+
+This helper reads the Cell Ranger single-cell metrics and aligns them to the cells present in the peak matrix.
+
+```{r}
+
+### Cell Ranger ATAC metadata helper
+
+# Read the Cell Ranger single-cell metrics and align them to the input peak
+# matrix columns before adding them to the Seurat object.
+
+load_atac_metrics <- function(sample_name, paths, atac_counts) {
+  
+  singlecell_path <- file.path(paths$input_dir, atac_singlecell_files[[sample_name]])
+  
+  singlecell_metrics <- data.table::fread(singlecell_path) |>
+    as.data.frame()
+  
+  singlecell_metrics <- singlecell_metrics[singlecell_metrics$barcode != "NO_BARCODE", , drop = FALSE]
+  rownames(singlecell_metrics) <- singlecell_metrics$barcode
+  
+  singlecell_metrics$pct_reads_in_peaks <- safe_ratio(
+    singlecell_metrics$peak_region_fragments,
+    singlecell_metrics$passed_filters,
+    scale = 100
+  )
+  singlecell_metrics$pct_reads_in_DNase <- safe_ratio(
+    singlecell_metrics$DNase_sensitive_region_fragments,
+    singlecell_metrics$passed_filters,
+    scale = 100
+  )
+  singlecell_metrics$blacklist_ratio <- safe_ratio(
+    singlecell_metrics$blacklist_region_fragments,
+    singlecell_metrics$peak_region_fragments
+  )
+  singlecell_metrics$promoter_ratio <- safe_ratio(
+    singlecell_metrics$promoter_region_fragments,
+    singlecell_metrics$passed_filters
+  )
+  singlecell_metrics$tss_fragment_ratio <- safe_ratio(
+    singlecell_metrics$TSS_fragments,
+    singlecell_metrics$passed_filters
+  )
+  
+  matched_metrics <- singlecell_metrics[colnames(atac_counts), , drop = FALSE]
+  matched_metrics$nCount_ATAC <- Matrix::colSums(atac_counts)
+  matched_metrics$nFeature_ATAC <- Matrix::colSums(atac_counts > 0)
+  matched_metrics$sample <- sample_name
+  
+  matched_metrics
+}
+
+```
+
+### Metadata Cleanup
+
+These helpers normalize duplicated metadata names from Cell Ranger and Signac, then remove exact duplicate or uninformative columns.
+
+```{r}
+
+### Metadata cleanup helpers
+
+# Metadata comes from both Cell Ranger and Signac::ATACqc(). These helpers keep
+# canonical QC column names stable and prevent duplicate/constant columns from
+# cluttering plots, summaries, and exported CSVs.
+
+metadata_columns_equal <- function(x, y) {
+  isTRUE(all.equal(x, y, check.attributes = FALSE))
+}
+
+rename_atac_metadata_columns <- function(meta, sample_name = NULL, verbose = TRUE) {
+  
+  rename_map <- c(
+    Nucleosome_signal = "nucleosome_signal",
+    TSS_enrichment = "TSS.enrichment",
+    is__cell_barcode = "is_cell_barcode",
+    FRiP = "frip_signac"
+  )
+  
+  for (old_name in names(rename_map)) {
+    new_name <- unname(rename_map[[old_name]])
+    
+    if (old_name %in% colnames(meta) && new_name %in% colnames(meta)) {
+      if (!metadata_columns_equal(meta[[old_name]], meta[[new_name]])) {
+        stop(
+          "Conflicting ATAC metadata columns",
+          if (!is.null(sample_name)) paste0(" for ", sample_name) else "",
+          ": ",
+          old_name,
+          " and ",
+          new_name,
+          " are both present but differ."
+        )
+      }
+      
+      if (verbose) {
+        cat("Dropping duplicated ATAC metadata alias:", old_name, "\n")
+      }
+      
+      meta <- meta[, setdiff(colnames(meta), old_name), drop = FALSE]
+    } else if (old_name %in% colnames(meta)) {
+      colnames(meta)[colnames(meta) == old_name] <- new_name
+    }
+  }
+  
+  meta
+}
+
+# Treat all-NA, single-value, and all-zero numeric columns as uninformative.
+is_constant_metadata_column <- function(x) {
+  x_no_na <- stats::na.omit(x)
+  
+  length(x_no_na) == 0 ||
+    length(unique(x_no_na)) <= 1 ||
+    (is.numeric(x_no_na) && all(x_no_na == 0))
+}
+
+# Drop exact duplicates only outside protected QC/provenance columns.
+drop_exact_duplicate_metadata <- function(meta, protected_columns, verbose = TRUE) {
+  
+  drop_columns <- character()
+  
+  for (column_index in seq_along(colnames(meta))) {
+    column <- colnames(meta)[[column_index]]
+    
+    if (column %in% protected_columns) {
+      next
+    }
+    
+    prior_columns <- setdiff(colnames(meta)[seq_len(column_index - 1)], drop_columns)
+    
+    for (prior_column in prior_columns) {
+      if (metadata_columns_equal(meta[[column]], meta[[prior_column]])) {
+        drop_columns <- c(drop_columns, column)
+        break
+      }
+    }
+  }
+  
+  drop_columns <- unique(drop_columns)
+  
+  if (length(drop_columns) > 0) {
+    if (verbose) {
+      cat("Dropping exact duplicate ATAC metadata columns:", paste(drop_columns, collapse = ", "), "\n")
+    }
+    
+    meta <- meta[, setdiff(colnames(meta), drop_columns), drop = FALSE]
+  }
+  
+  meta
+}
+
+clean_atac_metadata <- function(obj, sample_name = NULL, verbose = TRUE) {
+  
+  protected_columns <- c(
+    "orig.ident",
+    "sample",
+    "pass_atac_qc",
+    "is_cell_barcode",
+    "excluded_reason",
+    "nCount_ATAC",
+    "nFeature_ATAC",
+    "passed_filters",
+    "pct_reads_in_peaks",
+    "blacklist_ratio",
+    "nucleosome_signal",
+    "TSS.enrichment"
+  )
+  
+  meta <- obj@meta.data
+  meta <- rename_atac_metadata_columns(meta, sample_name = sample_name, verbose = verbose)
+  meta <- drop_exact_duplicate_metadata(meta, protected_columns = protected_columns, verbose = verbose)
+  
+  candidate_columns <- setdiff(colnames(meta), protected_columns)
+  constant_columns <- candidate_columns[
+    vapply(
+      candidate_columns,
+      function(column) is_constant_metadata_column(meta[[column]]),
+      logical(1)
+    )
+  ]
+  
+  if (length(constant_columns) > 0) {
+    if (verbose) {
+      cat("Dropping constant ATAC metadata columns:", paste(constant_columns, collapse = ", "), "\n")
+    }
+    
+    meta <- meta[, setdiff(colnames(meta), constant_columns), drop = FALSE]
+  }
+  
+  obj@meta.data <- meta
+  obj
+}
+
+```
+
+### QC Plot Helpers
+
+The plot helpers are shared by pre-filter and post-filter QC plots. They skip missing or constant metrics cleanly and add threshold lines from `atac_params`.
+
+```{r}
+
+### QC plot helpers
+
+# A metric needs more than one non-NA value to support violin or scatter plots.
+
+metric_has_signal <- function(df, metric) {
+  metric %in% colnames(df) &&
+    length(unique(stats::na.omit(df[[metric]]))) > 1
+}
+
+# Generic scatter writer used by the individual QC plots below. Missing and
+# constant metrics are skipped with a console message rather than failing the run.
+save_atac_scatter <- function(qc_df, sample_name, stage, outdir, x, y, filename_suffix,
+                              x_label, y_label, vline = NULL, hline = NULL) {
+  
+  required_metrics <- c(x, y)
+  missing_metrics <- setdiff(required_metrics, colnames(qc_df))
+  
+  if (length(missing_metrics) > 0) {
+    cat(
+      "Skipping ATAC QC scatter for",
+      sample_name,
+      stage,
+      filename_suffix,
+      "because metrics are missing:",
+      paste(missing_metrics, collapse = ", "),
+      "\n"
+    )
+    return(invisible(NULL))
+  }
+  
+  if (!metric_has_signal(qc_df, x) || !metric_has_signal(qc_df, y)) {
+    cat(
+      "Skipping ATAC QC scatter for",
+      sample_name,
+      stage,
+      filename_suffix,
+      "because one or both metrics are constant:",
+      paste(required_metrics, collapse = ", "),
+      "\n"
+    )
+    return(invisible(NULL))
+  }
+  
+  p <- ggplot(qc_df, aes(x = .data[[x]], y = .data[[y]])) +
+    geom_point(size = 0.4, alpha = 0.5) +
+    theme_bw(base_size = 12) +
+    labs(x = x_label, y = y_label)
+  
+  if (!is.null(vline)) {
+    p <- p + geom_vline(xintercept = vline, linetype = "dashed", color = "firebrick")
+  }
+  
+  if (!is.null(hline)) {
+    p <- p + geom_hline(yintercept = hline, linetype = "dashed", color = "firebrick")
+  }
+  
+  ggsave(
+    file.path(outdir, paste0(sample_name, "_", stage, "_", filename_suffix, ".png")),
+    p,
+    width = 7,
+    height = 6,
+    dpi = 600
+  )
+  
+  invisible(NULL)
+}
+
+# Write pre- and post-filter QC plots. Threshold lines use atac_params so each
+# figure records the same cutoffs used by the filter.
+plot_atac_qc <- function(obj, sample_name, stage, outdir, atac_params) {
+  
+  DefaultAssay(obj) <- "ATAC"
+  
+  atac_features <- intersect(
+    c(
+      "nCount_ATAC",
+      "nFeature_ATAC",
+      "passed_filters",
+      "peak_region_fragments",
+      "pct_reads_in_peaks",
+      "pct_reads_in_DNase",
+      "blacklist_ratio",
+      "nucleosome_signal",
+      "TSS.enrichment"
+    ),
+    colnames(obj@meta.data)
+  )
+  
+  atac_vln_features <- atac_features[
+    vapply(atac_features, function(feature) metric_has_signal(obj@meta.data, feature), logical(1))
+  ]
+  
+  skipped_features <- setdiff(atac_features, atac_vln_features)
+  if (length(skipped_features) > 0) {
+    cat(
+      "Skipping constant ATAC QC violin features for",
+      sample_name,
+      stage,
+      ":",
+      paste(skipped_features, collapse = ", "),
+      "\n"
+    )
+  }
+  
+  old_plan <- future::plan()
+  future::plan(future::sequential)
+  on.exit(future::plan(old_plan), add = TRUE)
+  
+  if (length(atac_vln_features) > 0) {
+    p_vln <- VlnPlot(
+      obj,
+      features = atac_vln_features,
+      layer = "counts",
+      pt.size = 0.1,
+      ncol = 4
+    )
+    
+    ggsave(
+      file.path(outdir, paste0(sample_name, "_", stage, "_ATAC_vln.png")),
+      p_vln,
+      width = 16,
+      height = 7,
+      dpi = 600
+    )
+  }
+  
+  qc_df <- as.data.frame(obj@meta.data)
+  colnames(qc_df) <- make.unique(colnames(qc_df))
+  qc_df <- tibble::rownames_to_column(qc_df, "cell")
+
+  density_x <- dplyr::case_when(
+    "nCount_peaks" %in% colnames(obj@meta.data) ~ "nCount_peaks",
+    "nCount_ATAC" %in% colnames(obj@meta.data) ~ "nCount_ATAC",
+    TRUE ~ NA_character_
+  )
+
+  if (!is.na(density_x) && metric_has_signal(qc_df, density_x) && metric_has_signal(qc_df, "TSS.enrichment")) {
+    p_tss_density <- DensityScatter(
+      obj,
+      x = density_x,
+      y = "TSS.enrichment",
+      log_x = TRUE,
+      quantiles = TRUE
+    ) +
+      geom_hline(
+        yintercept = atac_params$min_tss_enrichment,
+        linetype = "dashed",
+        color = "firebrick"
+      ) +
+      labs(x = density_x, y = "TSS enrichment")
+    
+    if (identical(density_x, "nCount_ATAC")) {
+      p_tss_density <- p_tss_density +
+        geom_vline(
+          xintercept = atac_params$min_peak_counts,
+          linetype = "dashed",
+          color = "firebrick"
+        )
+    }
+
+    ggsave(
+      file.path(outdir, paste0(sample_name, "_", stage, "_ATAC_TSS_density_scatter.png")),
+      p_tss_density,
+      width = 7,
+      height = 6,
+      dpi = 600
+    )
+  } else {
+    cat(
+      "Skipping ATAC TSS density scatter for",
+      sample_name,
+      stage,
+      "because required metrics are missing or constant.\n"
+    )
+  }
+  
+  save_atac_scatter(
+    qc_df,
+    sample_name,
+    stage,
+    outdir,
+    x = "nCount_ATAC",
+    y = "pct_reads_in_peaks",
+    filename_suffix = "ATAC_frip_scatter",
+    x_label = "ATAC peak counts",
+    y_label = "Reads in peaks (%)",
+    vline = atac_params$min_peak_counts,
+    hline = atac_params$min_pct_reads_in_peaks
+  )
+  
+  save_atac_scatter(
+    qc_df,
+    sample_name,
+    stage,
+    outdir,
+    x = "nCount_ATAC",
+    y = "passed_filters",
+    filename_suffix = "ATAC_passed_filters_scatter",
+    x_label = "ATAC peak counts",
+    y_label = "Passed filter fragments",
+    vline = atac_params$min_peak_counts,
+    hline = atac_params$min_passed_filters
+  )
+  
+  save_atac_scatter(
+    qc_df,
+    sample_name,
+    stage,
+    outdir,
+    x = "nCount_ATAC",
+    y = "blacklist_ratio",
+    filename_suffix = "ATAC_blacklist_scatter",
+    x_label = "ATAC peak counts",
+    y_label = "Blacklist ratio",
+    vline = atac_params$min_peak_counts,
+    hline = atac_params$max_blacklist_ratio
+  )
+  
+  save_atac_scatter(
+    qc_df,
+    sample_name,
+    stage,
+    outdir,
+    x = "nCount_ATAC",
+    y = "nucleosome_signal",
+    filename_suffix = "ATAC_nucleosome_scatter",
+    x_label = "ATAC peak counts",
+    y_label = "Nucleosome signal",
+    vline = atac_params$min_peak_counts,
+    hline = atac_params$max_nucleosome_signal
+  )
+}
+
+```
+
+### Signac Fragtk QC
+
+This helper wraps `Signac::ATACqc()` and adds the returned nucleosome and TSS metrics back to the Seurat metadata.
+
+```{r}
+
+### Signac fragtk QC helper
+
+# Run Signac/fragtk QC on the raw sample ATAC object. This adds the
+# nucleosome_signal and TSS.enrichment metrics used by qc_atac_sample().
+run_signac_atacqc <- function(obj, sample_name, paths) {
+  
+  DefaultAssay(obj) <- "ATAC"
+  qc_outdir <- file.path(paths$atac_qc_dir, paste0(sample_name, "_fragtk_qc"))
+  dir.create(qc_outdir, showWarnings = FALSE, recursive = TRUE)
+  
+  fragtk_path <- Sys.which("fragtk")
+  
+  if (!nzchar(fragtk_path)) {
+    stop(
+      "fragtk not found on PATH. Install fragtk or add it to PATH before running ",
+      "Signac::ATACqc() for ",
+      sample_name,
+      "."
+    )
+  }
+  
+  cat("Computing ATAC QC metrics with Signac::ATACqc:", sample_name, "\n")
+  atac_qc_metadata <- Signac::ATACqc(
+    object = obj[["ATAC"]],
+    annotations = gene_annotations,
+    fragtk.path = unname(fragtk_path),
+    outdir = qc_outdir,
+    cleanup = TRUE,
+    verbose = TRUE
+  )
+  
+  atac_qc_metadata <- as.data.frame(atac_qc_metadata)
+  colnames(atac_qc_metadata) <- make.unique(colnames(atac_qc_metadata))
+  atac_qc_metadata <- rename_atac_metadata_columns(
+    atac_qc_metadata,
+    sample_name = sample_name
+  )
+  
+  required_atac_qc_metrics <- c("nucleosome_signal", "TSS.enrichment")
+  missing_atac_qc_metrics <- setdiff(required_atac_qc_metrics, colnames(atac_qc_metadata))
+  if (length(missing_atac_qc_metrics) > 0) {
+    stop(
+      "Signac::ATACqc() did not return required mapped metrics for ",
+      sample_name,
+      ": ",
+      paste(missing_atac_qc_metrics, collapse = ", "),
+      ". Returned columns: ",
+      paste(colnames(atac_qc_metadata), collapse = ", ")
+    )
+  }
+  
+  matched_cells <- intersect(colnames(obj), rownames(atac_qc_metadata))
+  if (length(matched_cells) == 0) {
+    stop("No ATACqc cell barcodes matched the Seurat object for ", sample_name, ".")
+  }
+  
+  if (length(matched_cells) < ncol(obj)) {
+    cat(
+      "ATACqc metrics matched",
+      length(matched_cells),
+      "of",
+      ncol(obj),
+      "ATAC cells for",
+      sample_name,
+      "\n"
+    )
+  }
+  
+  duplicated_metadata <- intersect(
+    colnames(atac_qc_metadata),
+    colnames(obj@meta.data)
+  )
+  
+  if (length(duplicated_metadata) > 0) {
+    cat(
+      "Dropping duplicated ATACqc metadata columns:",
+      paste(duplicated_metadata, collapse = ", "),
+      "\n"
+    )
+    atac_qc_metadata <- atac_qc_metadata[
+      ,
+      setdiff(colnames(atac_qc_metadata), duplicated_metadata),
+      drop = FALSE
+      ]
+  }
+  
+  atac_qc_full_metadata <- data.frame(row.names = colnames(obj))
+  atac_qc_full_metadata[
+    matched_cells,
+    colnames(atac_qc_metadata)
+  ] <- atac_qc_metadata[matched_cells, , drop = FALSE]
+  
+  obj <- AddMetaData(obj, metadata = atac_qc_full_metadata)
+  obj
+}
+
+```
+
+### Per-Sample QC
+
+Active QC entry point. It writes pre-filter metadata, post-filter metadata, retained barcodes, summary CSVs, QC plots, and returns the filtered sample-specific object.
+
+```{r}
+
+### Per-sample ATAC QC helper
+
+# Export cell-level metadata at defined checkpoints:
+# - pre_filter includes all cells plus pass_atac_qc and excluded_reason
+# - post_filter includes only retained cells
+write_atac_metadata_csv <- function(obj, sample_name, stage, paths) {
+  
+  metadata_table <- as.data.frame(obj@meta.data)
+  colnames(metadata_table) <- make.unique(colnames(metadata_table))
+  metadata_table <- tibble::rownames_to_column(metadata_table, "cell")
+  
+  data.table::fwrite(
+    metadata_table,
+    file.path(paths$atac_qc_dir, paste0(sample_name, "_ATAC_cell_qc_metrics_", stage, ".csv"))
+  )
+  
+  invisible(metadata_table)
+}
+
+# Convert per-metric failure flags into an auditable semicolon-separated reason.
+# Retained cells are labelled "retained".
+build_atac_excluded_reason <- function(qc_failures) {
+  
+  reasons <- apply(
+    qc_failures,
+    1,
+    function(x) {
+      failed_metrics <- names(x)[x %in% TRUE]
+      
+      if (length(failed_metrics) == 0) {
+        "retained"
+      } else {
+        paste(failed_metrics, collapse = ";")
+      }
+    }
+  )
+  
+  unname(reasons)
+}
+
+# Main active QC entry point. It filters cells in the original Cell Ranger peak
+# space and returns a sample-specific filtered Seurat object. It does not build
+# common peaks and does not call FeatureMatrix().
+qc_atac_sample <- function(sample_name, paths, atac_params) {
+  
+  cat("\n============================\n")
+  cat("Processing ATAC:", sample_name, "\n")
+  cat("============================\n")
+  
+  atac_path <- file.path(paths$input_dir, atac_files[[sample_name]])
+  fragment_path <- file.path(paths$input_dir, frag_files[[sample_name]])
+  
+  # Start from the original Cell Ranger peak matrix. Per-barcode metrics are
+  # aligned to matrix columns before being added to metadata.
+  raw_atac_counts <- Read10X_h5(atac_path)
+  atac_metrics <- load_atac_metrics(sample_name, paths, raw_atac_counts)
+  
+  raw_chromatin_assay <- CreateChromatinAssay(
+    counts = raw_atac_counts,
+    sep = c(":", "-"),
+    fragments = fragment_path,
+    genome = "hg38",
+    annotation = gene_annotations,
+    min.cells = 1,
+    min.features = 1,
+    validate.fragments = FALSE
+  )
+  
+  obj <- CreateSeuratObject(
+    counts = raw_chromatin_assay,
+    assay = "ATAC",
+    project = sample_name
+  )
+  
+  obj <- AddMetaData(obj, metadata = atac_metrics[colnames(obj), , drop = FALSE])
+  obj$sample <- sample_name
+  atac_cells_before <- ncol(obj)
+  
+  cat("ATAC cells before QC:", atac_cells_before, "\n")
+  cat("Computing Signac ATAC QC metrics:", sample_name, "\n")
+  
+  # Signac::ATACqc adds nucleosome and TSS metrics used by the filter below.
+  # The metadata cleanup step immediately normalizes names and removes clutter.
+  options(future.globals.maxSize = 25 * 1024^3)
+  obj <- run_signac_atacqc(obj, sample_name, paths)
+  obj <- clean_atac_metadata(obj, sample_name = sample_name)
+  
+  required_atac_qc_metrics <- c("nucleosome_signal", "TSS.enrichment")
+  missing_atac_qc_metrics <- setdiff(required_atac_qc_metrics, colnames(obj@meta.data))
+  if (length(missing_atac_qc_metrics) > 0) {
+    stop(
+      "Missing required ATAC QC metrics after Signac QC for ",
+      sample_name,
+      ": ",
+      paste(missing_atac_qc_metrics, collapse = ", ")
+    )
+  }
+  
+  # Build explicit failure flags first so rejected cells keep an interpretable
+  # excluded_reason in the pre-filter CSV.
+  qc_failures <- data.frame(
+    low_peak_counts = is.na(obj$nCount_ATAC) | obj$nCount_ATAC < atac_params$min_peak_counts,
+    low_passed_filters = is.na(obj$passed_filters) | obj$passed_filters < atac_params$min_passed_filters,
+    low_pct_reads_in_peaks = is.na(obj$pct_reads_in_peaks) | obj$pct_reads_in_peaks < atac_params$min_pct_reads_in_peaks,
+    high_blacklist_ratio = !is.na(obj$blacklist_ratio) & obj$blacklist_ratio > atac_params$max_blacklist_ratio,
+    high_nucleosome_signal = is.na(obj$nucleosome_signal) | obj$nucleosome_signal > atac_params$max_nucleosome_signal,
+    low_tss_enrichment = is.na(obj$TSS.enrichment) | obj$TSS.enrichment < atac_params$min_tss_enrichment,
+    row.names = colnames(obj)
+  )
+  
+  obj$pass_atac_qc <- rowSums(qc_failures) == 0
+  obj$excluded_reason <- build_atac_excluded_reason(qc_failures)
+  
+  write_atac_metadata_csv(
+    obj,
+    sample_name = sample_name,
+    stage = "pre_filter",
+    paths = paths
+  )
+  
+  plot_atac_qc(obj, sample_name, "preQC", paths$atac_plot_dir, atac_params)
+  
+  # From this point onward, only retained cells are carried into the returned
+  # object and saved barcode list.
+  qc_barcodes <- rownames(obj@meta.data)[obj$pass_atac_qc %in% TRUE]
+  cat("ATAC cells after QC:", length(qc_barcodes), "\n")
+  
+  if (length(qc_barcodes) == 0) {
+    stop(
+      "No ATAC cells passed QC for ",
+      sample_name,
+      ". Review thresholds and pre-filter QC metrics before continuing."
+    )
+  }
+  
+  retained_barcodes <- data.frame(cell = qc_barcodes)
+  data.table::fwrite(
+    retained_barcodes,
+    file.path(paths$atac_qc_dir, paste0(sample_name, "_ATAC_retained_barcodes.csv"))
+  )
+  
+  obj_qc <- subset(obj, cells = qc_barcodes)
+  
+  obj_qc$sample <- sample_name
+  obj_qc$pass_atac_qc <- TRUE
+  obj_qc$excluded_reason <- "retained"
+  obj_qc <- clean_atac_metadata(obj_qc, sample_name = sample_name)
+  
+  write_atac_metadata_csv(
+    obj_qc,
+    sample_name = sample_name,
+    stage = "post_filter",
+    paths = paths
+  )
+  
+  plot_atac_qc(obj_qc, sample_name, "postQC", paths$atac_plot_dir, atac_params)
+  
+  # Summary statistics are written as CSV; the returned value remains Seurat only.
+  # Thresholds are included so each summary is self-contained.
+  summary <- data.frame(
+    sample = sample_name,
+    atac_cells_before = atac_cells_before,
+    atac_cells_after_qc = ncol(obj_qc),
+    pct_removed_atac_qc = round(100 * (atac_cells_before - ncol(obj_qc)) / atac_cells_before, 2),
+    min_peak_counts = atac_params$min_peak_counts,
+    min_passed_filters = atac_params$min_passed_filters,
+    min_pct_reads_in_peaks = atac_params$min_pct_reads_in_peaks,
+    max_blacklist_ratio = atac_params$max_blacklist_ratio,
+    max_nucleosome_signal = atac_params$max_nucleosome_signal,
+    min_tss_enrichment = atac_params$min_tss_enrichment,
+    median_nCount_ATAC = median(obj_qc$nCount_ATAC, na.rm = TRUE),
+    median_nFeature_ATAC = median(obj_qc$nFeature_ATAC, na.rm = TRUE),
+    median_pct_reads_in_peaks = median(obj_qc$pct_reads_in_peaks, na.rm = TRUE),
+    median_blacklist_ratio = median(obj_qc$blacklist_ratio, na.rm = TRUE),
+    median_nucleosome_signal = median(obj_qc$nucleosome_signal, na.rm = TRUE),
+    median_TSS_enrichment = median(obj_qc$TSS.enrichment, na.rm = TRUE)
+  )
+  
+  data.table::fwrite(
+    summary,
+    file.path(paths$atac_qc_dir, paste0(sample_name, "_ATAC_summary.csv"))
+  )
+  
+  obj_qc
+}
+
+```
+
+### Downstream Integration Helpers
+
+These helpers are defined here for later use, but are not called by the active QC section. They implement the Signac-style common-peak requantification before merging.
+
+```{r}
+
+### Downstream integration helpers
+
+# Used only by the inactive downstream integration section. Per-sample QC does
+# not call FeatureMatrix or requantify fragments. This follows the Signac merge
+# pattern: requantify retained cells on the same common peak set before merging.
+requantify_atac_qc_object <- function(obj, sample_name, paths, common_peaks,
+                                      process_n = 2000) {
+  
+  cat("Requantifying retained ATAC cells on common peaks:", sample_name, "\n")
+  
+  retained_cells <- colnames(obj)
+  fragment_path <- file.path(paths$input_dir, frag_files[[sample_name]])
+  
+  if (!file.exists(fragment_path)) {
+    stop("Missing ATAC fragment file for ", sample_name, ": ", fragment_path)
+  }
+  
+  fragment <- CreateFragmentObject(
+    path = fragment_path,
+    cells = retained_cells,
+    validate.fragments = FALSE
+  )
+  
+  # FeatureMatrix can be memory intensive. Keep this step sequential by default
+  # so process_n has predictable memory behavior during later integration work.
+  old_plan <- future::plan()
+  future::plan(future::sequential)
+  on.exit(future::plan(old_plan), add = TRUE)
+  
+  common_counts <- FeatureMatrix(
+    fragments = fragment,
+    features = common_peaks,
+    cells = retained_cells,
+    process_n = process_n
+  )
+  
+  # Rebuild the ChromatinAssay with common peak rows. Metadata comes from the
+  # already-filtered QC object, so no rejected cells are reintroduced here.
+  common_assay <- CreateChromatinAssay(
+    counts = common_counts,
+    ranges = common_peaks,
+    fragments = fragment,
+    genome = "hg38",
+    annotation = gene_annotations,
+    min.cells = 0,
+    min.features = 0,
+    validate.fragments = FALSE
+  )
+  
+  metadata <- obj@meta.data[colnames(common_counts), , drop = FALSE]
+  
+  obj_common <- CreateSeuratObject(
+    counts = common_assay,
+    assay = "ATAC",
+    project = sample_name,
+    meta.data = metadata
+  )
+  
+  obj_common$sample <- sample_name
+  obj_common
+}
+
+# Merge filtered QC objects only after each sample has been requantified on the
+# same common peak set. If common_peaks is not provided, build a reduced union
+# from the supplied sample peak BED files.
+merge_atac_qc_objects <- function(..., paths, common_peaks = NULL, process_n = 2000) {
+  
+  atac_qc_list <- list(...)
+  
+  stopifnot(length(atac_qc_list) > 0)
+  stopifnot(!is.null(names(atac_qc_list)))
+  
+  missing_names <- names(atac_qc_list) == "" | is.na(names(atac_qc_list))
+  if (any(missing_names)) {
+    stop("All ATAC QC objects passed to merge_atac_qc_objects() must be named by sample.")
+  }
+  
+  if (is.null(common_peaks)) {
+    # The common peak set is intentionally constructed here, not during QC.
+    atac_peak_list <- lapply(
+      names(atac_qc_list),
+      load_atac_peaks,
+      paths = paths
+    )
+    names(atac_peak_list) <- names(atac_qc_list)
+    common_peaks <- build_unified_atac_peaks(atac_peak_list)
+  }
+  
+  qs2::qs_save(
+    common_peaks,
+    file = file.path(paths$object_dir, "GSE274934_common_ATAC_peaks.qs2")
+  )
+  
+  # Requantify every filtered sample object independently before merging.
+  atac_common_list <- mapply(
+    FUN = requantify_atac_qc_object,
+    obj = atac_qc_list,
+    sample_name = names(atac_qc_list),
+    MoreArgs = list(
+      paths = paths,
+      common_peaks = common_peaks,
+      process_n = process_n
+    ),
+    SIMPLIFY = FALSE
+  )
+  
+  if (length(atac_common_list) == 1) {
+    return(atac_common_list[[1]])
+  }
+  
+  merge(
+    atac_common_list[[1]],
+    y = atac_common_list[-1],
+    add.cell.ids = names(atac_common_list)
+  )
+}
+
+```
+
+### Summary Helpers
+
+Read the per-sample summaries written by `qc_atac_sample()` and combine them into one QC review table.
+
+```{r}
+
+### Summary CSV helper
+
+# Read per-sample summary files and write a single table for quick QC review.
+read_all_atac_summaries <- function(sample_names, paths) {
+  
+  summary_files <- file.path(
+    paths$atac_qc_dir,
+    paste0(sample_names, "_ATAC_summary.csv")
+  )
+  
+  names(summary_files) <- sample_names
+  
+  missing_summary_files <- summary_files[!file.exists(summary_files)]
+  if (length(missing_summary_files) > 0) {
+    stop(
+      "Missing ATAC summary CSV files: ",
+      paste(missing_summary_files, collapse = ", ")
+    )
+  }
+  
+  summary_df <- do.call(
+    rbind,
+    lapply(summary_files, data.table::fread)
+  )
+  
+  data.table::fwrite(
+    summary_df,
+    file.path(paths$atac_qc_dir, "all_samples_ATAC_summary.csv")
+  )
+  
+  summary_df
+}
+
+```
+
+### Inactive Silhouette Diagnostic Helper
+
+This diagnostic is reserved for the later integration pass. It is intentionally separated from the active QC helpers.
+
+```{r}
+
+### Inactive integration diagnostic helper
+
+# Reserved for the later integration pass. Not called by the active QC workflow.
+compute_silhouette_resolution <- function(
+  object,
+  cluster_col,
+  embedding,
+  n_per_cluster = 1000,
+  seed = 1234
+) {
+  set.seed(seed)
+  
+  clusters <- object[[cluster_col]][, 1]
+  clusters <- as.factor(clusters)
+  names(clusters) <- colnames(object)
+  
+  if (length(levels(clusters)) < 2) {
+    return(
+      data.frame(
+        resolution = cluster_col,
+        n_clusters = length(levels(clusters)),
+        n_cells_used = NA_integer_,
+        mean_silhouette = NA_real_,
+        median_silhouette = NA_real_,
+        frac_negative = NA_real_
+      )
+    )
+  }
+  
+  cells_use <- unlist(
+    lapply(levels(clusters), function(cl) {
+      cells_cl <- names(clusters)[clusters == cl]
+      sample(cells_cl, min(length(cells_cl), n_per_cluster))
+    })
+  )
+  
+  emb_sub <- embedding[cells_use, , drop = FALSE]
+  clusters_sub <- clusters[cells_use]
+  
+  sil <- silhouette(
+    x = as.integer(clusters_sub),
+    dist = dist(emb_sub)
+  )
+  
+  sil_df <- as.data.frame(sil)
+  
+  data.frame(
+    resolution = cluster_col,
+    n_clusters = length(levels(clusters)),
+    n_cells_used = length(cells_use),
+    mean_silhouette = mean(sil_df$sil_width),
+    median_silhouette = median(sil_df$sil_width),
+    frac_negative = mean(sil_df$sil_width < 0)
+  )
+}
+
+```
+
+## Run ATAC QC Per Sample
+
+Consensus peak construction and fragment requantification are not part of this QC pass. They will be planned with the downstream integration workflow.
+
+```{r}
+
+cat("Run modular ATAC QC per sample...\n")
+
+```
+
+### AL05 ATAC QC
+
+```{r}
+
+# Run one sample and save the filtered object immediately.
+AL05_ATAC <- qc_atac_sample(
+  sample_name = "AL05",
+  paths = paths,
+  atac_params = atac_params
+)
+
+# Memory checkpoint before serializing the object.
+gc()
+
+qs2::qs_save(
+  AL05_ATAC,
+  file = file.path(paths$object_dir, "AL05_ATAC_QC.qs2")
+)
+
+```
+
+### AL08 ATAC QC
+
+```{r}
+
+# Run one sample and save the filtered object immediately.
+AL08_ATAC <- qc_atac_sample(
+  sample_name = "AL08",
+  paths = paths,
+  atac_params = atac_params
+)
+
+# Memory checkpoint before serializing the object.
+gc()
+
+qs2::qs_save(
+  AL08_ATAC,
+  file = file.path(paths$object_dir, "AL08_ATAC_QC.qs2")
+)
+
+```
+
+### AL10 ATAC QC
+
+```{r}
+
+# Run one sample and save the filtered object immediately.
+AL10_ATAC <- qc_atac_sample(
+  sample_name = "AL10",
+  paths = paths,
+  atac_params = atac_params
+)
+
+qs2::qs_save(
+  AL10_ATAC,
+  file = file.path(paths$object_dir, "AL10_ATAC_QC.qs2")
+)
+
+```
+
+### AL11 ATAC QC
+
+```{r}
+
+# Run one sample and save the filtered object immediately.
+AL11_ATAC <- qc_atac_sample(
+  sample_name = "AL11",
+  paths = paths,
+  atac_params = atac_params
+)
+
+qs2::qs_save(
+  AL11_ATAC,
+  file = file.path(paths$object_dir, "AL11_ATAC_QC.qs2")
+)
+
+```
+
+### AL12 ATAC QC
+
+```{r}
+
+# Run one sample and save the filtered object immediately.
+AL12_ATAC <- qc_atac_sample(
+  sample_name = "AL12",
+  paths = paths,
+  atac_params = atac_params
+)
+
+qs2::qs_save(
+  AL12_ATAC,
+  file = file.path(paths$object_dir, "AL12_ATAC_QC.qs2")
+)
+
+```
+
+```{r}
+
+### Combine the per-sample CSV summaries
+
+# This expects every explicit sample block above to have written
+# {sample}_ATAC_summary.csv.
+atac_summary_df <- read_all_atac_summaries(samples, paths)
+
+```
+
+# scATAC Harmony Integration
+
+This section is intentionally inactive. Consensus peak selection, fragment requantification, dimensional reduction, Harmony integration, and RNA label transfer will be redesigned after the per-sample QC outputs are reviewed.
+
+## Integrate ATAC Across Samples
+
+```{r eval=FALSE}
+
+### Merge the retained per-sample Seurat objects
+library(qs2)
+AL05_ATAC <- qs_read(file = "output/scATAC/objects/AL05_ATAC_QC.qs2",nthreads = 10)
+AL08_ATAC <- qs_read(file = "output/scATAC/objects/AL08_ATAC_QC.qs2",nthreads = 10)
+AL10_ATAC <- qs_read(file = "output/scATAC/objects/AL10_ATAC_QC.qs2",nthreads = 10)
+AL11_ATAC <- qs_read(file = "output/scATAC/objects/AL11_ATAC_QC.qs2",nthreads = 10)
+AL12_ATAC <- qs_read(file = "output/scATAC/objects/AL12_ATAC_QC.qs2",nthreads = 10)
+
+
+
+# Later integration starts here. The merge helper will requantify each filtered
+# QC object on common peaks before merging, following the Signac merge workflow.
+GSE274934_ATAC <- merge_atac_qc_objects(
+  AL05 = AL05_ATAC,
+  AL08 = AL08_ATAC,
+  AL10 = AL10_ATAC,
+  AL11 = AL11_ATAC,
+  AL12 = AL12_ATAC,
+  paths = paths,
+  process_n = 2000
+)
+
+DefaultAssay(GSE274934_ATAC) <- "ATAC"
+
+```
+
+### LSI and Unintegrated ATAC Space
+
+```{r eval=FALSE}
+
+### Run LSI and inspect the unintegrated ATAC space
+
+GSE274934_ATAC <- RunTFIDF(GSE274934_ATAC)
+GSE274934_ATAC <- FindTopFeatures(GSE274934_ATAC, min.cutoff = "q5")
+GSE274934_ATAC <- RunSVD(GSE274934_ATAC)
+
+ElbowPlot_scCustom(GSE274934_ATAC,reduction = "lsi")
+
+GSE274934_ATAC <- RunUMAP(
+  GSE274934_ATAC,
+  reduction = "lsi",
+  umap.method = "uwot2",
+  dims = 1:39
+)
+
+p_atac_unintegrated <- DimPlot_scCustom(
+  GSE274934_ATAC,
+  group.by = "sample"
+) +
+  labs(title = "Unintegrated ATAC UMAP by sample", x = "UMAP1", y = "UMAP2") +
+  umap_theme
+
+p_atac_unintegrated
+
+ggsave(
+  file.path(paths$figure_dir, "GSE274934_ATAC_unintegrated_umap_by_sample.png"),
+  plot = p_atac_unintegrated,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+### Harmony Integration
+
+```{r eval=FALSE}
+
+### Integrate with Harmony and cluster the integrated ATAC space
+ElbowPlot_scCustom(GSE274934_ATAC,reduction = "lsi")
+
+GSE274934_ATAC <- RunHarmony(
+  object = GSE274934_ATAC,
+  group.by.vars = "sample",
+  reduction.use = "lsi",
+  dims.use = 1:39,
+  reduction.save = "harmony.atac",
+  project.dim = FALSE
+)
+
+GSE274934_ATAC <- RunUMAP(
+  GSE274934_ATAC,
+  reduction = "harmony.atac",
+  umap.method = "uwot2",
+  dims = 1:39,
+  seed.use = 1234
+)
+
+GSE274934_ATAC <- FindNeighbors(
+  GSE274934_ATAC,
+  reduction = "harmony.atac",
+  dims = 1:39
+)
+
+```
+
+### Resolution Scan and Silhouette Diagnostics
+
+```{r eval=FALSE}
+
+# Candidate resolutions to compare before choosing a final ATAC clustering.
+resolutions <- seq(0.2, 1.5, by = 0.1)
+
+# Use the Harmony embedding for both clustering and silhouette scoring.
+reduction_use <- "harmony.atac"
+dims_use <- 1:39
+
+emb <- Embeddings(GSE274934_ATAC, reduction = reduction_use)[, dims_use, drop = FALSE]
+
+# Store each temporary clustering in its own metadata column.
+for (res in resolutions) {
+  GSE274934_ATAC <- FindClusters(
+    object = GSE274934_ATAC,
+    resolution = res,
+    algorithm = 4,
+    random.seed = 1234,
+    cluster.name = paste0("ATAC_snn_res.", res)
+  )
+}
+cluster_cols <- paste0("ATAC_snn_res.", resolutions)
+
+# Score each candidate clustering on a capped per-cluster cell sample.
+library(cluster)
+silhouette_results <- map_dfr(
+  cluster_cols,
+  ~ compute_silhouette_resolution(
+    object = GSE274934_ATAC,
+    cluster_col = .x,
+    embedding = emb,
+    n_per_cluster = 1000,
+    seed = 1234
+  )
+)
+
+# Convert metadata column names back to numeric resolution values for plotting.
+silhouette_results <- silhouette_results %>%
+  mutate(
+    resolution_value = as.numeric(gsub("ATAC_snn_res\\.", "", resolution))
+  ) %>%
+  arrange(resolution_value) |>
+  as_tibble()
+
+silhouette_results
+
+p_silhouette <- ggplot(
+  silhouette_results,
+  aes(x = resolution_value, y = mean_silhouette)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  geom_text(
+    aes(label = n_clusters),
+    vjust = -1,
+    size = 3
+  ) +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "Silhouette score across clustering resolutions",
+    subtitle = "Numbers above points indicate number of clusters",
+    x = "Clustering resolution",
+    y = "Mean silhouette score"
+  )
+
+p_silhouette
+
+
+# Export the diagnostic figure and table for later manual resolution choice.
+ggsave(
+  filename = file.path(paths$figure_dir, "ATAC_silhouette_by_resolution.png"),
+  plot = p_silhouette,
+  width = 7,
+  height = 5,
+  dpi = 600
+)
+
+write_tsv(
+  silhouette_results,
+  file = file.path(paths$table_dir, "ATAC_silhouette_by_resolution.tsv")
+)
+
+```
+
+### Final ATAC Clustering and Integration Outputs
+
+```{r eval=FALSE}
+
+# Keep selected resolution as final cluster annotation
+GSE274934_ATAC$atac_clusters_res0.2 <- factor(GSE274934_ATAC$ATAC_snn_res.0.2)
+
+# Set active identities to resolution 0.4
+Idents(GSE274934_ATAC) <- "atac_clusters_res0."
+
+# Reset seurat_clusters to match resolution 0.4
+GSE274934_ATAC$seurat_clusters <- Idents(GSE274934_ATAC)
+
+# Remove all temporary ATAC_snn_res.* columns
+res_cols <- grep("^ATAC_snn_res\\.", colnames(GSE274934_ATAC@meta.data), value = TRUE)
+
+GSE274934_ATAC@meta.data <- GSE274934_ATAC@meta.data[
+  ,
+  !colnames(GSE274934_ATAC@meta.data) %in% res_cols,
+  drop = FALSE
+]
+
+p_atac_sample <- DimPlot_scCustom(
+  GSE274934_ATAC,
+  reduction = "umap",
+  group.by = "sample"
+) +
+  labs(title = "ATAC UMAP by sample", x = "UMAP1", y = "UMAP2") +
+  umap_theme
+
+p_atac_sample
+
+ggsave(
+  file.path(paths$figure_dir, "GSE274934_ATAC_umap_by_sample.png"),
+  plot = p_atac_sample,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+p_atac_clusters <- DimPlot_scCustom(
+  GSE274934_ATAC,
+  reduction = "umap",
+  label = TRUE,label.box = T
+) +
+  labs(title = "ATAC UMAP by clusters", x = "UMAP1", y = "UMAP2") +
+  umap_theme +
+  NoLegend()
+
+p_atac_clusters
+
+ggsave(
+  file.path(paths$figure_dir, "GSE274934_ATAC_umap_by_clusters.png"),
+  plot = p_atac_clusters,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+
+atac_harmony_summary <- GSE274934_ATAC@meta.data |>
+  as.data.frame() |>
+  dplyr::group_by(sample) |>
+  dplyr::summarise(
+    cells_after_qc = dplyr::n(),
+    clusters = dplyr::n_distinct(seurat_clusters),
+    median_nCount_ATAC = median(nCount_ATAC, na.rm = TRUE),
+    median_nFeature_ATAC = median(nFeature_ATAC, na.rm = TRUE),
+    median_pct_reads_in_peaks = median(pct_reads_in_peaks, na.rm = TRUE),
+    median_blacklist_ratio = median(blacklist_ratio, na.rm = TRUE),
+    median_nucleosome_signal = median(nucleosome_signal, na.rm = TRUE),
+    median_TSS_enrichment = median(TSS.enrichment, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+atac_harmony_summary
+
+write_tsv(
+  atac_harmony_summary,
+  file.path(paths$atac_qc_dir, "all_samples_ATAC_signac_harmony_summary.tsv")
+)
+
+
+gene_activity <- GeneActivity(GSE274934_ATAC)
+GSE274934_ATAC[["ACTIVITY"]] <- CreateAssayObject(counts = gene_activity)
+plan(sequential)
+DefaultAssay(GSE274934_ATAC) <- "ACTIVITY"
+GSE274934_ATAC <- NormalizeData(GSE274934_ATAC)
+GSE274934_ATAC <- ScaleData(GSE274934_ATAC)
+
+qs2::qs_save(
+  GSE274934_ATAC,
+  file = file.path(paths$object_dir, "GSE274934_ATAC.qs2"),
+  nthreads = 10,
+  compress_level = 10
+)
+
+
+
+```
+
+# Plots of Interest
+
+Exploratory coverage and feature plots for later review. This section is inactive during the QC-only run.
+
+```{r eval=FALSE}
+
+
+DefaultAssay(GSE274934_ATAC) <- "ATAC"
+
+# Coverage plots for individual genes of interest after ATAC integration.
+YAP1 <- CoveragePlot(
+  object = GSE274934_ATAC,
+  region = "YAP1",
+  annotation = FALSE,
+  peaks = FALSE
+) +
+  ggsci::scale_color_npg() +
+  labs(title = "YAP1")
+
+TEAD4 <- CoveragePlot(
+  object = GSE274934_ATAC,
+  region = "TEAD4",
+  annotation = FALSE,
+  peaks = FALSE
+) +
+  ggsci::scale_color_npg() +
+  labs(title = "TEAD4")
+
+
+FeaturePlot_scCustom(seurat_object = GSE274934_ATAC,reduction = "umap", features = c("HMGB1","HMGA2","YAP1","TEAD4")) &
+  umap_theme
+
+
+
+HMGB1 <- CoveragePlot(
+  object = GSE274934_ATAC,
+  region = "HMGB1",
+  annotation = FALSE,
+  peaks = FALSE
+) +
+  ggsci::scale_color_npg() +
+  labs(title = "HMGB1")
+
+HMGB2 <- CoveragePlot(
+  object = GSE274934_ATAC,
+  region = "HMGB2",
+  annotation = FALSE,
+  peaks = FALSE
+) +
+  ggsci::scale_color_npg() +
+  labs(title = "HMGB2")
+
+HMGA2 <- CoveragePlot(
+  object = GSE274934_ATAC,
+  region = "HMGA2",
+  annotation = FALSE,
+  peaks = FALSE
+) +
+  ggsci::scale_color_npg() +
+  labs(title = "HMGA2")
+
+
+library(patchwork)
+
+HMGB1 + HMGB2 + YAP1 + TEAD4
+
+```

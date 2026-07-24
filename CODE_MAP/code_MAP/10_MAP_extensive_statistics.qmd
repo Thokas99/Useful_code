@@ -1,0 +1,83 @@
+---
+title: "MAP 10 - Extensive Statistics and Modeling"
+format: html
+---
+
+# Section 1. Overview
+
+This notebook is the home for extensive statistical work that should not clutter the core calculation notebooks.
+
+**MAP role:** downstream support notebook. Keep the main biological calculations in notebooks 00-09, then use this notebook for confirmatory summaries, post-hoc comparisons, adjusted models, permutation checks, and sensitivity tables that make the MAP statistically easier to defend.
+
+## Section 1.1. Reader Guide
+
+- Primary input should be `output/objects/css_combined_processed_with_C1_EpiCore.qs2` after `09_MAP_C1_EpiCore_refined_signature.qmd` has created the final C1-EpiCore score.
+- If the C1-EpiCore object is not available, use `output/objects/css_combined_processed.qs2` and clearly mark which analyses are based on the original `C1_score`.
+- Read this notebook after the biological notebooks. It should answer whether the main C1, state, module, regulatory, velocity, and metabolism claims remain stable under stricter statistical checks.
+- Keep tables explicit and slide-ready. The goal is support for interpretation, not a new discovery branch.
+
+## Section 1.2. MAP Section Boundaries
+
+### Section 1.2.1. Notebook Flow
+
+1. Setup and load the most complete MAP object.
+2. Run global and post-hoc tests for C1-EpiCore across clusters, annotations, samples, and key metadata.
+3. Fit adjusted models for C1-EpiCore while accounting for sample, cell-cycle, mitochondrial, and annotation effects where available.
+4. Summarize C1-EpiCore relationships with CytoTRACE2, velocity pseudotime, CellRank2 probabilities, modules, TF activity, and Hallmark scores.
+5. Add permutation or sensitivity checks only when they answer a specific robustness question.
+6. Export compact statistical tables for the final report.
+
+## Section 1.3. Setup
+
+Load packages and the preferred MAP object here. Keep this setup conservative so the notebook can be run after the final C1-EpiCore build step.
+
+# Section 2. C1-EpiCore Group Comparisons
+
+Use this section for Kruskal-Wallis, Wilcoxon, Dunn, or effect-size summaries across clusters, annotations, samples, and any predefined C1 groups. These tests support figure-level interpretations from notebooks 02, 03, and 09.
+
+## Section 2.1. Planned Blocks
+
+- Load `C1_EpiCore` from the final step 09 object.
+- Summarize C1-EpiCore by cluster, annotation, sample, and selected metadata groups.
+- Export global tests, pairwise tests, and effect sizes as separate tables.
+
+# Section 3. Adjusted Models
+
+Use this section for linear or generalized models that test whether C1-EpiCore associations remain visible after accounting for sample, cell-cycle, mitochondrial fraction, annotation, and other available covariates.
+
+## Section 3.1. Planned Blocks
+
+- Fit a compact main model with sample and technical covariates.
+- Add annotation or cluster terms only when the model question needs them.
+- Save tidy coefficients, confidence intervals, and model diagnostics.
+
+# Section 4. Cross-Layer Robustness Checks
+
+Use this section to compare C1-EpiCore with CytoTRACE2, velocity pseudotime, CellRank2 summaries, hdWGCNA module eigengenes, TF activity, Hallmark scores, and metabolic-task summaries. Keep each check tied to a MAP claim.
+
+## Section 4.1. Planned Blocks
+
+- Correlate C1-EpiCore with progression-like scores and velocity metrics.
+- Compare C1-EpiCore with selected modules, TFs, Hallmarks, and metabolic tasks.
+- Prefer compact ranked tables and one summary plot per layer.
+
+# Section 5. Permutation and Sensitivity Checks
+
+Use this section sparingly for null-model or resampling checks. It should protect the main interpretation from obvious artifacts without turning the notebook into an exploratory statistics sandbox.
+
+## Section 5.1. Planned Blocks
+
+- Add permutation tests only for the main C1-EpiCore claims.
+- Keep null definitions explicit: shuffled scores, shuffled labels, or sample-aware resampling.
+- Export the null distribution summary rather than a large figure set.
+
+# Section 6. Export Statistical Support Tables
+
+Write final model summaries, post-hoc tables, effect sizes, and robustness summaries here so reports can cite stable files from `output/tables/`.
+
+## Section 6.1. Export Checklist
+
+- One table for group summaries.
+- One table for global and pairwise tests.
+- One table for adjusted models.
+- One table for cross-layer robustness checks.

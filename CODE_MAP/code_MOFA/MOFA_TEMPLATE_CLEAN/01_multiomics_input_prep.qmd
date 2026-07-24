@@ -1,0 +1,108 @@
+---
+title: "MOFA Template: Multi-Omics Input Preparation"
+format: html
+editor: source
+---
+
+# Overview
+
+This notebook prepares the matched matrices consumed by the scoring and MOFA notebooks.
+
+# Setup
+
+```{r}
+library(dplyr)
+library(readr)
+library(tibble)
+library(purrr)
+library(qs2)
+
+source("helpers/helpers_from_MOFA.R")
+
+project_id <- "PROJECT_ID"
+sample_id_length <- 16
+
+dir.create("input/tables", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/tables", recursive = TRUE, showWarnings = FALSE)
+
+input_files <- list(
+  rna = "input/tables/RNAseq_raw.tsv",
+  mirna = "input/tables/miRNA_raw.tsv",
+  methylation = "input/tables/methylation_raw.tsv",
+  mutation = "input/tables/mutation_raw.tsv",
+  rppa = "input/tables/RPPA_raw.tsv"
+)
+```
+
+# Normalize Sample IDs
+
+```{r}
+normalize_sample_cols <- function(df, feature_col) {
+  sample_cols <- setdiff(colnames(df), feature_col)
+  renamed <- stats::setNames(sample_cols, tcga_sample_barcode(sample_cols))
+  colnames(df) <- c(feature_col, renamed)
+  df
+}
+```
+
+# Build Matched Tables
+
+```{r}
+# Replace these example reads with the concrete assay exports for a new project.
+rna <- readr::read_tsv(input_files$rna, show_col_types = FALSE)
+mirna <- readr::read_tsv(input_files$mirna, show_col_types = FALSE)
+methylation <- readr::read_tsv(input_files$methylation, show_col_types = FALSE)
+mutation <- readr::read_tsv(input_files$mutation, show_col_types = FALSE)
+rppa <- readr::read_tsv(input_files$rppa, show_col_types = FALSE)
+
+rna <- normalize_sample_cols(rna, feature_col = colnames(rna)[1])
+mirna <- normalize_sample_cols(mirna, feature_col = colnames(mirna)[1])
+methylation <- normalize_sample_cols(methylation, feature_col = colnames(methylation)[1])
+mutation <- normalize_sample_cols(mutation, feature_col = colnames(mutation)[1])
+rppa <- normalize_sample_cols(rppa, feature_col = colnames(rppa)[1])
+
+sample_sets <- list(
+  setdiff(colnames(rna), colnames(rna)[1]),
+  setdiff(colnames(mirna), colnames(mirna)[1]),
+  setdiff(colnames(methylation), colnames(methylation)[1]),
+  setdiff(colnames(mutation), colnames(mutation)[1]),
+  setdiff(colnames(rppa), colnames(rppa)[1])
+)
+matched_samples <- Reduce(intersect, sample_sets)
+stopifnot(length(matched_samples) > 0)
+
+write_output_manifest <- function() {
+  manifest <- tibble::tibble(
+    assay = c("rna", "mirna", "methylation", "mutation", "rppa"),
+    n_samples = purrr::map_int(sample_sets, length),
+    n_matched = length(matched_samples)
+  )
+  readr::write_tsv(
+    manifest,
+    file.path("input/tables", paste0(project_id, "_matched_multiomics_manifest.tsv"))
+  )
+}
+
+write_output_manifest()
+```
+
+# Save Matched Inputs
+
+```{r}
+matched_tables <- list(
+  rna = rna[, c(1, match(matched_samples, colnames(rna))), drop = FALSE],
+  mirna = mirna[, c(1, match(matched_samples, colnames(mirna))), drop = FALSE],
+  methylation = methylation[, c(1, match(matched_samples, colnames(methylation))), drop = FALSE],
+  mutation = mutation[, c(1, match(matched_samples, colnames(mutation))), drop = FALSE],
+  rppa = rppa[, c(1, match(matched_samples, colnames(rppa))), drop = FALSE]
+)
+
+purrr::iwalk(matched_tables, function(tbl, nm) {
+  readr::write_tsv(tbl, file.path("input/tables", paste0(toupper(nm), "_MATCHED.tsv")))
+})
+```
+
+# Notes
+
+- Keep project-specific download code, GDC query logic, and collapse rules visible here.
+- Do not hide assay-specific cleanup decisions in helpers.
