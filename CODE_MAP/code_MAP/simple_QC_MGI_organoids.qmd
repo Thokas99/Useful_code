@@ -1,0 +1,1670 @@
+---
+title: "RNA-seq QC report for the MGI organoid"
+date: today
+date-format: "DD MM YYYY"
+
+format:
+  html:
+    page-layout: full
+
+    toc: true
+    toc-title: "Notebook sections"
+    toc-location: left
+    toc-depth: 4
+
+    number-sections: true
+    number-depth: 4
+
+    theme:
+      light: lux
+      dark: darkly
+
+    title-block-banner: true
+
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-tools: true
+    code-copy: true
+    code-overflow: wrap
+
+    df-print: paged
+
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-newwindow: true
+
+    embed-resources: true
+    self-contained-math: true
+
+    fig-align: center
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 600
+
+    callout-appearance: simple
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  error: false
+  freeze: false
+
+editor: source
+---
+
+# setup
+
+## Study Question and QC Strategy
+
+This notebook is a minimal bulk RNA-seq QC report for the MGI organoid samples.
+The aim is to establish whether the expression matrix is suitable for downstream biological analysis, not to generate every possible QC plot.
+
+The report follows one path: load counts and metadata, clean duplicated gene symbols, remove genes that are zero in every sample, build raw/CPM/logCPM matrices, evaluate sample-level QC, inspect PCA structure, and compare unsupervised clusters with known metadata. Reusable tables are written to `output/tables/`; figures are written to `output/figures/`.
+
+```{r}
+#| label: setup-libraries
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(patchwork)
+library(vroom)
+library(future)
+library(ggpubr)
+library(ggsci)
+library(corrplot)
+library(matrixStats)
+library(ggrepel)
+library(pheatmap)
+library(FactoMineR)
+library(factoextra)
+library(data.table)
+
+plan(multicore, workers = 4)
+
+# Global QC tuning parameter.
+# The same value is used for threshold visualization and outlier calls.
+qc_n_mad <- 3
+
+# Normalize counts and return a logCPM matrix for multivariate QC.
+compute_logcpm <- function(count_mat) {
+  dge <- edgeR::DGEList(counts = count_mat)
+  keep <- rowSums(edgeR::cpm(dge) > 5) >= 5
+  dge <- dge[keep, , keep.lib.sizes = FALSE]
+  dge <- edgeR::normLibSizes(dge, method = "TMMwsp")
+  edgeR::cpm(dge, log = TRUE, prior.count = 1)
+}
+
+compute_cpm <- function(count_mat) {
+  dge <- edgeR::DGEList(counts = count_mat)
+  keep <- rowSums(edgeR::cpm(dge) > 5) >= 5
+  dge <- dge[keep, , keep.lib.sizes = FALSE]
+  dge <- edgeR::normLibSizes(dge, method = "TMMwsp")
+  edgeR::cpm(dge)
+}
+
+# Generic MAD-based helper for low- or high-tail outlier flags.
+mad_outlier_flag <- function(x, direction = c("high", "low"), n_mad = 4) {
+  direction <- match.arg(direction)
+  med <- median(x, na.rm = TRUE)
+  mad_val <- mad(x, na.rm = TRUE, constant = 1.4826)
+
+  if (is.na(mad_val) || mad_val == 0) {
+    return(rep(FALSE, length(x)))
+  }
+
+  if (direction == "high") {
+    x > (med + n_mad * mad_val)
+  } else {
+    x < (med - n_mad * mad_val)
+  }
+}
+
+compute_low_threshold <- function(x, n_mad = 4) {
+  10^(median(log10(x + 1), na.rm = TRUE) - n_mad * mad(log10(x + 1), na.rm = TRUE)) - 1
+}
+
+dir.create("output/tables", recursive = TRUE, showWarnings = FALSE)
+
+
+```
+
+#  Read raw gene counts
+
+## 1. Inputs: Gene Counts and Sample Metadata
+
+We start from Salmon-derived raw gene counts and the organoid metadata sheet. The first check is sample identity: count columns and metadata rows must line up before any QC metric is trusted. If the count columns and metadata rows are mismatched, later plots can look biological while actually describing the wrong samples.
+
+```{r}
+#| label: read-raw-gene-counts
+#| message: false
+#| warning: false
+
+
+# Read raw gene counts
+rna_raw_full <- vroom::vroom(
+  "input/salmon_gene_counts_raw.tsv",
+  show_col_types = FALSE
+)
+
+sample_map <- tibble::tibble(
+  original_sample = setdiff(
+    colnames(rna_raw_full),
+    c("GENEID", "GENENAME", "GENETYPE")
+  ),
+  sample = stringr::str_extract(original_sample, "UDB\\d+"),
+  lane = stringr::str_extract(original_sample, "L\\d+")
+)
+
+# Rename count columns using the UDB sample ID.
+rna_raw_full <- rna_raw_full |>
+  dplyr::rename_with(
+    ~ stringr::str_extract(.x, "UDB\\d+"),
+    .cols = -dplyr::all_of(c("GENEID", "GENENAME", "GENETYPE"))
+  )
+
+metadata <- readxl::read_excel(
+  "input/Metadata_organoids_2_with_IEO_grade.xlsx"
+) |>
+  janitor::clean_names() |>
+  dplyr::rename(sample = barcode) |>
+  dplyr::mutate(
+    # TRUE when the metadata sample is absent from the count table.
+    sequence_fail = !sample %in% sample_map$sample,
+
+    # A failed sample can never be retained.
+    use = dplyr::coalesce(use, FALSE) & !sequence_fail
+  ) |>
+  dplyr::left_join(sample_map, by = "sample")
+
+write_tsv(metadata, file = "output/tables/metadata_clean.tsv")
+writexl::write_xlsx(metadata,"output/tables/metadata_clean.xlsx")
+
+metadata |>
+  dplyr::filter(sequence_fail) |>
+  dplyr::select(sample, generic_name, use, sequence_fail)
+
+samples_keep <- metadata |>
+  dplyr::filter(use) |>
+  dplyr::distinct(sample) |>
+  dplyr::pull(sample)
+
+rna_mat <- rna_raw_full |>
+  dplyr::select(
+    GENENAME,
+    dplyr::any_of(samples_keep)
+  )
+
+head(rna_mat)
+
+dim(rna_mat)
+
+```
+
+# Check duplicated
+
+
+## 2. Gene Symbol Hygiene: Why Check Duplicates?
+
+Gene symbols are convenient for interpretation, but they are not always one-to-one with rows in annotation-derived count tables. The same symbol can appear more than once because of transcript/gene annotation history or duplicated identifiers. We check duplicates before collapsing so the report can show that this cleanup was intentional, not silent data loss.
+
+```{r}
+#| label: check-duplicated-genes
+#| message: false
+#| warning: false
+
+# Check duplicated gene names
+
+dup_table <- rna_mat |>
+  dplyr::pull(GENENAME) |>
+  duplicated() |>
+  table()
+
+dup_table
+
+dup_genes <- rna_mat |>
+  dplyr::count(GENENAME, sort = TRUE) |>
+  dplyr::filter(n > 1)
+
+dup_genes
+
+dup_signal <- rna_mat |>
+  dplyr::semi_join(dup_genes, by = "GENENAME") |>
+  dplyr::mutate(
+    row_total_count = rowSums(dplyr::across(where(is.numeric)))
+  ) |>
+  dplyr::group_by(GENENAME) |>
+  dplyr::summarise(
+    n_rows = dplyr::n(),
+    n_nonzero_rows = sum(row_total_count > 0),
+    total_count = sum(row_total_count),
+    median_row_count = median(row_total_count),
+    max_row_count = max(row_total_count),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(n_rows))
+
+duplicate_gene_summary <- tibble::tibble(
+  duplicated_gene_symbols = nrow(dup_signal),
+  extra_duplicate_rows = sum(dup_signal$n_rows - 1)
+)
+
+write_tsv(duplicate_gene_summary, "output/tables/MGI_duplicate_gene_summary.tsv")
+
+duplicate_gene_summary
+
+```
+
+# Collapse duplicated genes
+
+### Collapse Duplicated Genes and Remove All-Zero Genes
+
+Duplicated gene symbols are collapsed by summing counts, preserving total signal for that gene symbol. After that, genes with zero counts in every sample are removed. These all-zero genes cannot contribute to QC, CPM, logCPM, PCA, or biological interpretation; keeping them only inflates denominator-style summaries and makes matrix outputs harder to read. Nonzero genes are retained and exported as raw counts, CPM, and logCPM for downstream review and reuse.
+
+```{r}
+#| label: collapse-duplicated-genes
+#| message: false
+#| warning: false
+
+# Count mass before collapsing
+
+sum_before <- rna_mat |>
+  dplyr::select(where(is.numeric)) |>
+  as.matrix() |>
+  sum(na.rm = TRUE)
+
+# Collapse duplicated genes by summing counts
+
+rna_dt <- data.table::as.data.table(rna_mat)
+
+count_cols <- setdiff(names(rna_dt), "GENENAME")
+
+rna_mat <- rna_dt[
+  ,
+  lapply(.SD, sum, na.rm = TRUE),
+  by = GENENAME,
+  .SDcols = count_cols
+] |>
+  tibble::as_tibble()
+
+# Keep one GENETYPE annotation per collapsed GENENAME
+
+gene_type_annot <- rna_raw_full |>
+  dplyr::group_by(GENENAME) |>
+  dplyr::summarise(
+    GENETYPE = dplyr::first(stats::na.omit(GENETYPE)),
+    n_gene_types = dplyr::n_distinct(GENETYPE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+gene_type_annot |>
+  dplyr::count(n_gene_types, sort = TRUE)
+
+rna_raw_gene_type <- gene_type_annot |>
+  dplyr::select(GENENAME, GENETYPE) |>
+  dplyr::left_join(rna_mat, by = "GENENAME")
+
+# Confirm no duplicated gene names remain
+
+rna_mat |>
+  dplyr::count(GENENAME, sort = TRUE) |>
+  dplyr::filter(n > 1)
+
+rna_mat_including_all_zero <- rna_mat
+
+sample_cols_dedup <- setdiff(colnames(rna_mat_including_all_zero), "GENENAME")
+keep_nonzero <- rowSums(rna_mat_including_all_zero[, sample_cols_dedup, drop = FALSE]) > 0
+n_all_zero_genes <- sum(!keep_nonzero)
+
+rna_mat <- rna_mat_including_all_zero[keep_nonzero, , drop = FALSE]
+rna_raw_gene_type <- rna_raw_gene_type |>
+  dplyr::filter(GENENAME %in% rna_mat$GENENAME)
+
+stopifnot(all(rowSums(rna_mat[, sample_cols_dedup, drop = FALSE]) > 0))
+
+gene_filter_summary <- tibble::tibble(
+  genes_before_nonzero_filter = nrow(rna_mat_including_all_zero),
+  all_zero_genes_removed = n_all_zero_genes,
+  genes_after_nonzero_filter = nrow(rna_mat)
+)
+
+write_tsv(gene_filter_summary, "output/tables/MGI_gene_filter_summary.tsv")
+
+write_tsv(rna_mat, "output/tables/MGI_raw_counts_dedup_nonzero.tsv")
+
+gene_filter_summary
+
+```
+
+## matrix to use 
+
+## 3. Analysis Matrices: Raw Counts, CPM, and logCPM
+
+The same zero-filtered raw-count matrix is used for all downstream steps. CPM normalizes for library size so samples can be compared on a common scale. logCPM compresses very large expression differences, which makes distributions, correlations, and PCA less dominated by the most abundant genes.
+
+```{r}
+#| label: build-expression-matrices
+#| message: false
+#| warning: false
+
+rna_mat <- rna_mat |>
+  column_to_rownames("GENENAME") |>
+  as.matrix()
+
+storage.mode(rna_mat) <- "numeric"
+stopifnot(is.numeric(rna_mat))
+stopifnot(!anyDuplicated(rownames(rna_mat)))
+stopifnot(!anyDuplicated(colnames(rna_mat)))
+stopifnot(all(is.finite(rna_mat)))
+stopifnot(all(rna_mat >= 0))
+stopifnot(all(rowSums(rna_mat) > 0))
+
+cpm_mat <- compute_cpm(rna_mat) |>
+  as.data.frame()
+
+cpm_mat |>
+  rownames_to_column("gene") |>
+  write_tsv(file = "output/tables/MGI_CPM_dedup_nonzero.tsv")
+
+log_mat <- compute_logcpm(rna_mat) |>
+  as.data.frame()
+
+log_mat |>
+  rownames_to_column("gene") |>
+  write_tsv(file = "output/tables/MGI_logCPM_dedup_nonzero.tsv")
+
+```
+
+## Compute Core QC Metrics
+## 4. Sample-Level QC Metrics
+
+These metrics summarize whether each sample has enough usable RNA-seq signal. Library size measures total reads assigned to genes. Detected genes counts how many genes have nonzero expression. Median expression and top-gene fraction flag samples dominated by very few genes, which can happen with low complexity, degradation, or technical imbalance.
+
+
+```{r compute-qc-metrics}
+
+#| label: compute-qc-metrics
+#| message: false
+#| warning: false
+
+# Library size captures sequencing depth for each sample.
+lib_size <- colSums(rna_mat)
+
+# Detection complexity counts how many RNA are observed with non-zero counts.
+detected_genes <- colSums(rna_mat > 0)
+
+# Median expression gives a compact summary of the central expression level.
+median_expr <- apply(log_mat, 2, median, na.rm = TRUE)
+
+# Assemble the main sample-level QC table.
+qc_RNA <- tibble(
+  sample = names(lib_size),
+  lib_size = as.numeric(lib_size),
+  detected_genes = as.numeric(detected_genes),
+  median_expr = as.numeric(median_expr)
+)
+
+# Work on the log scale for low-end thresholds because library size and
+# detection complexity are strongly right-skewed.
+qc_RNA <- qc_RNA %>%
+  mutate(
+    log10_lib_size = log10(lib_size + 1),
+    log10_detected_genes = log10(detected_genes + 1)
+  )
+
+```
+
+## Define Low-QC Thresholds
+
+### MAD-Based Outlier Thresholds
+
+MAD means median absolute deviation. It is used here because it is robust: one bad sample does not move the threshold as much as it would with mean and standard deviation. The rule asks whether a sample is unusually low or high compared with the cohort itself, instead of imposing an arbitrary universal cutoff that may not fit organoid RNA-seq.
+
+
+```{r define-rna-thresholds}
+
+#| label: define-rna-thresholds
+#| message: false
+#| warning: false
+
+# These cutoffs are the low-tail thresholds visualized in the early QC plots.
+lib_size_threshold <- compute_low_threshold(qc_RNA$lib_size, n_mad = qc_n_mad)
+detected_genes_threshold <- compute_low_threshold(qc_RNA$detected_genes, n_mad = qc_n_mad)
+
+threshold_tbl <- tibble(
+  metric = c("lib_size", "detected_genes"),
+  threshold = c(lib_size_threshold, detected_genes_threshold),
+  n_mad = qc_n_mad
+)
+
+threshold_tbl
+
+top_gene_fraction <- apply(rna_mat, 2, function(x) {
+  sort_x <- sort(x, decreasing = TRUE)
+  sum(sort_x[1:10]) / sum(sort_x)
+})
+
+qc_RNA <- qc_RNA |>
+  dplyr::mutate(
+    top10_gene_fraction = as.numeric(top_gene_fraction[sample])
+  )
+
+# Zero-count gene summary
+
+```
+
+## Similarity Overview
+
+## 5. Sample Similarity Checks
+
+Similarity heatmaps ask whether samples have broadly comparable expression profiles. Cosine similarity focuses on expression-pattern direction, while Spearman correlation focuses on rank agreement between genes. If a sample is globally unlike all others, it deserves attention even if single QC metrics look acceptable.
+
+
+```{r rna-cosine-similarity}
+
+#| label: rna-cosine-similarity
+#| message: false
+#| warning: false
+
+# Cosine similarity summarizes how similar each sample is to all others
+# after TMMwsp normalization and logCPM transformation.
+cosine_sim <- function(mat) {
+  mat <- data.matrix(mat)
+  mat_norm <- sweep(mat, 2, sqrt(colSums(mat^2)), "/")
+  t(mat_norm) %*% mat_norm
+}
+
+# Cosine similarity is computed on normalized logCPM values.
+cos_sim_matrix <- cosine_sim(log_mat)
+
+png(file.path("output/figures/MGI_cosine_sim_RNA.png"), width = 3000, height = 3000, res = 200)
+pheatmap(
+  cos_sim_matrix,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  clustering_method = "complete",
+  main = "Cosine Similarity RNA"
+)
+dev.off()
+
+pheatmap(
+  cos_sim_matrix,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  clustering_method = "complete",
+  main = "Cosine Similarity RNA"
+)
+dev.off()
+
+# Median similarity to all other samples is stored as a compact QC metric.
+diag(cos_sim_matrix) <- NA
+qc_RNA$cosine_sim <- rowMedians(cos_sim_matrix, na.rm = TRUE)
+
+
+```
+
+```{r rna-spearman-correlation}
+#| label: rna-spearman-correlation
+#| message: false
+#| warning: false
+
+# Sample-sample correlation
+sample_cor <- cor(
+  log_mat,
+  method = "spearman",
+  use = "pairwise.complete.obs"
+)
+
+png(
+  file.path("output/figures/MGI_sample_spearman_correlation_RNA.png"),
+  width = 3000,
+  height = 3000,
+  res = 200
+)
+
+pheatmap::pheatmap(
+  sample_cor,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  clustering_method = "complete",
+  main = "MGI RNA-seq sample Spearman correlation"
+)
+
+dev.off()
+
+diag(sample_cor) <- NA
+
+qc_RNA$median_spearman_cor <- matrixStats::rowMedians(
+  sample_cor,
+  na.rm = TRUE
+)
+
+```
+
+
+## Threshold-Aware QC Plots
+
+## 6. Distribution and Composition QC Figures
+
+These plots are descriptive QC panels. Raw-count and logCPM distributions show whether samples have comparable expression ranges after cleanup/normalization. The gene-biotype composition plot checks whether expected RNA classes dominate and whether unusual biotype composition suggests annotation or library issues.
+
+
+```{r rna-qc-plots}
+
+#| label: rna-raw-count-distribution
+#| message: false
+#| warning: false
+
+# Raw count distribution after collapsing duplicated genes
+raw_counts_long <- rna_mat |>
+  as.data.frame() |>
+  tibble::rownames_to_column("GENENAME") |>
+  tidyr::pivot_longer(
+    cols = -GENENAME,
+    names_to = "sample",
+    values_to = "raw_count"
+  ) |>
+  dplyr::mutate(log10_raw_count = log10(raw_count + 1))
+
+p_raw_counts_box <- ggplot(raw_counts_long, aes(x = sample, y = raw_count)) +
+  geom_boxplot(outlier.alpha = 0.15, fill = "grey85", color = "grey25") +
+  theme_bw(base_size = 12) +
+  scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  ) +
+  labs(
+    title = "MGI RNA-seq QC: Raw Count Distribution per Sample",
+    subtitle = "Raw counts",
+    x = NULL,
+    y = "raw count"
+  )
+
+p_raw_counts_box
+
+ggsave(
+  filename = file.path("output/figures/MGI_raw_counts_boxplot_dedup.png"),
+  plot = p_raw_counts_box,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+```{r rna-logcpm-distribution}
+#| label: rna-logcpm-distribution
+#| message: false
+#| warning: false
+
+# logCPM distribution after normalization
+logcpm_long <- log_mat |>
+  as.data.frame() |>
+  tibble::rownames_to_column("gene") |>
+  tidyr::pivot_longer(
+    cols = -gene,
+    names_to = "sample",
+    values_to = "logCPM"
+  )
+
+p_logcpm_box <- ggplot(logcpm_long, aes(x = sample, y = logCPM)) +
+  geom_boxplot(outlier.alpha = 0.15, fill = "skyblue2", color = "grey25") +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  ) +
+  labs(
+    title = "MGI RNA-seq QC: logCPM Distribution per Sample",
+    subtitle = "TMMwsp-normalized logCPM after expression filtering",
+    x = NULL,
+    y = "logCPM"
+  )
+
+p_logcpm_box
+
+ggsave(
+  filename = file.path("output/figures/MGI_logCPM_boxplot_dedup.png"),
+  plot = p_logcpm_box,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+```{r rna-genetype-composition}
+#| label: rna-genetype-composition
+#| message: false
+#| warning: false
+
+# Raw count composition by GENETYPE after collapsing duplicated genes
+gene_type_counts <- rna_raw_gene_type |>
+  dplyr::mutate(
+    GENETYPE = dplyr::if_else(
+      is.na(GENETYPE) | GENETYPE == "",
+      "unknown",
+      GENETYPE
+    )
+  ) |>
+  dplyr::group_by(GENETYPE) |>
+  dplyr::summarise(
+    dplyr::across(
+      .cols = -GENENAME,
+      .fns = ~ sum(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  ) |>
+  tidyr::pivot_longer(
+    cols = -GENETYPE,
+    names_to = "sample",
+    values_to = "raw_count"
+  ) |>
+  dplyr::group_by(sample) |>
+  dplyr::mutate(
+    fraction = raw_count / sum(raw_count)
+  ) |>
+  dplyr::ungroup()
+
+top_gene_types <- gene_type_counts |>
+  dplyr::group_by(GENETYPE) |>
+  dplyr::summarise(total_count = sum(raw_count), .groups = "drop") |>
+  dplyr::arrange(dplyr::desc(total_count)) |>
+  dplyr::slice_head(n = 5) |>
+  dplyr::pull(GENETYPE)
+
+write_tsv(gene_type_counts, "output/tables/MGI_gene_biotype_counts.tsv")
+
+
+gene_type_counts_plot <- gene_type_counts |>
+  mutate(
+    GENETYPE_plot = if_else(GENETYPE %in% top_gene_types, GENETYPE, "Other"),
+    GENETYPE_plot = factor(
+      GENETYPE_plot,
+      levels = c("protein_coding", "misc_RNA", "lncRNA", "snRNA", "Mt_rRNA", "Other")
+    )
+  ) |>
+  summarise(
+    raw_count = sum(raw_count),
+    fraction = sum(fraction),
+    .by = c(sample, GENETYPE_plot)
+  )
+
+p_gene_type_stack <- ggplot(
+  gene_type_counts_plot,
+  aes(sample, fraction, fill = GENETYPE_plot)
+) +
+  geom_col(position = position_stack(reverse = TRUE)) +
+  coord_flip() +
+  scale_fill_d3(palette = "category20", drop = FALSE) +
+  theme_minimal() +
+  labs(
+    title = "MGI RNA-seq QC: Raw Count Composition by Gene Type",
+    subtitle = "Top 5 gene types shown, remaining types grouped as Other",
+    x = NULL,
+    y = "Fraction of raw counts",
+    fill = "Gene type"
+  )
+
+p_gene_type_stack
+
+ggsave(
+  filename = file.path("output/figures/MGI_raw_counts_by_GENETYPE_stacked_dedup.png"),
+  plot = p_gene_type_stack,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+### Threshold-Aware QC Scatterplots
+
+Scatterplots combine two QC dimensions at a time, such as detected genes and library size. This is easier to interpret than a table of many numbers: weak samples often separate in multiple QC dimensions at once.
+
+
+```{r rna-threshold-scatterplots}
+
+#| label: rna-threshold-scatterplots
+#| message: false
+#| warning: false
+
+# Scatter plot with both low-QC cutoffs overlaid.
+p_detect_vs_lib <- ggplot(qc_RNA, aes(x = detected_genes, y = lib_size)) +
+  geom_point() +
+  geom_vline(
+    xintercept = detected_genes_threshold,
+    linetype = "twodash",
+    color = "grey45",
+    linewidth = 0.8
+  ) +
+  scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  geom_hline(
+    yintercept = lib_size_threshold,
+    linetype = "twodash",
+    color = "grey45",
+    linewidth = 0.8
+  ) +
+  stat_cor(method = "spearman") +
+  geom_text_repel(aes(label = sample), size = 3) +
+  geom_smooth(method = "gam", se = TRUE, color = "steelblue") +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "MGI RNA-seq QC: Library Size vs Detection Complexity",
+    subtitle = paste0(
+      "twodash grey lines = low-QC cutoffs defined at ",
+      qc_n_mad, "*MAD on the log scale"
+    ),
+    x = "Number of detected genes (counts > 0)",
+    y = "Library size (total counts)"
+  )
+
+p_detect_vs_lib
+
+ggsave(
+  filename = file.path("output/figures/MGI_RNA_detected_genes_vs_lib_size.png"),
+  plot = p_detect_vs_lib,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+# Histogram of library size with its low-end cutoff.
+p_lib_size <- ggplot(qc_RNA, aes(x = lib_size)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white") +
+  geom_vline(
+    xintercept = lib_size_threshold,
+    linetype = "twodash",
+    color = "grey45",
+    linewidth = 0.8
+  ) +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "MGI RNA-seq QC: Library Size Distribution",
+    subtitle = paste0(
+      "twodash grey line = low library-size cutoff at ",
+      qc_n_mad, "*MAD"
+    ),
+    x = "Library size (total counts per sample)",
+    y = "Number of samples"
+  )
+
+p_lib_size
+
+ggsave(
+  filename = file.path("output/figures/MGI_RNA_lib_size.png"),
+  plot = p_lib_size,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+# Histogram of detection complexity with its low-end cutoff.
+p_detected_genes <- ggplot(qc_RNA, aes(x = detected_genes)) +
+  geom_histogram(bins = 50, fill = "darkgreen", color = "white") +
+  geom_vline(
+    xintercept = detected_genes_threshold,
+    linetype = "twodash",
+    color = "grey45",
+    linewidth = 0.8
+  ) +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "MGI RNA-seq QC: Detection Complexity Across Samples",
+    subtitle = paste0(
+      "twodash grey line = low detection cutoff at ",
+      qc_n_mad, "*MAD"
+    ),
+    x = "Detected genes",
+    y = "Number of samples"
+  )
+
+p_detected_genes
+
+ggsave(
+  filename = file.path("output/figures/MGI_RNA_detected_genes.png"),
+  plot = p_detected_genes,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+comb_1 <- (p_detected_genes / p_detect_vs_lib) |
+  (p_lib_size / p_logcpm_box)
+
+ggplot2::ggsave(
+  filename = "output/figures/rna_raw_count_qc_combined.png",
+  plot = comb_1,
+  width = 18,
+  height = 14,
+  dpi = 300
+)
+
+```
+
+## PCA Setup
+## 7. PCA: Main Axes of Variation
+
+PCA means principal component analysis. It compresses thousands of genes into a few axes that capture the strongest expression differences between samples. We use PCA as a QC tool: the question is whether samples separate by expected biological/metadata groups, or by technical variables such as lane, mapping rate, or low library complexity.
+
+
+```{r rna-pca-setup}
+
+#| label: rna-pca-setup
+#| message: false
+#| warning: false
+
+# PCA is performed on samples after normalization.
+mat_t <- t(data.matrix(log_mat))
+res.pca <- PCA(mat_t, scale.unit = TRUE, graph = FALSE)
+pc <- as.data.frame(res.pca$ind$coord)
+
+# cos2 summarizes how well each sample is represented in PCA space.
+cos2 <- rowMedians(res.pca$ind$cos2)
+qc_RNA$cos2 <- cos2[qc_RNA$sample]
+
+# Distance from the multivariate center is used as the PCA-based outlier metric.
+center <- colMeans(pc)
+pca_dist <- sqrt(rowSums((pc - center)^2))
+qc_RNA$pca_dist <- as.numeric(scale(pca_dist[qc_RNA$sample]))
+
+# PCA coordinates for downstream plotting.
+# Keep the PCA coordinates separate until the QC table is finalized.
+pca_coords <- as.data.frame(res.pca$ind$coord[, 1:2]) |>
+  tibble::rownames_to_column("sample") |>
+  dplyr::rename(PC1 = Dim.1, PC2 = Dim.2) |>
+  as_tibble()
+
+# Variance explained by the first two axes.
+eig_df <- factoextra::get_eig(res.pca)
+pc1_var <- round(eig_df[1, "variance.percent"], 1)
+pc2_var <- round(eig_df[2, "variance.percent"], 1)
+
+```
+
+## Consensus Outlier Definition
+
+### Consensus Low-QC Calls
+
+A sample is easier to trust when several independent QC checks agree. The consensus flag combines low library size, low detected genes, high expression concentration, poor PCA support, large PCA distance, and mapping-rate behavior. This avoids excluding a sample because of one noisy metric alone.
+
+
+```{r rna-outlier-definition}
+
+#| label: define-consensus-outliers
+#| message: false
+#| warning: false
+
+# Final outlier logic:
+# 1. High PCA distance
+# 2. Low library size
+# 3. Low detection complexity
+# A sample is called an outlier only if at least 2 criteria agree.
+qc_RNA <- qc_RNA %>%
+  mutate(
+    flag_pca_dist = mad_outlier_flag(pca_dist, direction = "high", n_mad = qc_n_mad),
+    flag_lib_size = mad_outlier_flag(log10_lib_size, direction = "low", n_mad = qc_n_mad),
+    flag_detected_genes = mad_outlier_flag(log10_detected_genes, direction = "low", n_mad = qc_n_mad),
+    n_outlier_flags = flag_pca_dist + flag_lib_size + flag_detected_genes,
+    outlier = n_outlier_flags >= 2,
+    outlier_reason = pmap_chr(
+      list(flag_pca_dist, flag_lib_size, flag_detected_genes),
+      function(flag_pca_dist, flag_lib_size, flag_detected_genes) {
+        flags <- c(
+          "PCA distance" = flag_pca_dist,
+          "low library size" = flag_lib_size,
+          "low detected genes" = flag_detected_genes
+        )
+        flagged <- names(flags)[flags]
+        if (length(flagged) == 0) "none" else paste(flagged, collapse = "; ")
+      }
+    )
+  )
+
+table(qc_RNA$outlier)
+
+# Merge the finalized QC table once with PCA coordinates and OCA metadata.
+qc_RNA <- qc_RNA %>%
+  left_join(pca_coords, by = "sample") |>
+  left_join(metadata, by = "sample") |>
+  as_tibble()
+
+# Save the final QC table used for downstream review and plotting.
+write_tsv(qc_RNA, "output/tables/MGI_qc_RNA.tsv")
+
+qc_RNA %>%
+  filter(outlier) %>%
+  select(sample, lib_size, detected_genes, pca_dist, n_outlier_flags, outlier_reason)
+
+qc_RNA <- qc_RNA |>
+  dplyr::mutate(
+    ieo_brca_status = dplyr::na_if(ieo_brca_status, "-"),
+    ieo_brca_status = tidyr::replace_na(ieo_brca_status, "Unknown")
+  )
+
+```
+
+## PCA plots
+### PCA Overview: Biological and Technical Overlays
+
+The same PCA coordinates are colored by different annotations. This keeps the geometry fixed while changing only the question: do points group by organoid grade, patient/sample metadata, lane, QC metric, or another technical feature?
+
+
+```{r rna-pca-plots}
+
+#| label: rna-pca-overview
+#| message: false
+#| warning: false
+
+fviz_eig(res.pca, addlabels = TRUE, ncp = 20)
+
+var_imp <- head(res.pca$var$cos2, 20)
+
+png("output/figures/MGI_var_imp_corrplot_RNA.png", width = 1200, height = 800, res = 200)
+# Generate the corrplot
+corrplot(t(var_imp), is.corr = FALSE, hclust.method = "complete")
+dev.off()
+
+
+fviz_pca_ind(res.pca, 
+            col.ind = "cos2", 
+            gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+            repel = TRUE) +
+  theme_bw(base_size = 12)
+
+```
+
+### PCA Colored by QC Metrics
+
+Here PCA is used to see whether low-quality samples drive the strongest expression axes. If outlier samples sit at the edge of the PCA and also have weak QC metrics, they are more likely technical outliers than meaningful biology.
+
+
+```{r rna-pca-qc-plots}
+
+#| label: rna-pca-qc-plots
+#| message: false
+#| warning: false
+
+p_pca_detected <- ggplot(qc_RNA, aes(x = PC1, y = PC2, color = detected_genes)) +
+  geom_point(size = 2.5, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_viridis_c(
+    name = "Detected genes",
+    option = "viridis"
+  ) +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "MGI RNA-seq QC: PCA Colored by Detection Complexity",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(qc_RNA), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)")
+  )
+
+p_pca_detected
+
+ggsave(
+  filename = file.path("output/figures/MGI_RNA_pca_detected_genes.png"),
+  plot = p_pca_detected,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+p_pca_libsize <- ggplot(qc_RNA, aes(x = PC1, y = PC2, color = lib_size)) +
+  geom_point(size = 2.5, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_viridis_c(
+    name = "Library size",
+    option = "viridis"
+  ) +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "MGI RNA-seq QC: PCA Colored by Library Size",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(qc_RNA), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)")
+  )
+
+p_pca_libsize
+
+ggsave(
+  filename = file.path("output/figures/MGI_RNA_pca_lib_size.png"),
+  plot = p_pca_libsize,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+p_pca_outlier <- ggplot(qc_RNA, aes(x = PC1, y = PC2, color = outlier)) +
+  geom_point(size = 2.5, alpha = 0.9) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_manual(
+    name = "QC outlier",
+    values = c(
+      "FALSE" = "grey70",
+      "TRUE"  = "red3"
+    )
+  ) +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "MGI RNA-seq QC: PCA Highlighting Outlier Samples",
+    subtitle = paste0(
+      "Outlier = at least 2 of 3 flags: PCA distance, low library size, low detected genes | n = ",
+      nrow(qc_RNA), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)")
+  )
+
+p_pca_outlier
+
+ggsave(
+  filename = file.path("output/figures/MGI_RNA_pca_outlier.png"),
+  plot = p_pca_outlier,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+
+```
+
+
+
+### PCA Colored by Biological Metadata
+
+These panels ask whether the cleaned expression matrix carries interpretable biological structure. This is where we check whether organoid labels and grade-related annotations align with the expression landscape.
+
+```{r}
+#| label: rna-pca-tme-plots
+#| message: false
+#| warning: false
+
+p_pca_TME <- ggplot(qc_RNA, aes(x = PC1, y = PC2, color = tme_addition)) +
+  geom_point(size = 2.5, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "MGI RNA-seq QC: PCA Colored by TME addition",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(qc_RNA), " samples"
+    ),
+    color = "TME addition",
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)")
+  )
+
+p_pca_TME
+
+ggsave(
+  filename = file.path("output/figures/MGI_RNA_pca_lib_size.png"),
+  plot = p_pca_libsize,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+p_pca_HL <- ggplot(qc_RNA, aes(x = PC1, y = PC2, color = ieo_grade, shape = tme_addition)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA Colored by grade status and shape by TME addition ",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(qc_RNA), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "Grade status",
+    shape = "TME addition"
+  )
+
+p_pca_HL
+
+ggsave(
+  filename = file.path("output/figures/p_pca_HL.png"),
+  plot = p_pca_HL,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+
+## 8. Clustering and Agreement Tests
+
+This section turns PCA space into simple sample groupings. Clustering is not treated as discovery by itself; it is a consistency check against known metadata and QC variables.
+
+# batch evaluation
+
+## lane against individual QC metrics
+```{r}
+#| label: ane against individual QC metrics
+#| message: false
+#| warning: false
+
+
+p_lane_lib_size <- qc_RNA |>
+  ggplot(aes(x = lane, y = lib_size, fill = lane)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.75, linewidth = 0.35) +
+  geom_jitter(width = 0.15, alpha = 0.65, size = 1) +
+  scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  labs(
+    title = "Library size",
+    subtitle = "Total mapped/read counts per sample",
+    x = NULL,
+    y = "Library size"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+p_lane_detected_genes <- qc_RNA |>
+  ggplot(aes(x = lane, y = detected_genes, fill = lane)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.75, linewidth = 0.35) +
+  geom_jitter(width = 0.15, alpha = 0.65, size = 1) +
+  scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  labs(
+    title = "Detected genes",
+    subtitle = "Genes detected above the expression threshold",
+    x = NULL,
+    y = "Detected genes"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+p_lane_top10_fraction <- qc_RNA |>
+  ggplot(aes(x = lane, y = top10_gene_fraction, fill = lane)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.75, linewidth = 0.35) +
+  geom_jitter(width = 0.15, alpha = 0.65, size = 1) +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 1)) +
+  labs(
+    title = "Top 10 gene fraction",
+    subtitle = "Fraction of counts assigned to the 10 most abundant genes",
+    x = NULL,
+    y = "Top 10 gene fraction"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+p_lane_pca_dist <- qc_RNA |>
+  ggplot(aes(x = lane, y = pca_dist, fill = lane)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.75, linewidth = 0.35) +
+  geom_jitter(width = 0.15, alpha = 0.65, size = 1) +
+  labs(
+    title = "PCA distance",
+    subtitle = "Distance from the center of the QC PCA space",
+    x = NULL,
+    y = "PCA distance"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+p_lane_qc_patchwork <- (
+  p_lane_lib_size + p_lane_detected_genes) / (p_lane_top10_fraction + p_lane_pca_dist) +
+  plot_annotation(
+    title = "RNA-seq QC metrics across sequencing lanes",
+    subtitle = "Lane-level comparison of library complexity, gene detection, count concentration, and QC-PCA distance",
+    tag_levels = "A"
+    ) &
+  ggsci::scale_fill_npg() &
+  stat_compare_means()
+
+p_lane_qc_patchwork
+
+ggsave(plot = p_lane_qc_patchwork,filename = "output/figures/p_lane_qc_patchwork.png", width = 18,height = 12,dpi = 600,limitsize = TRUE)
+
+```
+
+
+### PAM Clustering and ARI
+
+### 5.1.1 PAM Clustering and ARI
+
+PAM, or partitioning around medoids, is a robust clustering method that represents each cluster using an actual observed sample rather than an artificial centroid. This makes it suitable for relatively small cohorts and less sensitive to extreme samples than methods such as k-means.
+
+The adjusted Rand index (ARI) measures agreement between two sample classifications while correcting for agreement expected by chance. An ARI of 1 indicates identical classifications, an ARI near 0 indicates no more agreement than expected by chance, and a negative ARI indicates less agreement than expected by chance.
+
+```{r}
+#| label: pam-clustering
+#| message: false
+#| warning: false
+
+library(cluster)
+set.seed(1234)
+
+cluster_mat <- res.pca$ind$coord
+
+
+pam_fit <- pam(cluster_mat, k = 4, metric = "euclidean",nstart = 50,variant = "faster")
+
+# Keep the clustering result as a minimal sample-to-cluster lookup table.
+cluster = tibble(sample = names(pam_fit$clustering), pam_cluster = pam_fit$clustering)
+cluster
+
+# Append the model-based cluster labels onto the finalized QC table.
+qc_RNA <- qc_RNA |>
+  left_join(cluster, by = "sample")
+
+qc_RNA$pam_cluster <- as.factor(qc_RNA$pam_cluster)
+
+# Reuse the same PCA embedding, now colored by the inferred clusters.
+p_pca_pam_cluster <- ggplot(qc_RNA, aes(x = PC1, y = PC2, color = pam_cluster)) +
+  geom_point(size = 2.5, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "MGI RNA-seq QC: PCA Colored by PAM cluster",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(qc_RNA), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)")
+  )
+
+p_pca_pam_cluster
+
+# ARI compares PAM clusters with existing labels.
+# High agreement with lane would suggest technical structure; high agreement with grade would support biology.
+
+ari_results <- tibble::tibble(
+  comparison = "PAM clusters vs sequencing lane",
+  k = 4,
+  ARI = mclust::adjustedRandIndex(
+    as.factor(qc_RNA$lane),
+    as.factor(qc_RNA$pam_cluster)
+  ),
+  interpretation = dplyr::case_when(
+    ARI >= 0.90 ~ "Very strong agreement",
+    ARI >= 0.50 ~ "Moderate agreement",
+    ARI >= 0.20 ~ "Weak agreement",
+    ARI > 0     ~ "Very weak agreement",
+    ARI == 0    ~ "Chance-level agreement",
+    TRUE        ~ "Worse than chance"
+  )
+)
+
+ari_results
+
+```
+
+For the four-cluster PAM solution, comparison with the four sequencing lanes produced an ARI of **0.125**. This indicates only **very weak positive agreement** between the PAM clusters and sequencing-lane assignments. Therefore, sequencing lane does not appear to be the primary factor determining the clustering structure, although a small degree of lane-associated organization may be present. This result should not be interpreted as evidence that the clusters are entirely free of technical effects.
+
+## ARI permutation test
+
+The low ARI suggests that most samples are not grouped according to lane, but the statistical relevance of the observed agreement should be assessed using a permutation test, particularly because ARI estimates can be unstable in small cohorts or when cluster and lane sizes are unbalanced.
+
+```{r}
+
+
+observed_ari <- mclust::adjustedRandIndex(
+  qc_RNA$lane,
+  qc_RNA$pam_cluster
+)
+
+n_perm <- 10000
+
+null_ari <- replicate(
+  n_perm,
+  mclust::adjustedRandIndex(
+    sample(qc_RNA$lane),
+    qc_RNA$pam_cluster
+  )
+)
+
+permutation_p <- (sum(null_ari >= observed_ari) + 1) / (n_perm + 1)
+
+ari_results <- tibble(
+  comparison = "PAM clusters vs sequencing lane",
+  k = 4,
+  ARI = observed_ari,
+  permutation_p = permutation_p,
+  n_permutations = n_perm,
+  interpretation = case_when(
+    permutation_p >= 0.05 ~
+      "No evidence that sequencing lane drives the PAM clustering",
+    observed_ari < 0.20 ~
+      "Statistically detectable but very weak lane-associated structure",
+    observed_ari < 0.50 ~
+      "Statistically detectable weak lane-associated structure",
+    TRUE ~
+      "Substantial lane-associated clustering"
+  )
+)
+
+ari_results
+
+p_ari_permutation <- ggplot(
+  tibble(ARI = null_ari),
+  aes(ARI)
+) +
+  geom_histogram(bins = 40) +
+  geom_vline(
+    xintercept = observed_ari,
+    color = "red",
+    linetype = 2,
+    linewidth = 0.5
+  ) +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "PAM Clustering versus Sequencing Lane",
+    subtitle = sprintf(
+      "Observed ARI = %.3f | permutation number = %.0f , p.value = %.4f",
+      observed_ari,
+      n_perm,
+      permutation_p
+    ),
+    x = "ARI under permuted lane labels",
+    y = "Number of permutations"
+  )
+
+p_ari_permutation
+
+```
+
+
+The four-cluster PAM solution showed weak agreement with sequencing lane (ARI = 0.125). A permutation test was used to determine whether this agreement exceeded that expected under independence while preserving the observed lane and cluster sizes. The association was statistically significant, indicating detectable but very weak lane-associated structure.
+
+# High grade only PCA
+```{r}
+
+high_grade <- qc_RNA |>
+  #filter(tme_addition == "Yes")
+  filter(ieo_grade == "High")
+
+# PCA is performed on samples after normalization.
+mat_t <- t(data.matrix(log_mat |>
+  select(all_of(high_grade$sample))))
+
+res.pca <- PCA(mat_t, scale.unit = TRUE, graph = FALSE)
+pc <- as.data.frame(res.pca$ind$coord)
+
+# PCA coordinates for downstream plotting.
+# Keep the PCA coordinates separate until the QC table is finalized.
+pca_coords <- as.data.frame(res.pca$ind$coord[, 1:2]) |>
+  tibble::rownames_to_column("sample") |>
+  dplyr::rename(PC1 = Dim.1, PC2 = Dim.2) |>
+  as_tibble()
+
+# Variance explained by the first two axes.
+eig_df <- factoextra::get_eig(res.pca)
+pc1_var <- round(eig_df[1, "variance.percent"], 1)
+pc2_var <- round(eig_df[2, "variance.percent"], 1)
+
+p_pca_H1 <- ggplot(pca_coords, aes(x = PC1, y = PC2, color = high_grade$tme_addition)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA of High grade colored by TME addition",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(high_grade), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "TME addition"
+  )
+
+p_pca_H1
+
+p_pca_H2 <- ggplot(pca_coords, aes(x = PC1, y = PC2, color = high_grade$generic_name)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA of High grade colored by Cell type",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(high_grade), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "Cell type"
+  )
+
+p_pca_H2
+
+p_pca_H3 <- ggplot(pca_coords, aes(x = PC1, y = PC2, color = high_grade$ieo_brca_status)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA of High grade colored by BRCA1/2 status",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(high_grade), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "BRCA1/2 status"
+  )
+
+p_pca_H3
+
+p_pca_H4 <- ggplot(pca_coords, aes(x = PC1, y = PC2, color = high_grade$tme_addition, shape = high_grade$ieo_brca_status)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA of High grade colored by TME addition and shape by BRCA1/2 status ",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(high_grade), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "TME addition",
+    shape = "BRCA1/2 status"
+  )
+
+p_pca_H4
+
+pca_H_patchwork <- (
+  p_pca_H1 + p_pca_H2) / (p_pca_H3 + p_pca_H4) +
+  plot_annotation(
+    title = "Annotation-driven PCA overview of high-grade RNA-seq samples",
+    subtitle = "Each panel shows the same PCA space with samples annotated by TME addition, cell identity, BRCA1/2 status, or combined metadata",
+    tag_levels = "A"
+  )
+
+ggsave(plot = pca_H_patchwork,filename = "output/figures/pca_H_patchwork.png", width = 18,height = 12,dpi = 600,limitsize = TRUE)
+
+```
+
+# Low grade only PCA
+```{r}
+
+Low_grade <- qc_RNA |>
+  #filter(tme_addition == "Yes")
+  filter(ieo_grade == "Low")
+
+# PCA is performed on samples after normalization.
+mat_t <- t(data.matrix(log_mat |>
+  select(all_of(Low_grade$sample))))
+
+res.pca <- PCA(mat_t, scale.unit = TRUE, graph = FALSE)
+pc <- as.data.frame(res.pca$ind$coord)
+
+# PCA coordinates for downstream plotting.
+# Keep the PCA coordinates separate until the QC table is finalized.
+pca_coords <- as.data.frame(res.pca$ind$coord[, 1:2]) |>
+  tibble::rownames_to_column("sample") |>
+  dplyr::rename(PC1 = Dim.1, PC2 = Dim.2) |>
+  as_tibble()
+
+# Variance explained by the first two axes.
+eig_df <- factoextra::get_eig(res.pca)
+pc1_var <- round(eig_df[1, "variance.percent"], 1)
+pc2_var <- round(eig_df[2, "variance.percent"], 1)
+
+p_pca_L1 <- ggplot(pca_coords, aes(x = PC1, y = PC2, color = Low_grade$tme_addition)) +
+  geom_point(size = 2.5, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA of Low grade colored by TME addition",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(Low_grade), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "TME addition"
+  )
+
+p_pca_L1
+
+p_pca_L2 <- ggplot(pca_coords, aes(x = PC1, y = PC2, color = Low_grade$generic_name)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA of Low grade colored by Cell type",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(Low_grade), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "Cell type"
+  )
+
+p_pca_L2
+
+p_pca_L3 <- ggplot(pca_coords, aes(x = PC1, y = PC2, color = Low_grade$ieo_brca_status)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA of Low grade colored by BRCA1/2 status",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(Low_grade), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "BRCA1/2 status"
+  )
+
+p_pca_L3
+
+p_pca_L4 <- ggplot(pca_coords, aes(x = PC1, y = PC2, color = Low_grade$tme_addition, shape = Low_grade$ieo_brca_status)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_color_npg() +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA of Low grade colored by TME addition and shape by BRCA1/2 status ",
+    subtitle = paste0(
+      "TMMwsp-normalized logCPM (filtered) | n = ",
+      nrow(Low_grade), " samples"
+    ),
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "TME addition",
+    shape = "BRCA1/2 status"
+  )
+
+p_pca_L4
+
+pca_L_patchwork <- (
+  p_pca_L1 + p_pca_L2) / (p_pca_L3 + p_pca_L4) +
+plot_annotation(
+  title = "Annotation-driven PCA overview of low-grade RNA-seq samples",
+  subtitle = "Each panel shows the same PCA space with samples annotated by TME addition, cell identity, BRCA1/2 status, or combined metadata",
+  tag_levels = "A"
+)
+
+ggsave(plot = pca_L_patchwork,filename = "output/figures/pca_L_patchwork.png", width = 18,height = 12,dpi = 600,limitsize = TRUE)
+
+```
+
+# Salmon QC
+
+| lane | median percent mapped |
+| ---- | --------------------: |
+| L01  |                68.50% |
+| L02  |                72.21% |
+| L03  |                64.85% |
+| L04  |                64.98% |
+
+
+```{r}
+
+salmon_qc <- readr::read_tsv("input/salmon_qc_summary.tsv", show_col_types = FALSE)
+
+p_salmon_mapping <- salmon_qc |>
+  mutate(
+    lane = factor(lane, sort(unique(lane))),
+    udb_lane = tidytext::reorder_within(udb, percent_mapped, lane)
+  ) |>
+  ggplot(aes(x = percent_mapped, y = udb_lane)) +
+  geom_col(width = 0.75, fill = "grey45") +
+  geom_text(aes(label = sprintf("%.1f%%", percent_mapped)), hjust = -0.12, size = 3) +
+  geom_vline(xintercept = 50, linetype = "twodash", color = "grey15", linewidth = 0.5) +
+  facet_grid(lane ~ ., scales = "free_y", space = "free_y") +
+  tidytext::scale_y_reordered() +
+  scale_x_continuous(
+    limits = c(0, max(salmon_qc$percent_mapped, na.rm = TRUE) + 8),
+    labels = scales::label_percent(scale = 1),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Salmon mapping rate across samples",
+    subtitle = "Samples are ordered by mapping rate within lane; all samples are above 50%",
+    x = "Mapped reads (%)",
+    y = "Sample"
+  )
+
+p_salmon_mapping
+
+ggsave(
+  filename = "output/figures/p_salmon_mapping.png",
+  plot = p_salmon_mapping,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```
