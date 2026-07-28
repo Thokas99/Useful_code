@@ -130,6 +130,44 @@ dir.create("output/tables", recursive = TRUE, showWarnings = FALSE)
 
 ```
 
+```{r}
+#| label: read-raw-gene-counts-from-txi
+#| message: false
+#| warning: false
+
+library(edgeR)
+library(dplyr)
+
+txi <- readRDS("input/salmon_gene_tximport.rds")
+raw_counts <- readr::read_tsv(
+  "input/salmon_gene_estimated_counts.tsv",
+  show_col_types = FALSE
+)
+
+dge <- DGEListFromTximport(txi)
+
+annotation <- raw_counts |>
+  select(gene_id, gene_name) |>
+  distinct(gene_id, .keep_all = TRUE) |>
+  slice(match(rownames(dge), gene_id))
+
+stopifnot(identical(annotation$gene_id, rownames(dge)))
+
+dge$genes$gene_id   <- annotation$gene_id
+dge$genes$gene_name <- annotation$gene_name
+
+keep <- rowSums(edgeR::cpm(dge) > 1) >= 5
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dge <- edgeR::normLibSizes(dge, method = "TMMwsp")
+
+logcpm_exp <- edgeR::cpm(dge, log = TRUE, prior.count = 1) |>
+    as.data.frame()
+
+logcpm_exp
+
+
+```
+
 #  Read raw gene counts
 
 ## 1. Inputs: Gene Counts and Sample Metadata
