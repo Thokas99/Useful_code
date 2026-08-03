@@ -1,0 +1,1612 @@
+---
+title: "CPTAC-LUAD C1 scoring"
+subtitle: "C1 scoring, SectAct, METAFlux, hallmark gene sets "
+date: today
+date-format: "DD MM YYYY"
+
+format:
+  html:
+    page-layout: full
+
+    toc: true
+    toc-title: "Notebook sections"
+    toc-location: left
+    toc-depth: 4
+
+    number-sections: true
+    number-depth: 4
+
+    theme:
+      light: lux
+      dark: darkly
+
+    title-block-banner: true
+
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-tools: true
+    code-copy: true
+    code-overflow: wrap
+
+    df-print: paged
+
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-newwindow: true
+
+    embed-resources: true
+    self-contained-math: true
+
+    fig-align: center
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 600
+
+    callout-appearance: simple
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  error: false
+  freeze: false
+
+editor: source
+---
+
+
+```{r}
+
+library(edgeR)
+library(tidyverse)
+library(vroom)
+library(msigdbr)
+library(singscore)
+library(GSVA)
+library(ConsensusTME)
+library(immunedeconv)
+
+```
+
+
+# from RPKM to TPM
+```{r}
+
+rna_fpkm <- vroom(
+  "input/data_mrna_seq_rpkm.txt",
+  show_col_types = FALSE
+) |>
+  select(-Entrez_Gene_Id) |>
+  filter(
+    !is.na(Hugo_Symbol),
+    !Hugo_Symbol %in% c("", "NA")
+  ) |>
+  mutate(across(-Hugo_Symbol, as.numeric)) |>
+  drop_na() |>
+
+  # Input is log2(FPKM), so return to the linear scale
+  mutate(across(-Hugo_Symbol, ~ 2^.x)) |>
+
+  # For duplicated symbols, retain the row with highest median expression
+  mutate(
+    median_fpkm = apply(
+      pick(-Hugo_Symbol),
+      1,
+      median
+    )
+  ) |>
+  slice_max(
+    median_fpkm,
+    by = Hugo_Symbol,
+    n = 1,
+    with_ties = FALSE
+  ) |>
+  select(-median_fpkm) |>
+  column_to_rownames("Hugo_Symbol") |>
+  as.matrix()
+
+# Linear FPKM → TPM
+rna_tpm <- sweep(
+  rna_fpkm,
+  MARGIN = 2,
+  STATS = colSums(rna_fpkm),
+  FUN = "/"
+) * 1e6
+
+# TPM → log2(TPM + 1)
+rna_logtpm <- log2(rna_tpm + 1)
+
+# Validation
+stopifnot(
+  all(rna_fpkm >= 0),
+  all(rna_tpm >= 0),
+  all(is.finite(rna_logtpm)),
+  all(abs(colSums(rna_tpm) - 1e6) < 1e-6)
+)
+
+summary(colSums(rna_tpm))
+range(rna_logtpm)
+
+```
+
+```{r}
+
+rna_tpm |>
+    as.data.frame() |>
+    rownames_to_column("Hugo_Symbol") |>
+    as_tibble() |>
+    write_tsv(file = "input/data_mrna_seq_tpm.tsv")
+
+rna_logtpm |>
+    as.data.frame() |>
+    rownames_to_column("Hugo_Symbol") |>
+    as_tibble() |>
+    write_tsv(file = "input/data_mrna_seq_logtpm.tsv")
+
+rna_logtpm |>
+    scale() |>
+    as.data.frame() |>
+    rownames_to_column("Hugo_Symbol") |>
+    as_tibble() |>
+    write_tsv(file = "input/data_mrna_seq_logtpm_Zscore.tsv")
+
+
+```
+
+
+
+```{r}
+
+set.seed(1234)
+
+# ============================================================
+# Helpers
+# ============================================================
+
+scale_numeric <- function(x) {
+  as.numeric(scale(x))
+}
+
+class_from_z <- function(x) {
+  case_when(
+    x < -1  ~ "Not-C1-like",
+    x <= 0  ~ "Not-C1-intermediate",
+    x <= 1  ~ "C1-intermediate",
+    x > 1   ~ "C1-like",
+    TRUE    ~ NA_character_
+  )
+}
+
+c1_group_levels <- c(
+  "Not-C1-like",
+  "Not-C1-intermediate",
+  "C1-intermediate",
+  "C1-like"
+)
+
+# Choose the normalized expression matrix used for scoring
+expr_mat <- as.matrix(rna_logtpm)
+
+# ============================================================
+# 1. Load and prepare the C1 signature
+# ============================================================
+
+c1_genes <- vroom(
+  "input/C1_Core_signature.csv",
+  show_col_types = FALSE
+) |>
+  transmute(
+    gene = as.character(gene),
+    direction = toupper(C1_Core_direction)
+  ) |>
+  filter(
+    !is.na(gene),
+    gene != "",
+    direction %in% c("UP", "DOWN")
+  ) |>
+  distinct(gene, direction)
+
+c1_up <- c1_genes |>
+  filter(direction == "UP") |>
+  pull(gene) |>
+  intersect(rownames(expr_mat))
+
+c1_down <- c1_genes |>
+  filter(direction == "DOWN") |>
+  pull(gene) |>
+  intersect(rownames(expr_mat))
+
+stopifnot(
+  length(c1_up) > 0,
+  length(c1_down) > 0
+)
+
+# Optional signature coverage table
+c1_gene_coverage <- tibble(
+  direction = c("UP", "DOWN"),
+  requested = c(
+    sum(c1_genes$direction == "UP"),
+    sum(c1_genes$direction == "DOWN")
+  ),
+  found = c(
+    length(c1_up),
+    length(c1_down)
+  )
+)
+
+# ============================================================
+# 2. singscore
+# ============================================================
+
+singscore_tbl <- expr_mat |>
+  rankGenes() |>
+  simpleScore(
+    upSet = c1_up,
+    downSet = c1_down
+  ) |>
+  as.data.frame() |>
+  rownames_to_column("sample") |>
+  transmute(
+    sample,
+    singscore = scale_numeric(TotalScore)
+  )
+
+# ============================================================
+# 3. GSVA
+# ============================================================
+
+gsva_sets <- list(
+  C1_UP = c1_up,
+  C1_DOWN = c1_down
+)
+
+gsva_mat <- gsva(
+  gsvaParam(
+    exprData = expr_mat,
+    geneSets = gsva_sets,
+    kcdf = "Gaussian"
+  )
+)
+
+gsva_tbl <- gsva_mat |>
+  as.data.frame() |>
+  rownames_to_column("direction") |>
+  pivot_longer(
+    cols = -direction,
+    names_to = "sample",
+    values_to = "value"
+  ) |>
+  pivot_wider(
+    names_from = direction,
+    values_from = value
+  ) |>
+  transmute(
+    sample,
+    gsva = scale_numeric(C1_UP - C1_DOWN)
+  )
+
+# ============================================================
+# 4. Final consensus score and class
+# ============================================================
+
+c1_score_tbl <- singscore_tbl |>
+  inner_join(gsva_tbl, by = "sample") |>
+  mutate(
+    C1_Core = scale_numeric(
+      rowMeans(
+        cbind(singscore, gsva),
+        na.rm = TRUE
+      )
+    ),
+    C1_class = factor(
+      class_from_z(C1_Core),
+      levels = c1_group_levels
+    ),
+    sample = sample |>
+      sub("_S\\d+$", "", x = _) |>
+      sub("WTST\\d*$", "", x = _)
+  ) |>
+  select(
+    sample,
+    C1_Core,
+    C1_class
+  ) |>
+  arrange(C1_class, desc(C1_Core))
+
+c1_score_tbl
+
+c1_score_tbl |>
+  count(C1_class, .drop = FALSE)
+
+```
+
+```{r}
+
+write_tsv(c1_score_tbl,"output/tables/00_c1_core_score_and_class.tsv")
+
+```
+
+```{r}
+
+library(FactoMineR)
+library(factoextra)
+library(ggrepel)
+
+set.seed(1234)
+
+mat_t <- t(data.matrix(expr_mat))
+res.pca <- PCA(mat_t, scale.unit = TRUE, graph = FALSE,ncp = 2)
+# Variance explained by the first two axes.
+eig_df <- factoextra::get_eig(res.pca)
+pc1_var <- round(eig_df[1, "variance.percent"], 1)
+pc2_var <- round(eig_df[2, "variance.percent"], 1)
+pc <- as.data.frame(res.pca$ind$coord) |>
+    rownames_to_column("sample") |>
+  dplyr::rename(PC1 = Dim.1, PC2 = Dim.2)
+
+pca_to_plot <- c1_score_tbl |>
+    left_join(pc, by = "sample")
+
+
+p_pca_C1 <- ggplot(pca_to_plot, aes(x = PC1, y = PC2, color = C1_class)) +
+  geom_point(size = 2.5, alpha = 0.9) +
+  geom_text_repel(aes(label = sample), size = 3, max.overlaps = 50) +
+  scale_colour_manual(
+    values = c(
+      "Not-C1-like"         = "#2166AC",
+      "Not-C1-intermediate" = "#67A9CF",
+      "C1-intermediate"     = "#FDAE61",
+      "C1-like"             = "#B2182B"
+    ),
+    drop = FALSE
+  ) +
+  theme_bw(base_size = 13) +
+  labs(
+    title = "RNA-seq QC: PCA Highlighting C1 Core group",
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "C1 Core group"
+  )
+
+p_pca_C1
+
+ggsave(
+  filename = file.path("output/figures/RNA_pca_C1.png"),
+  plot = p_pca_C1,
+  width = 12,
+  height = 8,
+  dpi = 600
+)
+
+```
+
+
+### SecAct
+
+```{r}
+
+library(SecAct)
+set.seed(1234)
+# SecAct infers cytokine activity from the matched RNA-seq matrix.
+SecAct_scores <- SecAct.activity.inference(rna_logtpm)$zscore |>
+  t() |>
+  as.data.frame() |>
+  tibble::rownames_to_column("sample") |>
+  as_tibble()
+
+SecAct_scores
+
+write_tsv(SecAct_scores, "output/tables/SecAct_scores.tsv")
+
+SecAct_scores <- SecAct_scores |>
+    column_to_rownames("sample") |>
+    t() |>
+    as.data.frame()
+
+SecAct_scores
+
+```
+
+
+```{r}
+
+library(ComplexHeatmap)
+library(circlize)
+library(dplyr)
+
+
+
+# SecAct_scores:
+# rows    = SecAct features
+# columns = samples
+
+SecAct_mat <- as.matrix(SecAct_scores)
+
+# Keep samples shared between SecAct and C1 metadata
+common_samples <- intersect(
+  colnames(SecAct_mat),
+  c1_score_tbl$sample
+)
+
+SecAct_mat <- SecAct_mat[
+  ,
+  common_samples,
+  drop = FALSE
+]
+
+anno <- c1_score_tbl |>
+  select(sample, C1_Core, C1_class) |>
+  filter(sample %in% common_samples) |>
+  arrange(match(sample, common_samples)) |>
+  column_to_rownames("sample")
+
+stopifnot(
+  identical(
+    colnames(SecAct_mat),
+    rownames(anno)
+  )
+)
+
+# Correlate each SecAct feature with the C1 consensus score
+secact_cor <- apply(
+  SecAct_mat,
+  1,
+  function(x) {
+    cor(
+      x,
+      anno$C1_Core,
+      method = "spearman",
+      use = "pairwise.complete.obs"
+    )
+  }
+)
+
+cor_tbl <- tibble(
+  feature = names(secact_cor),
+  correlation = unname(secact_cor)
+) |>
+  filter(is.finite(correlation))
+
+# Select 25 strongest positive correlations
+top_positive <- cor_tbl |>
+  filter(correlation > 0) |>
+  slice_max(
+    order_by = correlation,
+    n = 25,
+    with_ties = FALSE
+  ) |>
+  mutate(direction = "Positive")
+
+# Select 25 strongest negative correlations
+top_negative <- cor_tbl |>
+  filter(correlation < 0) |>
+  slice_min(
+    order_by = correlation,
+    n = 25,
+    with_ties = FALSE
+  ) |>
+  mutate(direction = "Negative")
+
+selected_cor <- bind_rows(
+  top_positive,
+  top_negative
+)
+
+write_tsv(
+  selected_cor,
+  "output/tables/SecAct_top25_positive_top25_negative_C1_correlations.tsv"
+)
+
+selected_cor
+
+# Explicit row order:
+# strongest positive first, strongest negative last
+positive_features <- top_positive |>
+  arrange(desc(correlation)) |>
+  pull(feature)
+
+negative_features <- top_negative |>
+  arrange(correlation) |>
+  pull(feature)
+
+selected_features <- c(
+  positive_features,
+  negative_features
+)
+
+SecAct_selected <- SecAct_mat[
+  selected_features,
+  ,
+  drop = FALSE
+]
+
+# Row-wise Z-score for visualization
+SecAct_scaled <- t(scale(t(SecAct_selected)))
+
+# Remove any zero-variance rows that became non-finite
+valid_rows <- apply(
+  SecAct_scaled,
+  1,
+  function(x) any(is.finite(x))
+)
+
+SecAct_scaled <- SecAct_scaled[
+  valid_rows,
+  ,
+  drop = FALSE
+]
+
+selected_cor <- selected_cor |>
+  filter(feature %in% rownames(SecAct_scaled))
+
+# Match row annotations to heatmap order
+row_anno_df <- selected_cor |>
+  arrange(match(feature, rownames(SecAct_scaled))) |>
+  column_to_rownames("feature")
+
+stopifnot(
+  identical(
+    rownames(row_anno_df),
+    rownames(SecAct_scaled)
+  )
+)
+
+# Order samples from low to high C1 score
+sample_order <- order(
+  anno$C1_Core,
+  na.last = TRUE
+)
+
+group_cols <- c(
+  "Not-C1-like"         = "#2166AC",
+  "Not-C1-intermediate" = "#92C5DE",
+  "C1-intermediate"     = "#F4A582",
+  "C1-like"             = "#B2182B"
+)
+
+top_anno <- HeatmapAnnotation(
+  C1_score = anno$C1_Core,
+  C1_group = anno$C1_class,
+  col = list(
+    C1_score = colorRamp2(
+      range(anno$C1_Core, na.rm = TRUE),
+      c("#2166AC", "#B2182B")
+    ),
+    C1_group = group_cols
+  ),
+  na_col = "grey80"
+)
+
+# Saturate the most extreme 5% of scaled values
+color_lim <- unname(
+  quantile(
+    abs(SecAct_scaled),
+    probs = 0.95,
+    na.rm = TRUE
+  )
+)
+
+activity_col_fun <- colorRamp2(
+  c(-color_lim, 0, color_lim),
+  c("#2166AC", "white", "#B2182B")
+)
+
+row_split <- factor(
+  row_anno_df$direction,
+  levels = c("Positive", "Negative")
+)
+
+ht <- Heatmap(
+  SecAct_scaled,
+  name = "Relative\nactivity",
+  col = activity_col_fun,
+
+  top_annotation = top_anno,
+
+  column_order = sample_order,
+  row_split = row_split,
+
+  cluster_columns = FALSE,
+
+  # Keep the correlation-based row ordering
+  cluster_rows = TRUE,
+  cluster_row_slices = TRUE,
+  clustering_distance_rows = "pearson",
+  clustering_method_rows = "average",
+
+  show_column_names = TRUE,
+  column_names_rot = 90,
+  show_row_names = TRUE,
+  row_names_gp = grid::gpar(fontsize = 8),
+
+  border = TRUE,
+  na_col = "grey90",
+
+  row_title = c(
+    "Positive correlation",
+    "Negative correlation"
+  ),
+
+  heatmap_legend_param = list(
+    at = c(-color_lim, 0, color_lim),
+    labels = c("Low", "0", "High"),
+    title = "Relative\nactivity"
+  )
+)
+
+png(
+  "output/figures/SecAct_top25_positive_top25_negative_C1_heatmap.png",
+  width = 4000,
+  height = 2600,
+  res = 200
+)
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+dev.off()
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+```
+
+
+## Metabolic Flux
+
+### METAFlux
+
+```{r}
+set.seed(1234)
+
+library(METAFlux)
+
+expr_metaflux <- rna_logtpm
+
+# medium file for human derived samples
+data("human_blood")
+data("human_gem")
+#Calculate mras for human sample data
+scores<-calculate_reaction_score(expr_metaflux)
+#Calculate flux for human sample data
+flux<-compute_flux(mras=scores,medium=human_blood) 
+
+#optional: flux scores cubic root normalization
+cbrt <- function(x) {
+    sign(x) * abs(x)^(1/3)
+}
+
+flux=cbrt(flux)
+
+flux |>
+  as.data.frame() |>
+  rownames_to_column("flux") |>
+  write_tsv("output/tables/METAFlux_Flux.tsv")
+
+data("nutrient_lookup_files")
+
+library(dplyr)
+
+subsystem_map <- human_gem |>
+  select(ID, SUBSYSTEM) |>
+  filter(
+    ID %in% rownames(flux),
+    !is.na(SUBSYSTEM),
+    SUBSYSTEM != ""
+  )
+
+flux_sub <- flux[subsystem_map$ID, , drop = FALSE]
+
+pathway_sum <- rowsum(
+  x = abs(flux_sub),
+  group = subsystem_map$SUBSYSTEM,
+  reorder = FALSE
+)
+
+n_rxn <- table(subsystem_map$SUBSYSTEM)
+
+pathway_score <- sweep(
+  pathway_sum,
+  1,
+  n_rxn[rownames(pathway_sum)],
+  "/"
+)
+
+pathway_score |>
+  as.data.frame() |>
+  rownames_to_column("flux") |>
+  write_tsv("output/tables/METAFlux_pathway_score.tsv")
+
+
+```
+
+
+```{r}
+
+library(ComplexHeatmap)
+library(circlize)
+library(dplyr)
+library(tibble)
+library(readr)
+
+# Ensure pathway_score is a numeric matrix:
+# rows    = pathways
+# columns = samples
+pathway_mat <- as.matrix(pathway_score)
+
+# Keep samples present in both datasets
+common_samples <- intersect(
+  colnames(pathway_mat),
+  c1_score_tbl$sample
+)
+
+pathway_mat <- pathway_mat[
+  ,
+  common_samples,
+  drop = FALSE
+]
+
+# Match C1 annotation to pathway matrix columns
+anno <- c1_score_tbl |>
+  select(sample, C1_Core, C1_class) |>
+  filter(sample %in% common_samples) |>
+  arrange(match(sample, common_samples)) |>
+  column_to_rownames("sample")
+
+stopifnot(
+  identical(
+    colnames(pathway_mat),
+    rownames(anno)
+  )
+)
+
+pathway_cor <- apply(
+  pathway_mat,
+  1,
+  function(x) {
+    cor(
+      x,
+      anno$C1_Core,
+      method = "spearman",
+      use = "pairwise.complete.obs"
+    )
+  }
+)
+
+pathway_cor_tbl <- tibble(
+  pathway = names(pathway_cor),
+  correlation = unname(pathway_cor)
+) |>
+  filter(is.finite(correlation))
+
+top_positive <- pathway_cor_tbl |>
+  filter(correlation > 0) |>
+  slice_max(
+    order_by = correlation,
+    n = 25,
+    with_ties = FALSE
+  ) |>
+  arrange(desc(correlation)) |>
+  mutate(direction = "Positive")
+
+top_negative <- pathway_cor_tbl |>
+  filter(correlation < 0) |>
+  slice_min(
+    order_by = correlation,
+    n = 25,
+    with_ties = FALSE
+  ) |>
+  arrange(correlation) |>
+  mutate(direction = "Negative")
+
+selected_pathways <- bind_rows(
+  top_positive,
+  top_negative
+)
+
+write_tsv(
+  selected_pathways,
+  "output/tables/pathway_top25_positive_top25_negative_C1_correlations.tsv"
+)
+
+selected_pathways
+
+pathway_order <- c(
+  top_positive$pathway,
+  top_negative$pathway
+)
+
+pathway_selected <- pathway_mat[
+  pathway_order,
+  ,
+  drop = FALSE
+]
+
+# Scale each pathway across samples
+pathway_scaled <- t(scale(t(pathway_selected)))
+
+# Remove zero-variance or otherwise non-finite pathways
+valid_rows <- apply(
+  pathway_scaled,
+  1,
+  function(x) any(is.finite(x))
+)
+
+pathway_scaled <- pathway_scaled[
+  valid_rows,
+  ,
+  drop = FALSE
+]
+
+selected_pathways <- selected_pathways |>
+  filter(pathway %in% rownames(pathway_scaled)) |>
+  arrange(match(pathway, rownames(pathway_scaled)))
+
+stopifnot(
+  identical(
+    selected_pathways$pathway,
+    rownames(pathway_scaled)
+  )
+)
+
+sample_order <- order(
+  anno$C1_Core,
+  na.last = TRUE
+)
+
+group_cols <- c(
+  "Not-C1-like"         = "#2166AC",
+  "Not-C1-intermediate" = "#92C5DE",
+  "C1-intermediate"     = "#F4A582",
+  "C1-like"             = "#B2182B"
+)
+
+top_anno <- HeatmapAnnotation(
+  C1_score = anno$C1_Core,
+  C1_group = anno$C1_class,
+  col = list(
+    C1_score = colorRamp2(
+      range(anno$C1_Core, na.rm = TRUE),
+      c("#2166AC", "#B2182B")
+    ),
+    C1_group = group_cols
+  ),
+  na_col = "grey80"
+)
+
+
+row_split <- factor(
+  selected_pathways$direction,
+  levels = c("Positive", "Negative")
+)
+
+color_lim <- unname(
+  quantile(
+    abs(pathway_scaled),
+    probs = 0.95,
+    na.rm = TRUE
+  )
+)
+
+pathway_col_fun <- colorRamp2(
+  c(-color_lim, 0, color_lim),
+  c("#2166AC", "white", "#B2182B")
+)
+
+color_lim <- unname(
+  quantile(
+    abs(pathway_scaled),
+    probs = 0.95,
+    na.rm = TRUE
+  )
+)
+
+pathway_col_fun <- colorRamp2(
+  c(-color_lim, 0, color_lim),
+  c("#2166AC", "white", "#B2182B")
+)
+
+ht <- Heatmap(
+  pathway_scaled,
+  name = "Relative\npathway score",
+  col = pathway_col_fun,
+
+  top_annotation = top_anno,
+
+  column_order = sample_order,
+  row_split = row_split,
+
+  cluster_columns = FALSE,
+
+  # Preserve correlation ranking
+  cluster_rows = TRUE,
+  cluster_row_slices = TRUE,
+  clustering_distance_rows = "pearson",
+  clustering_method_rows = "average",
+
+  show_column_names = TRUE,
+  column_names_rot = 90,
+
+  show_row_names = TRUE,
+  row_names_gp = grid::gpar(fontsize = 7),
+
+  border = TRUE,
+  na_col = "grey90",
+
+  row_title = c(
+    "Positive correlation",
+    "Negative correlation"
+  ),
+
+  heatmap_legend_param = list(
+    at = c(-color_lim, 0, color_lim),
+    labels = c("Low", "0", "High"),
+    title = "Relative\npathway score"
+  )
+)
+
+png(
+  "output/figures/pathway_top25_positive_top25_negative_C1_heatmap.png",
+  width = 4000,
+  height = 2600,
+  res = 200
+)
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+dev.off()
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+```
+
+
+# RNA Deconvolution
+
+## ConsensusTME
+
+```{r}
+library(ConsensusTME)
+
+CTME_deconv_singScore <- consensusTMEAnalysis(as.matrix(rna_logtpm), cancer = "LUAD", statMethod = "gsva") |>
+  as.data.frame()
+
+colnames(CTME_deconv_singScore) <- sub("^Scores\\.", "", colnames(CTME_deconv_singScore))
+head(CTME_deconv_singScore)
+
+CTME_deconv_singScore |>
+  rownames_to_column("cell") |>
+  write_tsv("output/tables/ConsensusTME_score.tsv")
+
+
+CTME_deconv_singScore
+
+```
+
+
+```{r}
+
+library(ComplexHeatmap)
+library(circlize)
+library(dplyr)
+library(tibble)
+library(readr)
+
+# Cell types × samples
+ctme_mat <- as.matrix(CTME_deconv_singScore)
+
+# Match shared samples
+common_samples <- intersect(colnames(ctme_mat), c1_score_tbl$sample)
+
+ctme_mat <- ctme_mat[, common_samples, drop = FALSE]
+
+anno <- c1_score_tbl |>
+  select(sample, C1_Core, C1_class) |>
+  filter(sample %in% common_samples) |>
+  arrange(match(sample, common_samples)) |>
+  column_to_rownames("sample")
+
+stopifnot(identical(colnames(ctme_mat), rownames(anno)))
+
+# Correlation with C1 consensus using raw singScore values
+ctme_cor <- apply(
+  ctme_mat,
+  1,
+  \(x) cor(
+    x,
+    anno$C1_Core,
+    method = "pearson",
+    use = "pairwise.complete.obs"
+  )
+)
+
+cor_tbl <- tibble(
+  cell_type = names(ctme_cor),
+  correlation = unname(ctme_cor)
+) |>
+  filter(is.finite(correlation)) |>
+  arrange(desc(correlation)) |>
+  mutate(
+    direction = if_else(
+      correlation >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+
+write_tsv(
+  cor_tbl,
+  "output/tables/CTME_C1_correlations.tsv"
+)
+
+# Order rows by correlation
+ctme_selected <- ctme_mat[
+  cor_tbl$cell_type,
+  ,
+  drop = FALSE
+]
+
+# Row Z-score only for visualization
+ctme_scaled <- t(scale(t(ctme_selected)))
+
+valid_rows <- apply(
+  ctme_scaled,
+  1,
+  \(x) all(is.finite(x))
+)
+
+ctme_scaled <- ctme_scaled[valid_rows, , drop = FALSE]
+
+cor_tbl <- cor_tbl |>
+  filter(cell_type %in% rownames(ctme_scaled)) |>
+  arrange(match(cell_type, rownames(ctme_scaled)))
+
+# Order columns from low to high C1 score
+sample_order <- order(anno$C1_Core, na.last = TRUE)
+
+group_cols <- c(
+  "Not-C1-like"         = "#2166AC",
+  "Not-C1-intermediate" = "#92C5DE",
+  "C1-intermediate"     = "#F4A582",
+  "C1-like"             = "#B2182B"
+)
+
+top_anno <- HeatmapAnnotation(
+  C1_score = anno$C1_Core,
+  C1_group = anno$C1_class,
+  col = list(
+    C1_score = colorRamp2(
+      range(anno$C1_Core, na.rm = TRUE),
+      c("#2166AC", "#B2182B")
+    ),
+    C1_group = group_cols
+  ),
+  na_col = "grey80"
+)
+
+# Compressed blue–white–red scale
+color_lim <- unname(
+  quantile(abs(ctme_scaled), 0.95, na.rm = TRUE)
+)
+
+col_fun <- colorRamp2(
+  c(-color_lim, 0, color_lim),
+  c("#2166AC", "white", "#B2182B")
+)
+
+ht <- Heatmap(
+  ctme_scaled,
+  name = "Relative\ncell score",
+  col = col_fun,
+  top_annotation = top_anno,
+  column_order = sample_order,
+  cluster_columns = FALSE,
+  cluster_rows = FALSE,
+  cluster_row_slices = FALSE,
+  show_column_names = TRUE,
+  column_names_rot = 90,
+  show_row_names = TRUE,
+  row_names_gp = grid::gpar(fontsize = 9),
+  border = TRUE,
+  na_col = "grey90",
+  heatmap_legend_param = list(
+    at = c(-color_lim, 0, color_lim),
+    labels = c("Low", "0", "High"),
+    title = "Relative\ncell score"
+  )
+)
+
+png(
+  "output/figures/CTME_C1_correlation_heatmap.png",
+  width = 4000,
+  height = 2600,
+  res = 200
+)
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+dev.off()
+
+draw(
+  ht,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+```
+
+
+```{r}
+
+
+hallmark_signatures <- msigdbr(species = "human", collection = "H") |>
+  dplyr::distinct(gs_name, gene_symbol) |>
+  dplyr::group_by(gs_name) |>
+  dplyr::summarise(
+    genes = list(gene_symbol),
+    .groups = "drop"
+  ) |>
+  tibble::deframe()
+
+names(hallmark_signatures) <- stringr::str_remove(
+  names(hallmark_signatures),
+  "^HALLMARK_"
+)
+
+hallmark_signatures
+
+```
+
+# Check signature gene coverage
+
+## 2. Hallmark Gene-Set Coverage
+
+Before scoring pathways, this section checks how many genes from each Hallmark signature are present in the expression matrix. This matters because a score is only interpretable when enough signature genes are actually measured in the dataset.
+
+```{r}
+
+# ============================================================
+# Check Hallmark gene-set coverage in the expression matrix
+# ============================================================
+
+expression_genes <- rownames(rna_logtpm)
+
+hallmark_gene_coverage <- purrr::imap_dfr(
+  hallmark_signatures,
+  \(signature_genes, signature_name) {
+
+    found_genes <- intersect(signature_genes, expression_genes)
+    missing_genes <- setdiff(signature_genes, expression_genes)
+
+    tibble::tibble(
+      signature = signature_name,
+      requested = length(signature_genes),
+      found = length(found_genes),
+      missing_n = length(missing_genes),
+      coverage = length(found_genes) / length(signature_genes),
+      missing_genes = paste(missing_genes, collapse = ";")
+    )
+  }
+) |>
+  dplyr::arrange(coverage, signature)
+
+hallmark_gene_coverage
+
+write_tsv(
+  hallmark_gene_coverage,
+  "output/tables/hallmark_gene_coverage.tsv"
+)
+
+hallmark_gene_coverage |>
+  dplyr::filter(coverage < 0.8)
+
+```
+
+## 3. Coverage Visualization
+
+This section plots the Hallmark gene-set coverage results. The plot is a quick quality-control view: signatures with poor coverage would be weaker candidates for downstream interpretation.
+
+```{r}
+
+# ============================================================
+# Signature gene coverage
+# ============================================================
+
+coverage_plot <- hallmark_gene_coverage |>
+  mutate(
+    signature = stringr::str_remove(signature, "^HALLMARK_"),
+    signature = stringr::str_replace_all(signature, "_", " "),
+    signature = forcats::fct_reorder(signature, coverage)
+  ) |>
+  ggplot(aes(x = coverage, y = signature)) +
+  geom_col(width = 0.75) +
+  geom_text(
+    aes(label = paste0(found, "/", requested)),
+    hjust = -0.1,
+    size = 3
+  ) +
+  scale_x_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    limits = c(0, 1.12),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    x = "Genes detected in expression matrix",
+    y = NULL,
+    title = "Hallmark signature gene coverage"
+  ) +
+  theme_bw(base_size = 10)
+
+coverage_plot
+
+```
+
+# Retain genes found in the expression matrix
+
+## 4. Keep Measured Hallmark Genes
+
+This section filters each Hallmark gene set to the genes found in the expression matrix. The scoring methods should only receive genes that are actually present, otherwise missing genes would add noise or generate avoidable warnings.
+
+```{r}
+
+# ============================================================
+# Keep only genes present in rna_logcpm
+# ============================================================
+
+hallmark_signatures_found <- purrr::map(
+  hallmark_signatures,
+  \(signature_genes) {
+    intersect(signature_genes, expression_genes)
+  }
+)
+
+lengths(hallmark_signatures_found)
+
+```
+
+# Score all Hallmark signatures with singscore
+## Rank expression data once
+
+## 5. Prepare Expression Data for Scoring
+
+This section prepares the expression matrix for single-sample pathway scoring. The matrix is already logCPM, so the goal here is not normalization, but making sure the object has the expected orientation and gene identifiers for the scoring functions.
+
+```{r}
+
+rank_data <- singscore::rankGenes(rna_logtpm)
+
+```
+
+## Score every signature:
+
+## 6. ssGSEA Hallmark Scores
+
+This section computes ssGSEA scores for the Hallmark signatures. ssGSEA produces a pathway activity score for every sample and every Hallmark gene set, allowing pathway-level comparisons across the organoid samples.
+
+```{r}
+
+# ============================================================
+# Score all Hallmark signatures
+# ============================================================
+
+hallmark_singscore_long <- purrr::imap_dfr(
+  hallmark_signatures_found,
+  \(signature_genes, signature_name) {
+
+    score_result <- singscore::simpleScore(
+      rankData = rank_data,
+      upSet = signature_genes
+    )
+
+    score_result |>
+      as.data.frame() |>
+      tibble::rownames_to_column("sample") |>
+      tibble::as_tibble() |>
+      dplyr::transmute(
+        sample,
+        signature = signature_name,
+        score = TotalScore
+      )
+  }
+)
+
+hallmark_singscore_long
+
+hallmark_singscore <- hallmark_singscore_long |>
+  tidyr::pivot_wider(
+    names_from = signature,
+    values_from = score
+  ) |>
+  dplyr::arrange(match(sample, colnames(rna_logtpm)))
+
+hallmark_singscore
+
+write_tsv(
+  hallmark_singscore,
+  "output/tables/hallmark_singscore_scores.tsv"
+)
+
+```
+
+
+## 7. Hallmark Score Heatmap
+
+This section visualizes Hallmark activity across samples. Scores are transformed to row-wise Z-scores for display so that each pathway is centered and scaled across samples; this highlights relative high and low activity patterns without changing the original score table used for statistical testing.
+
+```{r}
+
+# ============================================================
+# Hallmark singscore heatmap annotated by C1 score and class
+# ============================================================
+
+# Signature score matrix: signatures × samples
+score_mat <- hallmark_singscore |>
+  column_to_rownames("sample") |>
+  as.matrix() |>
+  t()
+
+# Remove HALLMARK_ prefix for cleaner row labels
+rownames(score_mat) <- stringr::str_remove(
+  rownames(score_mat),
+  "^HALLMARK_"
+)
+
+# ------------------------------------------------------------
+# Match Hallmark samples with C1 metadata
+# ------------------------------------------------------------
+
+common_samples <- intersect(
+  colnames(score_mat),
+  c1_score_tbl$sample
+)
+
+if (length(common_samples) < 3) {
+  stop(
+    "Fewer than three shared samples were found between ",
+    "hallmark_singscore and c1_score_tbl."
+  )
+}
+
+score_mat <- score_mat[
+  ,
+  common_samples,
+  drop = FALSE
+]
+
+c1_heatmap_metadata <- c1_score_tbl |>
+  dplyr::select(
+    sample,
+    C1_Core,
+    C1_class
+  ) |>
+  dplyr::filter(sample %in% common_samples) |>
+  dplyr::arrange(match(sample, common_samples)) |>
+  tibble::column_to_rownames("sample")
+
+stopifnot(
+  identical(
+    colnames(score_mat),
+    rownames(c1_heatmap_metadata)
+  )
+)
+
+# ------------------------------------------------------------
+# Row-wise Z-score for visualization
+# ------------------------------------------------------------
+
+score_mat_z <- t(
+  scale(
+    t(score_mat)
+  )
+)
+
+# Remove signatures with zero variance or invalid values
+score_mat_z <- score_mat_z[
+  apply(
+    score_mat_z,
+    1,
+    function(x) all(is.finite(x))
+  ),
+  ,
+  drop = FALSE
+]
+
+# ------------------------------------------------------------
+# Order samples by C1 core score
+# ------------------------------------------------------------
+
+sample_order <- order(
+  c1_heatmap_metadata$C1_Core,
+  na.last = TRUE
+)
+
+# ------------------------------------------------------------
+# C1 annotation colours
+# ------------------------------------------------------------
+
+c1_group_cols <- c(
+  "Not-C1-like"         = "#2166AC",
+  "Not-C1-intermediate" = "#92C5DE",
+  "C1-intermediate"     = "#F4A582",
+  "C1-like"             = "#B2182B"
+)
+
+# Symmetric continuous scale around zero
+c1_limit <- max(
+  abs(c1_heatmap_metadata$C1_Core),
+  na.rm = TRUE
+)
+
+c1_score_col_fun <- circlize::colorRamp2(
+  c(-c1_limit, 0, c1_limit),
+  c("#2166AC", "white", "#B2182B")
+)
+
+# ------------------------------------------------------------
+# Column annotations
+# ------------------------------------------------------------
+
+column_ha <- HeatmapAnnotation(
+  `C1 core score` = c1_heatmap_metadata$C1_Core,
+  `C1 group` = c1_heatmap_metadata$C1_class,
+
+  col = list(
+    `C1 core score` = c1_score_col_fun,
+    `C1 group` = c1_group_cols
+  ),
+
+  annotation_name_side = "left",
+  na_col = "#E5E5E5",
+
+  annotation_legend_param = list(
+    `C1 core score` = list(
+      title = "C1 core score",
+      at = c(-c1_limit, 0, c1_limit),
+      labels = round(
+        c(-c1_limit, 0, c1_limit),
+        1
+      )
+    ),
+    `C1 group` = list(
+      title = "C1 group"
+    )
+  )
+)
+
+# ------------------------------------------------------------
+# Viridis heatmap colour scale
+# ------------------------------------------------------------
+
+# Use the 95th percentile to reduce the effect of extreme Z-scores
+
+z_limit <- unname(
+  quantile(
+    abs(score_mat_z),
+    probs = 0.95,
+    na.rm = TRUE
+  )
+)
+
+if (!is.finite(z_limit) || z_limit == 0) {
+  z_limit <- max(
+    abs(score_mat_z),
+    na.rm = TRUE
+  )
+}
+
+score_col_fun <- circlize::colorRamp2(
+  seq(
+    -z_limit,
+    z_limit,
+    length.out = 5
+  ),
+  viridisLite::viridis(
+    5,
+    option = "D"
+  )
+)
+# ------------------------------------------------------------
+# Construct heatmap
+# ------------------------------------------------------------
+
+hallmark_heatmap <- Heatmap(
+  score_mat_z,
+
+  name = "Row Z-score",
+  col = score_col_fun,
+
+  top_annotation = column_ha,
+
+  # Order samples from low to high C1 score
+  column_order = sample_order,
+
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+
+  row_names_gp = grid::gpar(fontsize = 7),
+  column_names_gp = grid::gpar(fontsize = 8),
+  column_names_rot = 90,
+
+  column_title = "Hallmark activity ordered by C1 core score",
+  row_title = "Hallmark signatures",
+
+  border = TRUE,
+  use_raster = TRUE,
+  raster_quality = 3,
+
+  heatmap_legend_param = list(
+    title = "Row\nZ-score",
+    at = c(-z_limit, 0, z_limit),
+    labels = round(
+      c(-z_limit, 0, z_limit),
+      1
+    )
+  )
+)
+
+# ------------------------------------------------------------
+# Draw heatmap
+# ------------------------------------------------------------
+
+draw(
+  hallmark_heatmap,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+# ------------------------------------------------------------
+# Save heatmap
+# ------------------------------------------------------------
+
+dir.create(
+  "output/figures",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+png(
+  "output/figures/hallmark_heatmap_C1.png",
+  width = 4000,
+  height = 2600,
+  res = 200
+)
+
+draw(
+  hallmark_heatmap,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+dev.off()
+
+```
+
