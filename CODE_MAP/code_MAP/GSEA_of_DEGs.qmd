@@ -1,0 +1,622 @@
+---
+title: ""
+subtitle: ""
+date: today
+date-format: "DD MM YYYY"
+
+format:
+  html:
+    page-layout: full
+
+    toc: true
+    toc-title: "Notebook sections"
+    toc-location: left
+    toc-depth: 4
+
+    number-sections: true
+    number-depth: 4
+
+    theme:
+      light: lux
+      dark: darkly
+
+    title-block-banner: true
+
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-tools: true
+    code-copy: true
+    code-overflow: wrap
+
+    df-print: paged
+
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-newwindow: true
+
+    embed-resources: true
+    self-contained-math: true
+
+    fig-align: center
+    fig-width: 12
+    fig-height: 8
+    fig-dpi: 600
+
+    callout-appearance: simple
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  error: false
+  freeze: false
+
+editor: source
+---
+
+
+# Setup
+
+## Libraries and inputs
+
+```{r}
+#| label: setup-libraries-and-inputs
+
+library(tidyverse)
+library(patchwork)
+library(vroom)
+library(clusterProfiler)
+library(ggtree)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(BiocParallel)
+library(qs2)
+
+bp_param <- MulticoreParam(workers = 6)
+register(bp_param)
+
+metadata <- read_tsv("input/metadata_clean.tsv", show_col_types = F) |>
+  dplyr::filter(use == TRUE)
+
+
+prepare_gsea_gene_list <- function(deg_tbl) {
+
+  ranked_tbl <- deg_tbl |>
+    dplyr::filter(
+      !is.na(gene),
+      !is.na(logFC),
+      !is.na(F)
+    ) |>
+    dplyr::mutate(
+      gene = sub("\\..*$", "", gene),
+      rank_score = sign(logFC) * sqrt(F),
+      id_type = dplyr::if_else(
+        grepl("^ENSG[0-9]+$", gene),
+        "ENSEMBL",
+        "SYMBOL"
+      )
+    )
+
+  symbol_map <- ranked_tbl |>
+    dplyr::filter(id_type == "SYMBOL") |>
+    dplyr::distinct(gene) |>
+    dplyr::pull(gene) |>
+    clusterProfiler::bitr(
+      fromType = "SYMBOL",
+      toType = "ENTREZID",
+      OrgDb = org.Hs.eg.db
+    ) |>
+    dplyr::rename(gene = SYMBOL)
+
+  ensembl_map <- ranked_tbl |>
+    dplyr::filter(id_type == "ENSEMBL") |>
+    dplyr::distinct(gene) |>
+    dplyr::pull(gene) |>
+    clusterProfiler::bitr(
+      fromType = "ENSEMBL",
+      toType = "ENTREZID",
+      OrgDb = org.Hs.eg.db
+    ) |>
+    dplyr::rename(gene = ENSEMBL)
+
+  gene_map <- dplyr::bind_rows(symbol_map, ensembl_map)
+
+  ranked_tbl_entrez <- ranked_tbl |>
+    dplyr::inner_join(gene_map, by = "gene") |>
+    dplyr::filter(
+      !is.na(ENTREZID),
+      is.finite(rank_score)
+    ) |>
+    dplyr::group_by(ENTREZID) |>
+    dplyr::slice_max(
+      order_by = abs(rank_score),
+      n = 1,
+      with_ties = FALSE
+    ) |>
+    dplyr::ungroup() |>
+    dplyr::arrange(desc(rank_score))
+
+  gene_list <- ranked_tbl_entrez$rank_score
+  names(gene_list) <- ranked_tbl_entrez$ENTREZID
+
+  sort(gene_list, decreasing = TRUE)
+}
+
+
+
+```
+
+# GSEA
+
+Set Enrichment Analysis (SEA) asks whether a predefined group of genes is over-represented in an analysis result. Gene Set Enrichment Analysis (GSEA) is a ranked-list version of SEA: it tests whether genes from a biological collection tend to accumulate at the top or bottom of the ranked DEG list. Here the ranking comes from the differential expression comparison, so enrichment points to coordinated biology associated with High_TME versus Low_TME rather than single-gene changes only.
+
+GO is the Gene Ontology, a controlled vocabulary that annotates genes with shared biological meaning. BP means Biological Process, the GO branch focused on processes such as immune activation, cell cycle, metabolism, and signaling programs. KEGG is a pathway database; unlike GO BP terms, KEGG gene sets usually describe curated pathways and molecular interaction modules.
+
+
+## Load the High_TME_vs_Low_TME DEGs
+```{r}
+
+DEGs_High_TME_vs_Low_TME <- vroom("input/DEGs_OVC_IEO_High_TME_vs_Low_TME.tsv")
+
+head(DEGs_High_TME_vs_Low_TME)
+
+```
+
+## Rank the DEGs 
+```{r}
+
+gene_list_High_TME_vs_Low_TME <- prepare_gsea_gene_list(DEGs_High_TME_vs_Low_TME)
+
+head(gene_list_High_TME_vs_Low_TME)
+
+summary(gene_list_High_TME_vs_Low_TME)
+
+table(
+  direction = ifelse(
+    gene_list_High_TME_vs_Low_TME > 0,
+    "positive",
+    "negative"
+  )
+)
+
+range(gene_list_High_TME_vs_Low_TME)
+
+DEGs_High_TME_vs_Low_TME |>
+  count(significance)
+
+```
+
+## Run Biological Process GSEA
+
+This section tests the ranked DEG list against GO Biological Process terms. The computation is kept separate from the visual checks so each output can be read and rerun independently.
+
+### Compute GO Biological Process GSEA
+
+Run GSEA on the ranked High_TME_vs_Low_TME gene list and save the result table used by the plots below.
+
+```{r gsea-bp-compute}
+set.seed(123)
+
+gsea_bp_high_tme_vs_low_tme_result <- gseGO(
+  geneList = gene_list_High_TME_vs_Low_TME,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  minGSSize = 10,
+  maxGSSize = 500,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  verbose = TRUE
+)
+```
+
+### Simplify GO terms and compute pairwise similarity
+
+GO Biological Process results are often redundant. This chunk reduces overlapping terms and computes term similarity for network-style plots.
+
+```{r gsea-bp-simplify-similarity}
+gsea_bp_high_tme_vs_low_tme_simplified <- simplify(
+  gsea_bp_high_tme_vs_low_tme_result,
+  cutoff = 0.7,
+  by = "p.adjust",
+  select_fun = min
+)
+
+gsea_bp_high_tme_vs_low_tme_termsim <- pairwise_termsim(gsea_bp_high_tme_vs_low_tme_simplified)
+
+qs_save(object = gsea_bp_high_tme_vs_low_tme_termsim,file = "output/objects/gsea_bp_high_tme_vs_low_tme_termsim.qs2",compress_level = 10,nthreads = 10)
+
+gsea_bp_high_tme_vs_low_tme_simplified_tbl <- as.data.frame(gsea_bp_high_tme_vs_low_tme_simplified)
+
+write_tsv(x = gsea_bp_high_tme_vs_low_tme_simplified_tbl,file = "output/tables/GSEA_GO_BP_High_TME_vs_Low_TME_full_results.tsv")
+```
+
+### Dotplot
+
+The dotplot gives a compact overview of the strongest enriched biological processes, combining direction, significance, and gene ratio.
+
+```{r gsea-bp-dotplot}
+
+gsea_bp_high_tme_vs_low_tme_dotplot <- dotplot(
+  gsea_bp_high_tme_vs_low_tme_simplified,
+  showCategory = 15,
+  split = ".sign"
+) +
+  facet_grid(. ~ .sign) +
+  labs(
+    title = "Top enriched GO Biological Process terms",
+    subtitle = paste(
+      "High-grade + TME vs Low-grade + TME",
+      "Terms are separated by positive and negative enrichment direction",
+      sep = "\n"
+    ),
+    x = "Gene ratio",
+    y = "GO Biological Process term",
+    size = "Gene count",
+  ) +
+  theme_bw(base_size = 9) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+
+gsea_bp_high_tme_vs_low_tme_dotplot
+
+ggsave(
+  filename ="output/figures/GSEA_GO_BP_High_TME_vs_Low_TME_dotplot.png",
+  plot = gsea_bp_high_tme_vs_low_tme_dotplot,
+  width = 16,
+  height = 12,
+  dpi = 300,
+  bg = "white"
+)
+
+```
+
+### Ridgeplot
+
+The ridgeplot shows how ranked genes are distributed across the selected enriched processes.
+
+```{r gsea-bp-ridgeplot}
+
+
+gsea_bp_high_tme_vs_low_tme_ridgeplot <- ridgeplot(
+  gsea_bp_high_tme_vs_low_tme_termsim,
+  showCategory = 15
+) +
+  labs(
+    title = "Ranked gene-statistic distributions for enriched GO terms",
+    subtitle = paste(
+      "High-grade + TME vs Low-grade + TME",
+      "Each ridge shows where genes from one GO term occur in the ranked list",
+      sep = "\n"
+    ),
+    x = "Ranked gene statistic",
+    y = "GO Biological Process term",
+    fill = "Adjusted p-value"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold")
+  )
+
+gsea_bp_high_tme_vs_low_tme_ridgeplot
+
+ggsave(
+  filename = "output/figures/GSEA_GO_BP_High_TME_vs_Low_TME_ridgeplot.png",
+  plot = gsea_bp_high_tme_vs_low_tme_ridgeplot,
+  width = 12,
+  height = 8,
+  dpi = 300,
+  bg = "white"
+)
+
+set.seed(123)
+```
+
+### Treeplot
+
+The treeplot clusters similar GO terms so related biological themes are easier to scan.
+
+```{r gsea-bp-treeplot}
+set.seed(123)
+
+gsea_bp_high_tme_vs_low_tme_treeplot <- treeplot(
+  gsea_bp_high_tme_vs_low_tme_termsim,
+  cladelab_offset = 20,
+  tiplab_offset = 0.8,
+  fontsize_cladelab = 5
+) +
+  hexpand(0.2) +
+  labs(
+    title = "Semantic hierarchy of enriched GO Biological Process terms",
+    subtitle = paste(
+      "High-grade + TME vs Low-grade + TME",
+      "Branches group enriched terms with similar biological annotations",
+      sep = "\n"
+    )
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+gsea_bp_high_tme_vs_low_tme_treeplot
+
+ggsave(
+  filename = "output/figures/GSEA_GO_BP_High_TME_vs_Low_TME_treeplot.png",
+  plot = gsea_bp_high_tme_vs_low_tme_treeplot,
+  width = 20,
+  height = 12,
+  dpi = 300,
+  bg = "white",
+  limitsize = FALSE
+)
+
+# Semantic clusters of enriched GO Biological Process terms
+gsea_bp_high_tme_vs_low_tme_ssplot <- ssplot(
+  gsea_bp_high_tme_vs_low_tme_termsim,
+  nCluster = 5
+) +
+  labs(
+    title = "Semantic clusters of enriched GO Biological Process terms",
+    subtitle = paste(
+      "High-grade + TME vs Low-grade + TME",
+      "Enriched GO terms are summarized into five related functional clusters",
+      sep = "\n"
+    )
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+gsea_bp_high_tme_vs_low_tme_ssplot
+
+ggsave(
+  filename = "output/figures/GSEA_GO_BP_High_TME_vs_Low_TME_ssplot.png",
+  plot = gsea_bp_high_tme_vs_low_tme_ssplot,
+  width = 12,
+  height = 9,
+  dpi = 300,
+  bg = "white"
+)
+
+gsea_bp_high_tme_vs_low_tme_goplot <- goplot(
+  gsea_bp_high_tme_vs_low_tme_termsim
+) +
+  labs(
+    title = "Gene Ontology hierarchy of enriched Biological Process terms",
+    subtitle = paste(
+      "High-grade + TME vs Low-grade + TME",
+      "Edges represent parent-child relationships within the GO structure",
+      sep = "\n"
+    )
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+gsea_bp_high_tme_vs_low_tme_goplot
+
+ggsave(
+  filename = "output/figures/GSEA_GO_BP_High_TME_vs_Low_TME_goplot.png",
+  plot = gsea_bp_high_tme_vs_low_tme_goplot,
+  width = 20,
+  height = 16,
+  dpi = 600,
+  bg = "white",
+  limitsize = FALSE
+)
+
+```
+
+### Enrichment map
+
+The enrichment map displays GO terms as a similarity network, highlighting groups of related processes.
+
+```{r gsea-bp-emapplot}
+
+gsea_bp_high_tme_vs_low_tme_emapplot <- emapplot(
+  gsea_bp_high_tme_vs_low_tme_termsim,
+  node_label = "group",
+  layout = "with_fr"
+) +
+  labs(
+    title = "Network of related enriched GO Biological Process terms",
+    subtitle = paste(
+      "High-grade + TME vs Low-grade + TME",
+      "Connected nodes represent GO terms with shared genes or high similarity",
+      sep = "\n"
+    )
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+gsea_bp_high_tme_vs_low_tme_emapplot
+
+ggsave(
+  filename = "output/figures/GSEA_GO_BP_High_TME_vs_Low_TME_emapplot.png",
+  plot = gsea_bp_high_tme_vs_low_tme_emapplot,
+  width = 16,
+  height = 12,
+  dpi = 300
+)
+```
+
+## Run KEGG GSEA
+
+This section repeats the same ranked-list enrichment workflow using KEGG pathways. KEGG is useful here because it summarizes the DEG ranking at the level of curated signaling and metabolic pathways, which complements the broader GO Biological Process themes above.
+
+### Compute KEGG GSEA
+
+Run GSEA on the ranked High_TME_vs_Low_TME gene list against human KEGG pathways and save the result table used by the plots below.
+
+```{r gsea-kegg-compute}
+set.seed(123)
+
+gsea_kegg_high_tme_vs_low_tme_result <- gseKEGG(
+  geneList = gene_list_High_TME_vs_Low_TME,
+  organism = "hsa",
+  minGSSize = 10,
+  maxGSSize = 500,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  verbose = FALSE
+)
+
+gsea_kegg_high_tme_vs_low_tme_fig_dir <- file.path(output_dir, "figures")
+dir.create(gsea_kegg_high_tme_vs_low_tme_fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+write_tsv(x = as_tibble(gsea_kegg_high_tme_vs_low_tme_result@result),file = "output/tables/GSEA_KEGG_High_TME_vs_Low_TME.tsv")
+
+```
+
+### Simplify KEGG terms and compute pairwise similarity
+
+KEGG pathways do not use the GO semantic hierarchy, so this chunk keeps the KEGG result unchanged and computes pathway overlap/similarity for the network-style plots.
+
+```{r gsea-kegg-similarity}
+gsea_kegg_high_tme_vs_low_tme_simplified <- gsea_kegg_high_tme_vs_low_tme_result
+
+gsea_kegg_high_tme_vs_low_tme_termsim <- pairwise_termsim(
+  gsea_kegg_high_tme_vs_low_tme_simplified
+)
+
+qs_save(object = gsea_kegg_high_tme_vs_low_tme_termsim,file = "output/objects/gsea_kegg_high_tme_vs_low_tme_termsim.qs2",compress_level = 10,nthreads = 10)
+
+```
+
+### Dotplot
+
+The dotplot gives a compact overview of the strongest enriched KEGG pathways, combining direction, significance, and gene ratio.
+
+```{r gsea-kegg-dotplot}
+
+gsea_kegg_high_tme_vs_low_tme_dotplot <- dotplot(
+  gsea_kegg_high_tme_vs_low_tme_simplified,
+  showCategory = 15,
+  split = ".sign"
+) +
+  facet_grid(. ~ .sign) +
+  labs(
+    title = "KEGG GSEA - High TME vs Low TME",
+    x = "Gene ratio",
+    y = "KEGG pathway"
+  ) +
+  theme_bw(base_size = 9) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 9)
+  )
+
+gsea_kegg_high_tme_vs_low_tme_dotplot
+
+ggsave(
+  filename = "output/figures/GSEA_KEGG_High_TME_vs_Low_TME_dotplot.png",
+  plot = gsea_kegg_high_tme_vs_low_tme_dotplot,
+  width = 12,
+  height = 8,
+  dpi = 300,
+  bg = "white"
+)
+
+```
+
+### Ridgeplot
+
+The ridgeplot shows how ranked genes are distributed across the selected enriched KEGG pathways.
+
+```{r gsea-kegg-ridgeplot}
+
+gsea_kegg_high_tme_vs_low_tme_ridgeplot <- ridgeplot(
+  gsea_kegg_high_tme_vs_low_tme_simplified,
+  showCategory = 15
+) +
+  labs(
+    title = "KEGG GSEA - High TME vs Low TME",
+    x = "Ranked gene statistic",
+    y = "KEGG pathway"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 9)
+  )
+
+gsea_kegg_high_tme_vs_low_tme_ridgeplot
+
+ggsave(
+  filename = "output/figures/GSEA_KEGG_High_TME_vs_Low_TME_ridgeplot.png",
+  plot = gsea_kegg_high_tme_vs_low_tme_ridgeplot,
+  width = 12,
+  height = 8,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+### Treeplot
+
+The treeplot clusters similar KEGG pathways so related pathway themes are easier to scan.
+
+```{r gsea-kegg-treeplot}
+set.seed(123)
+
+gsea_kegg_high_tme_vs_low_tme_treeplot <- treeplot(
+  gsea_kegg_high_tme_vs_low_tme_termsim,
+  showCategory = 20,
+  cladelab_offset = 10,
+  tiplab_offset = 0.5,
+  fontsize_cladelab = 4
+) +
+  labs(title = "KEGG GSEA pathway clusters - High TME vs Low TME") +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+
+gsea_kegg_high_tme_vs_low_tme_treeplot
+
+ggsave(
+  filename = "output/figures/GSEA_KEGG_High_TME_vs_Low_TME_treeplot.png",
+  plot = gsea_kegg_high_tme_vs_low_tme_treeplot,
+  width = 16,
+  height = 10,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+### Enrichment map
+
+The enrichment map displays KEGG pathways as a similarity network, highlighting groups of related pathways.
+
+```{r gsea-kegg-emapplot}
+set.seed(123)
+
+gsea_kegg_high_tme_vs_low_tme_emapplot <- emapplot(
+  gsea_kegg_high_tme_vs_low_tme_termsim,
+  showCategory = 20,
+  layout = "kk"
+) +
+  labs(title = "KEGG GSEA enrichment map - High TME vs Low TME") +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+
+gsea_kegg_high_tme_vs_low_tme_emapplot
+
+ggsave(
+  filename = "output/figures/GSEA_KEGG_High_TME_vs_Low_TME_emapplot.png",
+  plot = gsea_kegg_high_tme_vs_low_tme_emapplot,
+  width = 12,
+  height = 10,
+  dpi = 300,
+  bg = "white"
+)
+```

@@ -1,0 +1,1191 @@
+---
+title: "Hallmark 50 pathway activity in MGI organoids"
+subtitle: "Single-sample gene-set scoring, pathway heatmaps, and paired TME-addition tests"
+date: today
+date-format: "DD MM YYYY"
+
+format:
+  html:
+    page-layout: full
+
+    toc: true
+    toc-title: "Notebook sections"
+    toc-location: left
+    toc-depth: 4
+
+    number-sections: true
+    number-depth: 4
+
+    theme:
+      light: lux
+      dark: darkly
+
+    title-block-banner: true
+
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-tools: true
+    code-copy: true
+    code-overflow: wrap
+
+    df-print: paged
+
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-newwindow: true
+
+    embed-resources: true
+    self-contained-math: true
+
+    fig-align: center
+    fig-width: 12
+    fig-height: 8
+    fig-dpi: 600
+
+    callout-appearance: simple
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  error: false
+  freeze: false
+
+editor: source
+---
+
+## Analysis Overview
+
+This notebook scores the 50 MSigDB Hallmark gene sets in the MGI ovarian organoid expression matrix and asks whether pathway activity changes with TME addition within IEO grade groups. The workflow is intentionally explicit: load the expression matrix and metadata, check which Hallmark genes are measurable, compute single-sample pathway scores, visualize score patterns, and test paired TME-addition differences.
+
+The **Hallmark 50** collection is a curated MSigDB resource containing 50 gene sets that represent broad, recurrent biological programs. Examples include proliferation, hypoxia, interferon response, epithelial-mesenchymal transition, inflammatory signaling, and apoptosis. Hallmark gene sets are useful here because they compress gene-level expression into interpretable pathway-level activity scores.
+
+**ssGSEA** means single-sample Gene Set Enrichment Analysis. It estimates gene-set enrichment separately for each sample, so every sample receives one score per gene set before any group comparison is performed. This is useful when the goal is to compare pathway activity across samples rather than only report group-level enrichment.
+
+**singscore** is another single-sample gene-set scoring method. It ranks genes inside each sample and asks whether genes from a signature tend to sit high or low in that ranked expression profile. In this notebook, singscore provides one pathway score per Hallmark signature and sample.
+
+A **Z-score** is a standardized value: the mean is subtracted and the result is divided by the standard deviation. Here, Z-scores are used for heatmap visualization only. They put signatures with different raw score ranges on a common color scale, making relative high and low activity easier to compare across samples.
+
+
+# Setup
+
+## Libraries and inputs
+
+## 1. Inputs and Setup
+
+This section loads the packages, metadata, expression matrix, and Hallmark gene sets used by the analysis. The expression matrix is kept at the gene level and the metadata provides the sample-level variables used later for grouping and paired comparisons.
+
+```{r}
+#| label: setup-libraries-and-inputs
+
+library(tidyverse)
+library(patchwork)
+library(vroom)
+library(msigdbr)
+library(BiocParallel)
+library(qs2)
+library(future)
+
+plan(multicore, workers = 5)
+
+metadata <- vroom("input/metadata_clean.tsv", show_col_types = F) |>
+  dplyr::filter(use == TRUE)
+
+rna_logcpm <- vroom("input/MGI_logCPM_dedup_nonzero.tsv") |>
+  column_to_rownames("gene")
+
+
+hallmark_signatures <- msigdbr(species = "human", collection = "H") |>
+  dplyr::distinct(gs_name, gene_symbol) |>
+  dplyr::group_by(gs_name) |>
+  dplyr::summarise(
+    genes = list(gene_symbol),
+    .groups = "drop"
+  ) |>
+  tibble::deframe()
+
+names(hallmark_signatures) <- stringr::str_remove(
+  names(hallmark_signatures),
+  "^HALLMARK_"
+)
+
+hallmark_signatures
+
+```
+
+# Check signature gene coverage
+
+## 2. Hallmark Gene-Set Coverage
+
+Before scoring pathways, this section checks how many genes from each Hallmark signature are present in the expression matrix. This matters because a score is only interpretable when enough signature genes are actually measured in the dataset.
+
+```{r}
+
+# ============================================================
+# Check Hallmark gene-set coverage in the expression matrix
+# ============================================================
+
+expression_genes <- rownames(rna_logcpm)
+
+hallmark_gene_coverage <- purrr::imap_dfr(
+  hallmark_signatures,
+  \(signature_genes, signature_name) {
+
+    found_genes <- intersect(signature_genes, expression_genes)
+    missing_genes <- setdiff(signature_genes, expression_genes)
+
+    tibble::tibble(
+      signature = signature_name,
+      requested = length(signature_genes),
+      found = length(found_genes),
+      missing_n = length(missing_genes),
+      coverage = length(found_genes) / length(signature_genes),
+      missing_genes = paste(missing_genes, collapse = ";")
+    )
+  }
+) |>
+  dplyr::arrange(coverage, signature)
+
+hallmark_gene_coverage
+
+write_tsv(
+  hallmark_gene_coverage,
+  "output/tables/hallmark_gene_coverage.tsv"
+)
+
+hallmark_gene_coverage |>
+  dplyr::filter(coverage < 0.8)
+
+```
+
+## 3. Coverage Visualization
+
+This section plots the Hallmark gene-set coverage results. The plot is a quick quality-control view: signatures with poor coverage would be weaker candidates for downstream interpretation.
+
+```{r}
+
+# ============================================================
+# Signature gene coverage
+# ============================================================
+
+coverage_plot <- hallmark_gene_coverage |>
+  mutate(
+    signature = stringr::str_remove(signature, "^HALLMARK_"),
+    signature = stringr::str_replace_all(signature, "_", " "),
+    signature = forcats::fct_reorder(signature, coverage)
+  ) |>
+  ggplot(aes(x = coverage, y = signature)) +
+  geom_col(width = 0.75) +
+  geom_text(
+    aes(label = paste0(found, "/", requested)),
+    hjust = -0.1,
+    size = 3
+  ) +
+  scale_x_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    limits = c(0, 1.12),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    x = "Genes detected in expression matrix",
+    y = NULL,
+    title = "Hallmark signature gene coverage"
+  ) +
+  theme_bw(base_size = 10)
+
+coverage_plot
+
+```
+
+# Retain genes found in the expression matrix
+
+## 4. Keep Measured Hallmark Genes
+
+This section filters each Hallmark gene set to the genes found in the expression matrix. The scoring methods should only receive genes that are actually present, otherwise missing genes would add noise or generate avoidable warnings.
+
+```{r}
+
+# ============================================================
+# Keep only genes present in rna_logcpm
+# ============================================================
+
+hallmark_signatures_found <- purrr::map(
+  hallmark_signatures,
+  \(signature_genes) {
+    intersect(signature_genes, expression_genes)
+  }
+)
+
+lengths(hallmark_signatures_found)
+
+```
+
+# Score all Hallmark signatures with singscore
+## Rank expression data once
+
+## 5. Prepare Expression Data for Scoring
+
+This section prepares the expression matrix for single-sample pathway scoring. The matrix is already logCPM, so the goal here is not normalization, but making sure the object has the expected orientation and gene identifiers for the scoring functions.
+
+```{r}
+
+rank_data <- singscore::rankGenes(rna_logcpm)
+
+```
+
+## Score every signature:
+
+## 6. ssGSEA Hallmark Scores
+
+This section computes ssGSEA scores for the Hallmark signatures. ssGSEA produces a pathway activity score for every sample and every Hallmark gene set, allowing pathway-level comparisons across the organoid samples.
+
+```{r}
+
+# ============================================================
+# Score all Hallmark signatures
+# ============================================================
+
+hallmark_singscore_long <- purrr::imap_dfr(
+  hallmark_signatures_found,
+  \(signature_genes, signature_name) {
+
+    score_result <- singscore::simpleScore(
+      rankData = rank_data,
+      upSet = signature_genes
+    )
+
+    score_result |>
+      as.data.frame() |>
+      tibble::rownames_to_column("sample") |>
+      tibble::as_tibble() |>
+      dplyr::transmute(
+        sample,
+        signature = signature_name,
+        score = TotalScore
+      )
+  }
+)
+
+hallmark_singscore_long
+
+hallmark_singscore <- hallmark_singscore_long |>
+  tidyr::pivot_wider(
+    names_from = signature,
+    values_from = score
+  ) |>
+  dplyr::arrange(match(sample, colnames(rna_logcpm)))
+
+hallmark_singscore
+
+write_tsv(
+  hallmark_singscore,
+  "output/tables/hallmark_singscore_scores.tsv"
+)
+
+```
+
+
+## 7. Hallmark Score Heatmap
+
+This section visualizes Hallmark activity across samples. Scores are transformed to row-wise Z-scores for display so that each pathway is centered and scaled across samples; this highlights relative high and low activity patterns without changing the original score table used for statistical testing.
+
+```{r}
+
+# ============================================================
+# Hallmark singscore heatmap
+# ============================================================
+
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+# Match metadata to scored samples
+heatmap_metadata <- metadata |>
+  filter(sample %in% hallmark_singscore$sample) |>
+  distinct(sample, .keep_all = TRUE) |>
+  arrange(match(sample, hallmark_singscore$sample))
+
+stopifnot(
+  identical(
+    heatmap_metadata$sample,
+    hallmark_singscore$sample
+  )
+)
+
+# Signature score matrix: signatures × samples
+score_mat <- hallmark_singscore |>
+  column_to_rownames("sample") |>
+  as.matrix() |>
+  t()
+
+# Remove HALLMARK_ prefix for cleaner row labels
+rownames(score_mat) <- stringr::str_remove(
+  rownames(score_mat),
+  "^HALLMARK_"
+)
+
+# Row-wise z-score for visualization
+score_mat_z <- t(scale(t(score_mat)))
+
+# Remove signatures with zero variance, if any
+score_mat_z <- score_mat_z[
+  apply(score_mat_z, 1, \(x) all(is.finite(x))),
+  ,
+  drop = FALSE
+]
+
+# Column annotations
+column_ha <- HeatmapAnnotation(
+  `TME addition` = heatmap_metadata$tme_addition,
+  `IEO grade` = heatmap_metadata$ieo_grade,
+  col = list(
+    `TME addition` = c(
+      "Yes" = "#D55E00",
+      "No" = "#0072B2"
+    ),
+    `IEO grade` = c(
+      "High" = "#B2182B",
+      "Low" = "#2166AC",
+      "Unknown" = "#BDBDBD"
+    )
+  ),
+  annotation_name_side = "left",
+  na_col = "#E5E5E5"
+)
+
+# Symmetric colour scale around zero
+z_limit <- max(abs(score_mat_z), na.rm = TRUE)
+
+score_col_fun <- circlize::colorRamp2(
+  c(-z_limit, 0, z_limit),
+  c("#2166AC", "white", "#B2182B")
+)
+
+hallmark_heatmap <- Heatmap(
+  score_mat_z,
+  name = "Row Z-score",
+  col = score_col_fun,
+
+  top_annotation = column_ha,
+
+  cluster_rows = TRUE,
+  cluster_columns =TRUE,
+
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+
+  row_names_gp = grid::gpar(fontsize = 7),
+  column_names_gp = grid::gpar(fontsize = 8),
+  column_names_rot = 45,
+
+  column_title = "Hallmark signature activity",
+  row_title = "Hallmark signatures",
+
+  border = TRUE,
+  use_raster = TRUE,
+  raster_quality = 3,
+
+  heatmap_legend_param = list(
+    title = "Row\nZ-score",
+    at = c(-z_limit, 0, z_limit),
+    labels = round(c(-z_limit, 0, z_limit), 1)
+  )
+)
+
+draw(
+  hallmark_heatmap,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+
+png("output/figures/hallmark_heatmap_50.png", width = 2200, height = 1600, res = 200)
+draw(
+  hallmark_heatmap,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE
+)
+dev.off()
+
+```
+
+
+## 8. singscore Hallmark Scores
+
+This section computes singscore values for the same Hallmark signatures. singscore is rank-based within each sample, so it is robust to differences in absolute expression scale and gives another single-sample view of pathway activity.
+
+```{r}
+
+# ============================================================
+# Hallmark singscore heatmaps by grade
+# Columns ordered by TME addition; no column clustering
+# ============================================================
+
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+library(dplyr)
+library(tibble)
+library(stringr)
+
+dir.create(
+  "output/figures",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# ------------------------------------------------------------
+# Function to generate one grade-specific heatmap
+# ------------------------------------------------------------
+
+make_grade_hallmark_heatmap <- function(
+  grade,
+  output_file,
+  width = 2200,
+  height = 1600,
+  res = 200
+) {
+
+  # Select metadata for the requested grade and order by TME
+  grade_metadata <- metadata |>
+    filter(
+      ieo_grade == grade,
+      sample %in% hallmark_singscore$sample
+    ) |>
+    distinct(sample, .keep_all = TRUE) |>
+    mutate(
+      tme_addition = factor(
+        tme_addition,
+        levels = c("No", "Yes")
+      )
+    ) |>
+    arrange(
+      tme_addition,
+      generic_name,
+      sample
+    )
+
+  if (nrow(grade_metadata) == 0) {
+    stop("No samples found for grade: ", grade)
+  }
+
+  # Extract scores and enforce metadata-defined sample order
+  grade_scores <- hallmark_singscore |>
+    filter(sample %in% grade_metadata$sample) |>
+    arrange(match(sample, grade_metadata$sample))
+
+  stopifnot(
+    identical(
+      grade_scores$sample,
+      grade_metadata$sample
+    )
+  )
+
+  # Signature × sample matrix
+  score_mat <- grade_scores |>
+    column_to_rownames("sample") |>
+    as.matrix() |>
+    t()
+
+  rownames(score_mat) <- rownames(score_mat) |>
+    str_remove("^HALLMARK_") |>
+    str_replace_all("_", " ")
+
+  # Row-wise scaling within the selected grade
+  score_mat_z <- t(scale(t(score_mat)))
+
+  # Remove signatures with zero variance within this grade
+  keep_signatures <- apply(
+    score_mat_z,
+    1,
+    \(x) all(is.finite(x))
+  )
+
+  score_mat_z <- score_mat_z[
+    keep_signatures,
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(score_mat_z) == 0) {
+    stop(
+      "No signatures with non-zero variance for grade: ",
+      grade
+    )
+  }
+
+  # Top annotation
+  column_ha <- HeatmapAnnotation(
+    `TME addition` = grade_metadata$tme_addition,
+    col = list(
+      `TME addition` = c(
+        "No" = "#0072B2",
+        "Yes" = "#D55E00"
+      )
+    ),
+    annotation_name_side = "left",
+    na_col = "#E5E5E5"
+  )
+
+  # Symmetric colour scale
+  z_limit <- max(abs(score_mat_z), na.rm = TRUE)
+
+  score_col_fun <- circlize::colorRamp2(
+    c(-z_limit, 0, z_limit),
+    c("#2166AC", "white", "#B2182B")
+  )
+
+
+  hallmark_heatmap <- Heatmap(
+    score_mat_z,
+    name = "Row Z-score",
+    col = score_col_fun,
+
+    top_annotation = column_ha,
+
+    cluster_rows = TRUE,
+    cluster_columns = FALSE,
+
+    # Visually separate No and Yes samples
+    #column_split = grade_metadata$tme_addition,
+    #cluster_column_slices = FALSE,
+    #column_gap = grid::unit(3, "mm"),
+
+    show_row_names = TRUE,
+    show_column_names = TRUE,
+
+    row_names_gp = grid::gpar(fontsize = 7),
+    column_names_gp = grid::gpar(fontsize = 8),
+    column_names_rot = 90,
+
+    column_title = paste0(
+      grade,
+      "-grade Hallmark signature activity"
+    ),
+    row_title = "Hallmark signatures",
+
+    border = TRUE,
+    use_raster = TRUE,
+    raster_quality = 3,
+
+    heatmap_legend_param = list(
+      title = "Row\nZ-score",
+      at = c(-z_limit, 0, z_limit),
+      labels = round(c(-z_limit, 0, z_limit), 1)
+    )
+  )
+
+  # Display
+  draw(
+    hallmark_heatmap,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right",
+    merge_legends = TRUE
+  )
+
+  # Save
+  png(
+    output_file,
+    width = width,
+    height = height,
+    res = res
+  )
+
+  draw(
+    hallmark_heatmap,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right",
+    merge_legends = TRUE
+  )
+
+  dev.off()
+
+  invisible(hallmark_heatmap)
+}
+
+
+# ============================================================
+# High-grade heatmap
+# ============================================================
+
+hallmark_heatmap_high <- make_grade_hallmark_heatmap(
+  grade = "High",
+  output_file = "output/figures/hallmark_heatmap_high_grade.png"
+)
+
+
+# ============================================================
+# Low-grade heatmap
+# ============================================================
+
+hallmark_heatmap_low <- make_grade_hallmark_heatmap(
+  grade = "Low",
+  output_file = "output/figures/hallmark_heatmap_low_grade.png"
+)
+
+```
+
+
+## 9. Paired TME-Addition Comparisons
+
+This section compares matched biological samples with and without TME addition within each IEO grade group. The paired structure is important: each difference is calculated within the same biological sample identity, reducing confounding from baseline sample-to-sample variability.
+
+```{r}
+
+library(tidyverse)
+library(rstatix)
+
+# ============================================================
+# 1. Prepare Hallmark scores and metadata
+# ============================================================
+
+meta_hallmark <- hallmark_singscore |>
+  left_join(
+    metadata,
+    by = "sample"
+  )
+
+signature_cols <- intersect(
+  names(hallmark_signatures),
+  names(meta_hallmark)
+)
+
+stopifnot(length(signature_cols) > 0)
+
+
+# ============================================================
+# 2. Convert Hallmark scores to long format
+# ============================================================
+
+hallmark_long <- meta_hallmark |>
+  select(
+    sample,
+    generic_name,
+    tme_addition,
+    ieo_grade,
+    all_of(signature_cols)
+  ) |>
+  pivot_longer(
+    cols = all_of(signature_cols),
+    names_to = "signature",
+    values_to = "score"
+  ) |>
+  filter(
+    !is.na(score),
+    !is.na(generic_name),
+    tme_addition %in% c("Yes", "No"),
+    ieo_grade %in% c("Low", "High")
+  ) |>
+  mutate(
+    tme_addition = factor(
+      tme_addition,
+      levels = c("Yes", "No")
+    ),
+    ieo_grade = factor(
+      ieo_grade,
+      levels = c("Low", "High")
+    )
+  )
+
+
+# ============================================================
+# 3. Build explicit paired differences
+# ============================================================
+
+hallmark_paired <- hallmark_long |>
+  select(
+    ieo_grade,
+    signature,
+    generic_name,
+    tme_addition,
+    score
+  ) |>
+  distinct() |>
+  group_by(
+    ieo_grade,
+    signature,
+    generic_name
+  ) |>
+  filter(
+    all(c("Yes", "No") %in% tme_addition)
+  ) |>
+  ungroup() |>
+  arrange(
+    ieo_grade,
+    signature,
+    generic_name,
+    tme_addition
+  )
+
+hallmark_differences <- hallmark_paired |>
+  pivot_wider(
+    names_from = tme_addition,
+    values_from = score
+  ) |>
+  mutate(
+    difference = Yes - No
+  )
+
+# Number of complete biological pairs in each grade
+hallmark_pair_counts <- hallmark_differences |>
+  distinct(
+    ieo_grade,
+    generic_name
+  ) |>
+  count(
+    ieo_grade,
+    name = "n_pairs"
+  )
+
+hallmark_pair_counts
+
+
+# ============================================================
+# 4. Normality of paired differences
+# ============================================================
+hallmark_normality <- hallmark_paired |>
+  select(
+    ieo_grade,
+    signature,
+    generic_name,
+    tme_addition,
+    score
+  ) |>
+  pivot_wider(
+    names_from = tme_addition,
+    values_from = score
+  ) |>
+  mutate(
+    difference = Yes - No
+  ) |>
+  group_by(
+    ieo_grade,
+    signature
+  ) |>
+  shapiro_test(difference) |>
+  ungroup() |>
+  rename(
+    shapiro_w = statistic,
+    shapiro_p = p
+  ) |>
+  mutate(
+    normality = if_else(
+      shapiro_p > 0.05,
+      "Approximately normal",
+      "Non-normal"
+    )
+  )
+
+hallmark_normality
+
+table(hallmark_normality$normality)
+
+
+```
+
+
+## 10. Statistical Test Selection and Result Tables
+
+This section checks whether paired differences are approximately normal and then reports paired t-test or Wilcoxon results as appropriate. The goal is to keep the statistical choice transparent while preserving the complete paired-score table for interpretation.
+
+```{r}
+
+# ============================================================
+# Run both paired tests
+# ============================================================
+
+hallmark_ttest <- hallmark_paired |>
+  group_by(ieo_grade, signature) |>
+  t_test(
+    score ~ tme_addition,
+    paired = TRUE,
+    detailed = TRUE
+  ) |>
+  ungroup() |>
+  select(
+    ieo_grade,
+    signature,
+    group1,
+    group2,
+    estimate,
+    conf.low,
+    conf.high,
+    statistic,
+    df,
+    p
+  ) |>
+  rename(
+    t_estimate = estimate,
+    t_conf_low = conf.low,
+    t_conf_high = conf.high,
+    t_statistic = statistic,
+    t_df = df,
+    t_p = p
+  )
+
+
+hallmark_wilcox <- hallmark_paired |>
+  group_by(ieo_grade, signature) |>
+  wilcox_test(
+    score ~ tme_addition,
+    paired = TRUE,
+    exact = FALSE,
+    detailed = TRUE
+  ) |>
+  ungroup() |>
+  select(
+    ieo_grade,
+    signature,
+    statistic,
+    p
+  ) |>
+  rename(
+    wilcox_statistic = statistic,
+    wilcox_p = p
+  )
+
+# ============================================================
+# Select t-test or Wilcoxon according to normality
+# ============================================================
+
+hallmark_selected_tests <- hallmark_normality |>
+  left_join(
+    hallmark_ttest,
+    by = c("ieo_grade", "signature")
+  ) |>
+  left_join(
+    hallmark_wilcox,
+    by = c("ieo_grade", "signature")
+  ) |>
+  mutate(
+    test = if_else(
+      normality == "Approximately normal",
+      "Paired t-test",
+      "Paired Wilcoxon"
+    ),
+    statistic = if_else(
+      test == "Paired t-test",
+      t_statistic,
+      wilcox_statistic
+    ),
+    p = if_else(
+      test == "Paired t-test",
+      t_p,
+      wilcox_p
+    )
+  ) |>
+  group_by(ieo_grade) |>
+  adjust_pvalue(
+    p.col = "p",
+    output.col = "p.adj",
+    method = "BH"
+  ) |>
+  add_significance(
+    p.col = "p.adj"
+  ) |>
+  ungroup() |>
+  arrange(
+    ieo_grade,
+    p.adj
+  )
+
+hallmark_summary <- hallmark_paired |>
+  select(
+    ieo_grade,
+    signature,
+    generic_name,
+    tme_addition,
+    score
+  ) |>
+  pivot_wider(
+    names_from = tme_addition,
+    values_from = score
+  ) |>
+  mutate(
+    difference = Yes - No
+  ) |>
+  group_by(ieo_grade, signature) |>
+  summarise(
+    n_pairs = n(),
+    mean_no = mean(No),
+    mean_yes = mean(Yes),
+    median_no = median(No),
+    median_yes = median(Yes),
+    mean_difference = mean(difference),
+    median_difference = median(difference),
+    .groups = "drop"
+  ) |>
+  mutate(
+    direction = case_when(
+      mean_difference > 0 ~ "Higher with TME",
+      mean_difference < 0 ~ "Lower with TME",
+      TRUE ~ "No change"
+    )
+  )
+
+hallmark_results <- hallmark_selected_tests |>
+  left_join(
+    hallmark_summary,
+    by = c("ieo_grade", "signature")
+  ) |>
+  select(
+    ieo_grade,
+    signature,
+    n_pairs,
+    normality,
+    shapiro_w,
+    shapiro_p,
+    test,
+    group1,
+    group2,
+    mean_no,
+    mean_yes,
+    mean_difference,
+    median_difference,
+    direction,
+    statistic,
+    p,
+    p.adj,
+    p.adj.signif
+  ) |>
+  arrange(
+    ieo_grade,
+    p.adj
+  )
+
+hallmark_results |>
+  filter(p.adj < 0.05)
+
+high_hallmark_results <- hallmark_results |>
+  filter(p.adj < 0.05, ieo_grade == "High")
+high_hallmark_results
+
+low_hallmark_results <- hallmark_results |>
+  filter(p.adj < 0.05, ieo_grade == "Low")
+low_hallmark_results
+
+```
+
+## 11. Final Plots and Exported Outputs
+
+This section produces the final pathway-level summaries, figures, and result tables. These outputs are the files to use for review, reporting, and downstream interpretation of Hallmark activity changes.
+
+```{r}
+
+
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+make_grade_hallmark_heatmap <- function(
+  grade,
+  hallmark_results,
+  output_file
+) {
+
+  # Colour-blind-friendly annotation palettes
+  effect_colors <- c(
+    "Higher with TME" = "#ff6f00",
+    "Lower with TME"  = "#6200b2",
+    "Not significant" = "#D3D3D3"
+  )
+
+  tme_colors <- c(
+    "No"  = "#676767",
+    "Yes" = "#009E73"
+  )
+
+  # Prepare and order sample metadata
+  grade_metadata <- metadata |>
+    filter(
+      ieo_grade == grade,
+      sample %in% hallmark_singscore$sample
+    ) |>
+    distinct(sample, .keep_all = TRUE) |>
+    mutate(
+      tme_addition = factor(
+        tme_addition,
+        levels = c("No", "Yes")
+      )
+    ) |>
+    arrange(tme_addition, generic_name, sample)
+
+  # Construct the signature-by-sample matrix
+  score_mat <- hallmark_singscore |>
+    filter(sample %in% grade_metadata$sample) |>
+    arrange(match(sample, grade_metadata$sample)) |>
+    column_to_rownames("sample") |>
+    as.matrix() |>
+    t()
+
+  # Remove the Hallmark prefix
+  rownames(score_mat) <- str_remove(
+    rownames(score_mat),
+    "^HALLMARK_"
+  )
+
+  # Standardize each signature across samples
+  score_mat_z <- t(scale(t(score_mat)))
+
+  # Remove signatures with undefined row Z-scores
+  score_mat_z <- score_mat_z[
+    apply(score_mat_z, 1, \(x) all(is.finite(x))),
+    ,
+    drop = FALSE
+  ]
+
+  # Format Hallmark names for display
+  hallmark_labels <- rownames(score_mat_z) |>
+    str_replace_all("_", " ")
+
+  # Align statistical results to heatmap rows
+  row_statistics <- tibble(
+    signature = rownames(score_mat_z)
+  ) |>
+    left_join(
+      hallmark_results |>
+        filter(ieo_grade == grade) |>
+        mutate(
+          signature = str_remove(
+            signature,
+            "^HALLMARK_"
+          )
+        ) |>
+        select(
+          signature,
+          mean_difference,
+          p.adj
+        ),
+      by = "signature"
+    ) |>
+    mutate(
+      `TME effect` = case_when(
+        !is.na(p.adj) &
+          p.adj < 0.05 &
+          mean_difference > 0 ~ "Higher with TME",
+
+        !is.na(p.adj) &
+          p.adj < 0.05 &
+          mean_difference < 0 ~ "Lower with TME",
+
+        TRUE ~ "Not significant"
+      ),
+      `TME effect` = factor(
+        `TME effect`,
+        levels = c(
+          "Higher with TME",
+          "Lower with TME",
+          "Not significant"
+        )
+      )
+    )
+
+  # Row annotation indicating direction of the TME effect
+  effect_ha <- rowAnnotation(
+    `TME effect` = row_statistics$`TME effect`,
+    col = list(
+      `TME effect` = effect_colors
+    ),
+    simple_anno_size = unit(4, "mm"),
+    annotation_legend_param = list(
+      `TME effect` = list(
+        at = c(
+          "Higher with TME",
+          "Lower with TME",
+          "Not significant"
+        ),
+        ncol = 1
+      )
+    )
+  )
+
+  # Column annotation indicating TME addition status
+  top_ha <- HeatmapAnnotation(
+    `TME addition` = grade_metadata$tme_addition,
+    col = list(
+      `TME addition` = tme_colors
+    ),
+    simple_anno_size = unit(4, "mm"),
+    annotation_legend_param = list(
+      `TME addition` = list(
+        at = c("No", "Yes"),
+        ncol = 1
+      )
+    )
+  )
+
+  # Use a symmetric colour scale around zero
+  z_limit <- max(abs(score_mat_z), na.rm = TRUE)
+
+  ht <- Heatmap(
+    score_mat_z,
+    name = "Row Z-score",
+    col = colorRamp2(
+      c(-z_limit, 0, z_limit),
+      c("#3B75AF", "#F7F7F7", "#C94C4C")
+    ),
+    top_annotation = top_ha,
+    right_annotation = effect_ha,
+    cluster_rows = TRUE,
+    cluster_columns = FALSE,
+    row_labels = hallmark_labels,
+    row_names_side = "right",
+    row_names_gp = gpar(fontsize = 7),
+    column_names_rot = 90,
+    column_names_gp = gpar(fontsize = 7),
+    column_title = paste0(
+      grade,
+      "-grade Hallmark signature activity"
+    ),
+    border = TRUE,
+    heatmap_legend_param = list(
+      color_bar = "continuous",
+      legend_direction = "vertical"
+    )
+  )
+
+  # Display in the active graphics device
+  draw(
+    ht,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right",
+    merge_legends = TRUE,
+    legend_grouping = "original"
+  )
+
+  # Save the heatmap
+  png(
+    filename = output_file,
+    width = 2200,
+    height = 1600,
+    res = 200
+  )
+
+  draw(
+    ht,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right",
+    merge_legends = TRUE,
+    legend_grouping = "original"
+  )
+
+  dev.off()
+
+  invisible(ht)
+}
+
+make_grade_hallmark_heatmap(
+  grade = "High",
+  hallmark_results = hallmark_results,
+  output_file = "output/figures/hallmark_heatmap_high_grade.png"
+)
+
+make_grade_hallmark_heatmap(
+  grade = "Low",
+  hallmark_results = hallmark_results,
+  output_file = "output/figures/hallmark_heatmap_low_grade.png"
+)
+
+```
