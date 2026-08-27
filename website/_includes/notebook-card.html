@@ -1,0 +1,15 @@
+{% assign repo_url = "https://github.com/Thokas99/Useful_code" %}
+{% assign source_url = repo_url | append: "/blob/main/" | append: include.notebook.path %}
+{% assign raw_url = "https://raw.githubusercontent.com/Thokas99/Useful_code/main/" | append: include.notebook.path %}
+<article class="notebook-card">
+  <h3>{{ include.notebook.title }}</h3>
+  <p class="catalog-meta">
+    <span class="catalog-badge">{{ include.notebook.template_class }}</span>
+    <span class="catalog-badge">{{ include.notebook.status }}</span>
+  </p>
+  <p>{{ include.notebook.description }}</p>
+  <div class="catalog-actions">
+    <a class="btn btn-primary" href="{{ source_url }}" target="_blank" rel="noopener">View on GitHub</a>
+    <a class="btn" href="{{ raw_url }}" target="_blank" rel="noopener">Download .qmd</a>
+  </div>
+</article>

@@ -1,0 +1,226 @@
+single_cell:
+  title: Single-cell
+  slug: single-cell
+  description: Seurat and Python workflows for object creation, QC, normalization, scoring, markers, trajectories, dynamics, and network analysis.
+  representative: Seurat QC, Harmony, UCell, and trajectory workflows
+  notebooks:
+    - title: Create a Seurat object
+      path: templates/single_cell/create_object.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Create one RNA Seurat object from a feature-by-cell count matrix and aligned cell metadata, with explicit identifier checks.
+    - title: Single-cell quality control
+      path: templates/single_cell/qc.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Apply transparent cell-level QC thresholds to an existing Seurat object and save the filtered object.
+    - title: Doublet detection with scDblFinder
+      path: templates/single_cell/doublets_scdblfinder.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Call doublets with scDblFinder, attach the calls to a Seurat object, and keep the exclusion policy explicit.
+    - title: Log-normalization and variable features
+      path: templates/single_cell/normalization_log.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Normalize a filtered RNA Seurat object, identify variable features, scale the selected assay, and run PCA.
+    - title: SCTransform normalization
+      path: templates/single_cell/normalization_sct.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Normalize a filtered Seurat object with SCTransform while exposing the assay, covariates, and feature-retention decisions.
+    - title: Harmony batch integration
+      path: templates/single_cell/harmony.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Integrate a preprocessed PCA-ready Seurat object with Harmony using one explicit batch variable.
+    - title: UCell signature scoring
+      path: templates/single_cell/ucell.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Score directional gene signatures with UCell while retaining signature coverage and score construction in the notebook.
+    - title: CytoTRACE2 cell potency
+      path: templates/single_cell/cytotrace2.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Run CytoTRACE2 on raw RNA counts, attach potency outputs to a Seurat object, and check cell-ID alignment.
+    - title: Single-cell marker comparison
+      path: templates/single_cell/markers_cell_level.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Compare two explicitly named cell groups with Seurat FindMarkers and export a compact marker table.
+    - title: Slingshot trajectory inference
+      path: templates/single_cell/slingshot.qmd
+      template_class: API / TUTORIAL REMINDER
+      status: draft
+      description: Show the current Slingshot reduced-dimension, cluster-label, pseudotime, and curve-weight calls as a concise API reminder.
+    - title: tradeSeq trajectory-associated testing
+      path: templates/single_cell/tradeseq.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Fit negative-binomial tradeSeq GAMs to raw counts using an explicit trajectory and pseudotime contract.
+    - title: scVelo RNA velocity
+      path: templates/single_cell/scvelo.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Compute RNA velocity from an AnnData object with cell-aligned spliced and unspliced layers using the dynamical model.
+    - title: CellRank velocity-kernel fate inference
+      path: templates/single_cell/cellrank.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Combine velocity and connectivity kernels in CellRank and run GPCCA fate inference on an AnnData object.
+    - title: Python decoupler ULM activity inference
+      path: templates/single_cell/decoupler.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Infer transcription-factor or pathway activity with Python decoupler ULM from AnnData expression and a prior-knowledge network.
+    - title: hdWGCNA co-expression modules
+      path: templates/single_cell/hdwgcna.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Construct co-expression modules and module eigengenes with hdWGCNA from a processed Seurat object.
+    - title: scCellFie metabolic activity
+      path: templates/single_cell/sccellfie.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Estimate metabolic-task activity with scCellFie from AnnData and save an enriched object plus grouped report.
+
+bulk_rna:
+  title: Bulk RNA
+  slug: bulk-rna
+  description: Count-aware edgeR import and QC, differential-expression reminders, ranked enrichment, and sample-level gene-set scoring.
+  representative: tximport/edgeR, GSEA, singscore, and GSVA
+  notebooks:
+    - title: tximport to edgeR
+      path: templates/bulk_rna/tximport_edger.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Convert a gene-level tximport result into an edgeR DGEList with explicit gene IDs, sample alignment, and library-size checks.
+    - title: Bulk RNA QC and normalization
+      path: templates/bulk_rna/qc_normalization_edger.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Inspect sample quality, filter lowly expressed genes, estimate library-composition normalization, and create logCPM values.
+    - title: Differential expression with edgeR
+      path: templates/bulk_rna/differential_expression_edger.qmd
+      template_class: API / TUTORIAL REMINDER
+      status: draft
+      description: Provide a compact edgeR quasi-likelihood reminder for an explicit biological contrast from a filtered normalized DGEList.
+    - title: Ranked gene-set enrichment
+      path: templates/bulk_rna/gsea.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Run GO Biological Process and optional KEGG GSEA from a complete ranked gene-level statistic table.
+    - title: Sample-level signature scoring with singscore
+      path: templates/bulk_rna/singscore.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Score a directional gene signature separately in each sample using within-sample gene ranks.
+    - title: Sample-level gene-set activity with GSVA
+      path: templates/bulk_rna/gsva.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Transform a gene-by-sample expression matrix into gene-set-by-sample activity scores with GSVA.
+
+scatac:
+  title: scATAC
+  slug: scatac
+  description: Signac object construction, fragment-aware QC, TF-IDF/LSI, motif enrichment, and a chromVAR API reminder.
+  representative: Signac QC, LSI, motif enrichment, and chromVAR
+  notebooks:
+    - title: Create a Signac scATAC object
+      path: templates/scatac/create_object.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Create a Seurat object with a Signac ChromatinAssay from peak counts, aligned metadata, fragments, and genome annotation.
+    - title: Fragment-aware scATAC quality control
+      path: templates/scatac/qc.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Compute fragment-aware ATAC QC metrics, inspect them by sample, apply an explicit baseline filter, and save the object.
+    - title: TF-IDF, LSI, and clustering
+      path: templates/scatac/lsi_clustering.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Run the source-backed Signac TF-IDF, SVD, neighbor, clustering, and UMAP representation path.
+    - title: Motif enrichment with FindMotifs
+      path: templates/scatac/motif_enrichment_findmotifs.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Add JASPAR motif matches and test enrichment in a selected foreground peak set against an explicit background universe.
+    - title: chromVAR motif deviations
+      path: templates/scatac/chromvar.qmd
+      template_class: API / TUTORIAL REMINDER
+      status: draft
+      description: Provide a minimal chromVAR API reminder for estimating cell-level motif deviation scores.
+
+multiome:
+  title: Multiome
+  slug: multiome
+  description: Paired RNA/ATAC object construction, weighted nearest neighbors, peak–gene linkage, and directional label transfer.
+  representative: WNN, peak–gene linkage, and RNA-to-ATAC label transfer
+  notebooks:
+    - title: Create a paired RNA/ATAC object
+      path: templates/multiome/create_object.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Create one Seurat object with matched RNA and Signac ATAC assays while making cell matching explicit.
+    - title: Paired RNA/ATAC weighted nearest neighbors
+      path: templates/multiome/wnn.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Build RNA and ATAC representations, combine them with weighted nearest neighbors, and cluster the paired object.
+    - title: RNA–ATAC peak–gene linkage
+      path: templates/multiome/rna_atac_linkage.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Use Signac LinkPeaks to estimate statistical associations between RNA expression and nearby ATAC peaks.
+    - title: RNA-to-ATAC label transfer
+      path: templates/multiome/rna_to_atac_label_transfer.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Transfer labels from an RNA reference to an ATAC query through GeneActivity and shared gene-space anchors.
+
+mofa:
+  title: Multi-omics / MOFA
+  slug: mofa
+  description: MOFA2 view preparation, model fitting, diagnostics, and post hoc interpretation across named multi-omics views.
+  representative: view preparation, fitting, diagnostics, and interpretation
+  notebooks:
+    - title: Prepare MOFA2 views
+      path: templates/multiomics/mofa/prepare_views.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Prepare a named list of modality-appropriate numeric matrices using a transparent sample-intersection and feature-selection baseline.
+    - title: Fit a MOFA2 model
+      path: templates/multiomics/mofa/fit.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Train a MOFA2 model from prepared named views and record the choices needed to reproduce the fit.
+    - title: MOFA2 diagnostics
+      path: templates/multiomics/mofa/diagnostics.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Load a fitted native MOFA2 model and check whether its latent structure is sensible before biological interpretation.
+    - title: Interpret a MOFA2 model
+      path: templates/multiomics/mofa/interpretation.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Interpret factor scores, feature weights, and optional metadata associations from a fitted MOFA2 model.
+
+biomarker_ml:
+  title: Biomarker machine learning
+  slug: biomarker-ml
+  description: Small-cohort sample-level biomarker classification and frozen model reporting with explicit held-out evaluation.
+  representative: brglm2 classification and frozen model reporting
+  notebooks:
+    - title: Binary classification with brglm2
+      path: templates/machine_learning/biomarkers/binary_classification_brglm2.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Fit a small-cohort binary biomarker classifier with a fixed split, training-only preprocessing, resampled feature selection, and held-out evaluation.
+    - title: Frozen model reporting
+      path: templates/machine_learning/biomarkers/model_reporting.qmd
+      template_class: SOURCE-BACKED WORKFLOW
+      status: draft
+      description: Read frozen model outputs and produce compact audit tables, a probability plot, and a feature-expression heatmap without refitting.

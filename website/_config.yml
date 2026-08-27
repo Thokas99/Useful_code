@@ -1,0 +1,21 @@
+title: Useful code
+description: A curated personal bioinformatics cookbook of reusable workflows
+url: https://thokas99.github.io
+baseurl: /Useful_code
+
+theme: just-the-docs
+repository: Thokas99/Useful_code
+
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  GitHub repository: https://github.com/Thokas99/Useful_code
+aux_links_new_tab: true
+
+gh_edit_link: true
+gh_edit_link_text: Edit this page on GitHub
+gh_edit_repository: https://github.com/Thokas99/Useful_code
+gh_edit_branch: main
+gh_edit_source: website
+gh_edit_view_mode: tree

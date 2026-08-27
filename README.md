@@ -3,6 +3,8 @@
 Useful code is a curated personal bioinformatics cookbook of reusable R,
 Python, and Quarto templates derived from real analytical workflows.
 
+Website: [thokas99.github.io/Useful_code](https://thokas99.github.io/Useful_code/)
+
 ## What this repository is
 
 The repository preserves small, understandable workflows together with the
