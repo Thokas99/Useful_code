@@ -1,0 +1,30 @@
+---
+title: "Miscellaneous"
+description: "Reusable scientific documentation and reporting resources."
+---
+
+Miscellaneous contains reusable scientific-workflow resources that do not define
+a biological or statistical method family.
+
+::: {.grid}
+
+::: {.g-col-12 .g-col-md-6 .resource-card}
+### [Scientific Methods documentation prompt](miscellaneous/prompts/scientific_methods_documentation_prompt.md)
+
+A comprehensive prompt for producing Methods-style documentation from existing
+computational biology repositories while preserving scientific code and
+provenance.
+:::
+
+::: {.g-col-12 .g-col-md-6 .resource-card}
+### [Quarto scientific-report template](https://github.com/Thokas99/Useful_code/blob/main/miscellaneous/quarto/scientific_report_template.md)
+
+A reusable Markdown reference for professional, self-contained Quarto HTML
+scientific reports and their render-quality checks. The source is linked on
+GitHub because it contains copy-ready executable Quarto examples.
+:::
+
+:::
+
+These are reporting and documentation resources, not analytical templates. See
+the [Miscellaneous index](miscellaneous/README.md) for their organization.

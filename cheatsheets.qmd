@@ -1,0 +1,17 @@
+---
+title: "Cheatsheets"
+description: "Compact scientific and method reference notes."
+---
+
+Cheatsheets are short conceptual and reference notes, distinct from the full
+canonical workflows under [Methods](methods.qmd).
+
+- [RNA-seq normalization cheatsheet](cheatsheets/rnaseq_normalization_cheatsheet.md)
+  — compact notes on count-aware normalization and transformed expression.
+- [Cheatsheet index](cheatsheets/README.md) — the repository-level reference
+  inventory.
+- [Quarto reporting guide on GitHub](https://github.com/Thokas99/Useful_code/blob/main/cheatsheets/quarto_guide.md)
+  — source-linked guidance containing copy-ready executable Quarto examples.
+
+These notes are reminders, not replacements for the documentation of the
+underlying statistical packages.

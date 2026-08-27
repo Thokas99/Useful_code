@@ -1,0 +1,181 @@
+project:
+  type: website
+  output-dir: _site
+  render:
+    - index.qmd
+    - methods.qmd
+    - examples.qmd
+    - cheatsheets.qmd
+    - miscellaneous.qmd
+    - about.qmd
+    - 404.qmd
+    - templates/README.md
+    - templates/**/README.md
+    - templates/**/*.qmd
+    - examples/**/README.md
+    - cheatsheets/README.md
+    - cheatsheets/rnaseq_normalization_cheatsheet.md
+    - miscellaneous/README.md
+    - miscellaneous/prompts/README.md
+    - miscellaneous/prompts/scientific_methods_documentation_prompt.md
+    - miscellaneous/quarto/README.md
+    - docs/ARCHITECTURE.md
+
+execute:
+  enabled: false
+
+website:
+  title: "Useful code"
+  site-url: https://thokas99.github.io/Useful_code/
+  description: "A curated personal bioinformatics cookbook of reusable R, Python, and Quarto workflows derived from real analytical projects."
+  repo-url: https://github.com/Thokas99/Useful_code
+  repo-branch: main
+  repo-actions: [source, issue]
+  bread-crumbs: true
+  page-navigation: true
+  back-to-top-navigation: true
+  reader-mode: true
+  search:
+    location: navbar
+    type: overlay
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - sidebar:methods
+      - href: examples.qmd
+        text: Examples
+      - href: cheatsheets.qmd
+        text: Cheatsheets
+      - href: miscellaneous.qmd
+        text: Miscellaneous
+      - href: about.qmd
+        text: About
+    right:
+      - icon: github
+        href: https://github.com/Thokas99/Useful_code
+        aria-label: GitHub repository
+  sidebar:
+    - id: methods
+      title: Methods
+      style: docked
+      collapse-level: 1
+      contents:
+        - text: Overview
+          href: methods.qmd
+        - section: Single-cell
+          contents:
+            - text: Overview
+              href: templates/single_cell/README.md
+            - text: Create object
+              href: templates/single_cell/create_object.qmd
+            - text: Quality control
+              href: templates/single_cell/qc.qmd
+            - text: Doublets — scDblFinder
+              href: templates/single_cell/doublets_scdblfinder.qmd
+            - text: Log normalization
+              href: templates/single_cell/normalization_log.qmd
+            - text: SCTransform
+              href: templates/single_cell/normalization_sct.qmd
+            - text: Harmony
+              href: templates/single_cell/harmony.qmd
+            - text: UCell
+              href: templates/single_cell/ucell.qmd
+            - text: CytoTRACE2
+              href: templates/single_cell/cytotrace2.qmd
+            - text: Cell-level markers
+              href: templates/single_cell/markers_cell_level.qmd
+            - text: Slingshot
+              href: templates/single_cell/slingshot.qmd
+            - text: tradeSeq
+              href: templates/single_cell/tradeseq.qmd
+            - text: scVelo
+              href: templates/single_cell/scvelo.qmd
+            - text: CellRank
+              href: templates/single_cell/cellrank.qmd
+            - text: decoupler
+              href: templates/single_cell/decoupler.qmd
+            - text: hdWGCNA
+              href: templates/single_cell/hdwgcna.qmd
+            - text: scCellFie
+              href: templates/single_cell/sccellfie.qmd
+        - section: Bulk RNA
+          contents:
+            - text: Overview
+              href: templates/bulk_rna/README.md
+            - text: tximport → edgeR
+              href: templates/bulk_rna/tximport_edger.qmd
+            - text: QC and normalization
+              href: templates/bulk_rna/qc_normalization_edger.qmd
+            - text: Differential expression
+              href: templates/bulk_rna/differential_expression_edger.qmd
+            - text: GSEA
+              href: templates/bulk_rna/gsea.qmd
+            - text: singscore
+              href: templates/bulk_rna/singscore.qmd
+            - text: GSVA
+              href: templates/bulk_rna/gsva.qmd
+        - section: scATAC
+          contents:
+            - text: Overview
+              href: templates/scatac/README.md
+            - text: Create object
+              href: templates/scatac/create_object.qmd
+            - text: Quality control
+              href: templates/scatac/qc.qmd
+            - text: LSI and clustering
+              href: templates/scatac/lsi_clustering.qmd
+            - text: Motif enrichment
+              href: templates/scatac/motif_enrichment_findmotifs.qmd
+            - text: chromVAR
+              href: templates/scatac/chromvar.qmd
+        - section: Multiome
+          contents:
+            - text: Overview
+              href: templates/multiome/README.md
+            - text: Create paired object
+              href: templates/multiome/create_object.qmd
+            - text: WNN
+              href: templates/multiome/wnn.qmd
+            - text: RNA–ATAC linkage
+              href: templates/multiome/rna_atac_linkage.qmd
+            - text: RNA→ATAC label transfer
+              href: templates/multiome/rna_to_atac_label_transfer.qmd
+        - section: Multi-omics / MOFA
+          contents:
+            - text: Overview
+              href: templates/multiomics/mofa/README.md
+            - text: Prepare views
+              href: templates/multiomics/mofa/prepare_views.qmd
+            - text: Fit
+              href: templates/multiomics/mofa/fit.qmd
+            - text: Diagnostics
+              href: templates/multiomics/mofa/diagnostics.qmd
+            - text: Interpretation
+              href: templates/multiomics/mofa/interpretation.qmd
+        - section: Biomarker ML
+          contents:
+            - text: Overview
+              href: templates/machine_learning/biomarkers/README.md
+            - text: Binary classification with brglm2
+              href: templates/machine_learning/biomarkers/binary_classification_brglm2.qmd
+            - text: Model reporting
+              href: templates/machine_learning/biomarkers/model_reporting.qmd
+
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    css: styles.scss
+    toc: true
+    toc-depth: 3
+    toc-location: right
+    anchor-sections: true
+    smooth-scroll: true
+    code-fold: true
+    code-summary: "Show code"
+    code-copy: true
+    code-overflow: wrap
+    link-external-newwindow: true
