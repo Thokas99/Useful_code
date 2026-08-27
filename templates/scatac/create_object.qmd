@@ -1,0 +1,134 @@
+---
+title: "Create a Signac scATAC Object"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Create one Seurat object containing a Signac `ChromatinAssay` from a peak-by-
+cell count matrix, aligned cell metadata, a tabix-indexed fragments file, and
+compatible genome annotation.
+
+## Inputs
+
+This template deliberately supports one input contract: a qs2-saved R matrix
+with peaks in rows and cells in columns, plus a metadata TSV with a `cell_id`
+column. It does not try to discover every 10x, Cell Ranger, or count-file
+layout.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(tibble)
+})
+
+counts_path <- "input/peak_counts.qs2"
+metadata_path <- "input/cell_metadata.tsv"
+fragments_path <- "input/fragments.tsv.gz"
+annotation_path <- "input/gene_annotation.qs2"
+output_object <- "output/scatac_created.qs2"
+alignment_table <- "output/scatac_cell_alignment.tsv"
+
+assay_name <- "ATAC"
+genome_build <- "hg38"
+peak_separator <- c(":", "-")
+min_cells <- 1L
+min_features <- 1L
+```
+
+The default `hg38` is a valid example, not a universal choice. Peak
+coordinates, the fragment file, gene annotations, sequence genome, and later
+motif resources must use compatible builds and chromosome naming.
+
+## Analysis
+
+```{r}
+counts <- qs2::qs_read(file = counts_path)
+metadata <- readr::read_tsv(metadata_path, show_col_types = FALSE)
+annotation <- qs2::qs_read(file = annotation_path)
+
+stopifnot(is.matrix(counts) || inherits(counts, "Matrix"))
+stopifnot(!is.null(rownames(counts)), !is.null(colnames(counts)))
+stopifnot(!anyDuplicated(rownames(counts)), !anyDuplicated(colnames(counts)))
+stopifnot(all(counts >= 0), all(is.finite(counts)))
+stopifnot("cell_id" %in% colnames(metadata), !anyDuplicated(metadata$cell_id))
+stopifnot(file.exists(fragments_path), file.exists(paste0(fragments_path, ".tbi")))
+
+shared_cells <- intersect(colnames(counts), metadata$cell_id)
+stopifnot(length(shared_cells) > 0)
+
+alignment <- tibble::tibble(
+  cell_id = c(setdiff(colnames(counts), shared_cells),
+              setdiff(metadata$cell_id, shared_cells)),
+  source = c(rep("count_matrix_only", length(setdiff(colnames(counts), shared_cells))),
+             rep("metadata_only", length(setdiff(metadata$cell_id, shared_cells))))
+)
+readr::write_tsv(alignment, alignment_table)
+
+counts <- counts[, shared_cells, drop = FALSE]
+metadata <- metadata[match(shared_cells, metadata$cell_id), , drop = FALSE]
+rownames(metadata) <- metadata$cell_id
+
+fragment_object <- Signac::CreateFragmentObject(
+  path = fragments_path,
+  cells = shared_cells,
+  validate.fragments = TRUE
+)
+
+chromatin_assay <- Signac::CreateChromatinAssay(
+  counts = counts,
+  sep = peak_separator,
+  genome = genome_build,
+  annotation = annotation,
+  fragments = fragment_object,
+  min.cells = min_cells,
+  min.features = min_features,
+  validate.fragments = TRUE
+)
+
+object <- Seurat::CreateSeuratObject(
+  counts = chromatin_assay,
+  assay = assay_name,
+  meta.data = metadata,
+  min.features = min_features
+)
+DefaultAssay(object) <- assay_name
+
+stopifnot(identical(colnames(object), shared_cells))
+stopifnot(inherits(object[[assay_name]], "ChromatinAssay"))
+stopifnot(length(Signac::Fragments(object[[assay_name]])) > 0)
+
+readr::write_tsv(
+  tibble::tibble(
+    cells = ncol(object),
+    peaks = nrow(object[[assay_name]]),
+    genome_build = genome_build,
+    fragments = fragments_path
+  ),
+  "output/scatac_created_summary.tsv"
+)
+qs2::qs_save(object, file = output_object)
+```
+
+## Method notes
+
+The matrix is explicitly feature-by-cell: peak identifiers are rows and cell
+barcodes are columns. Metadata row names must match the retained cell names
+exactly. The intersection and alignment TSV make dropped barcodes visible;
+unrelated barcodes are not silently unioned. A fragment file should be bgzip
+compressed and tabix indexed, with fragment barcodes matching the retained
+cells. The source workflow used `validate.fragments = FALSE` for a project
+input; this reusable template keeps validation enabled so an alignment problem
+is visible before downstream QC.

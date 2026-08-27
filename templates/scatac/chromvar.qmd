@@ -1,0 +1,79 @@
+---
+title: "scATAC chromVAR Motif Deviations"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `API / TUTORIAL REMINDER`
+
+::: {.callout-note}
+## API reminder
+
+No complete chromVAR workflow was found in the source repository when this
+template was created. This page is intentionally a minimal API reminder rather
+than a validated analysis workflow. Check the current Signac/chromVAR
+documentation before real use, especially for version-specific wrappers and
+assay storage.
+:::
+
+## What it does
+
+chromVAR estimates bias-corrected, per-cell deviations in accessibility for
+sets of genomic annotations such as motif matches. Use it when the question is
+cell-level motif activity variability, not enrichment of one selected peak set.
+
+## Minimal current API
+
+The current installed Signac 1.17.1 namespace does not export a
+`RunChromVAR()` wrapper. The minimal direct chromVAR route is therefore shown
+below. It starts from the motif-enabled assay created by
+`motif_enrichment_findmotifs.qmd`.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(chromVAR)
+  library(qs2)
+  library(readr)
+  library(tibble)
+})
+
+input_object <- "input/scatac_motifs.qs2"
+output_scores <- "output/scatac_chromvar_scores.tsv"
+assay_name <- "ATAC"
+
+object <- qs2::qs_read(file = input_object)
+stopifnot(inherits(object, "Seurat"), assay_name %in% Assays(object))
+stopifnot(inherits(Signac::Motifs(object[[assay_name]]), "Motif"))
+
+counts <- Seurat::GetAssayData(object, assay = assay_name, layer = "counts")
+motif_annotations <- Signac::GetMotifData(object, assay = assay_name, slot = "data")
+deviations <- chromVAR::computeDeviations(
+  object = counts,
+  annotations = t(motif_annotations)
+)
+scores <- chromVAR::deviationScores(deviations) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("motif_id")
+readr::write_tsv(scores, output_scores)
+head(scores)
+```
+
+## Outputs and decisions
+
+`deviationScores()` returns motif-by-cell deviation z-scores; the bias-corrected
+deviations are available with `chromVAR::deviations()`. Check that motif IDs,
+peak IDs, cell IDs, genome build, and GC-bias/background calculations are
+compatible. A motif deviation score is not proof of TF binding or causal
+regulation.
+
+Consult the current official Signac and chromVAR documentation for motif
+matching, background peaks, bias correction, parallelization, and any updated
+Seurat-assay integration before applying this reminder to real data.
