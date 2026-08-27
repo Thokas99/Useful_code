@@ -76,7 +76,7 @@ metrics$pct_reads_in_peaks <- 100 * metrics$peak_region_fragments / metrics$pass
 metrics$blacklist_ratio <- metrics$blacklist_region_fragments / metrics$peak_region_fragments
 rownames(metrics) <- metrics$cell_id
 
-metric_columns <- setdiff(colnames(metrics), colnames(object[[]]))
+metric_columns <- setdiff(colnames(metrics), c("cell_id", colnames(object[[]])))
 object <- Seurat::AddMetaData(object, metadata = metrics[, metric_columns, drop = FALSE])
 DefaultAssay(object) <- assay_name
 object <- Signac::NucleosomeSignal(object, assay = assay_name)
