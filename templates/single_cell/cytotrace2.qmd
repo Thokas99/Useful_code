@@ -1,0 +1,109 @@
+---
+title: "CytoTRACE2 cell potency"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Run CytoTRACE2 on raw RNA counts, attach the potency score and categorical
+potency output to a Seurat object, and check cell-ID alignment.
+
+## Inputs and parameters
+
+```{r}
+library(Seurat)
+library(CytoTRACE2)
+library(qs2)
+library(readr)
+library(ggplot2)
+
+input_object <- "input/seurat_object_qc.qs2"
+output_object <- "output/seurat_object_cytotrace2.qs2"
+output_scores <- "output/cytotrace2_scores.tsv"
+output_plot <- "output/cytotrace2_score.png"
+
+assay_name <- "RNA"
+counts_layer <- "counts"
+species <- "human"
+seed <- 1234
+ncores <- 1
+reduction_name <- "umap"
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+counts <- GetAssayData(object, assay = assay_name, layer = counts_layer)
+stopifnot(ncol(counts) == ncol(object))
+stopifnot(identical(colnames(counts), colnames(object)))
+
+set.seed(seed)
+cytotrace_result <- cytotrace2(
+  counts,
+  is_seurat = FALSE,
+  species = species,
+  seed = seed,
+  ncores = ncores
+)
+
+score <- cytotrace_result$CytoTRACE2_Score
+potency <- cytotrace_result$CytoTRACE2_Potency
+stopifnot(!is.null(names(score)), !is.null(names(potency)))
+stopifnot(all(colnames(object) %in% names(score)))
+stopifnot(all(colnames(object) %in% names(potency)))
+
+object[["cytotrace2_score"]] <- score[colnames(object)]
+object[["cytotrace2_potency"]] <- potency[colnames(object)]
+scores <- data.frame(
+  cell_id = colnames(object),
+  cytotrace2_score = object$cytotrace2_score,
+  cytotrace2_potency = object$cytotrace2_potency
+)
+```
+
+## Diagnostics
+
+```{r}
+dir.create(dirname(output_plot), recursive = TRUE, showWarnings = FALSE)
+print(summary(scores$cytotrace2_score))
+print(table(scores$cytotrace2_potency, useNA = "ifany"))
+if (reduction_name %in% Reductions(object)) {
+  p <- FeaturePlot(object, features = "cytotrace2_score", reduction = reduction_name)
+  ggsave(output_plot, p, width = 7, height = 5, dpi = 150)
+}
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_scores), recursive = TRUE, showWarnings = FALSE)
+write_tsv(scores, output_scores)
+qs2::qs_save(object, output_object)
+```
+
+## Method notes
+
+The source workflow applies CytoTRACE2 to raw RNA counts as an orthogonal
+potency estimate. Do not pass normalized or scaled values without confirming
+the package contract. The score is not a replacement for UCell, cell-cycle,
+CNV analysis, or trajectory inference. Record package/API versions and gene
+identifier conventions when validating this template.
+
+::: {.callout-note}
+## Validation required
+
+Verify the installed CytoTRACE2 API, the expected raw-count orientation,
+species resource, and returned cell-ID names on a representative object before
+using this template for analysis.
+:::

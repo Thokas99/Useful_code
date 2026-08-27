@@ -1,0 +1,119 @@
+---
+title: "Python decoupler ULM activity inference"
+format: html
+jupyter: python3
+execute:
+  echo: true
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Infer TF or pathway activity with Python decoupler ULM from an AnnData
+expression matrix and a long-format prior-knowledge network.
+
+## Input contract and parameters
+
+AnnData observations are cells and variables are genes. The network must have
+source, target, and weight columns. The selected expression layer must contain
+normalized expression or a justified contrast statistic.
+
+```{python}
+from pathlib import Path
+
+import anndata as ad
+import decoupler as dc
+import pandas as pd
+
+input_path = Path("input/expression.h5ad")
+network_path = Path("input/network.tsv")
+output_path = Path("output/decoupler_output.h5ad")
+score_path = Path("output/decoupler_scores.tsv")
+padj_path = Path("output/decoupler_padj.tsv")
+
+expression_layer = None
+method = "ulm"
+min_targets = 5
+network_name = "user-supplied-network"
+```
+
+## Analysis
+
+```{python}
+adata = ad.read_h5ad(input_path)
+network = pd.read_csv(network_path, sep="\t")
+if not {"source", "target", "weight"}.issubset(network.columns):
+    raise ValueError("Network must contain source, target, and weight columns.")
+if not adata.obs_names.is_unique or not adata.var_names.is_unique:
+    raise ValueError("AnnData observation and variable identifiers must be unique.")
+if method != "ulm":
+    raise ValueError("This template implements ULM only; use a separate template for another method.")
+
+dc.mt.ulm(
+    data=adata,
+    net=network,
+    layer=expression_layer,
+    tmin=min_targets,
+)
+
+scores = dc.pp.get_obsm(adata=adata, key="score_ulm")
+if not isinstance(scores, pd.DataFrame):
+    scores = scores.to_df() if hasattr(scores, "to_df") else pd.DataFrame(
+        scores,
+        index=adata.obs_names,
+    )
+scores.index.name = "cell_id"
+
+padj = None
+if "padj_ulm" in adata.obsm:
+    padj = dc.pp.get_obsm(adata=adata, key="padj_ulm")
+    if not isinstance(padj, pd.DataFrame):
+        padj = padj.to_df() if hasattr(padj, "to_df") else pd.DataFrame(
+            padj,
+            index=adata.obs_names,
+        )
+    padj.index.name = "cell_id"
+
+if not scores.index.equals(adata.obs_names):
+    raise ValueError("Decoupler score identifiers do not match AnnData cells.")
+
+adata.uns["decoupler_template"] = {
+    "method": method,
+    "network_name": network_name,
+    "network_path": str(network_path),
+    "min_targets": min_targets,
+}
+```
+
+## Diagnostics
+
+```{python}
+print(f"cells={adata.n_obs}, genes={adata.n_vars}, activities={scores.shape[1]}")
+print(scores.describe().T.head())
+if padj is not None:
+    print(f"adjusted p-value matrix: {padj.shape}")
+```
+
+## Outputs
+
+```{python}
+output_path.parent.mkdir(parents=True, exist_ok=True)
+score_path.parent.mkdir(parents=True, exist_ok=True)
+adata.write_h5ad(output_path)
+scores.reset_index().to_csv(score_path, sep="\t", index=False)
+if padj is not None:
+    padj.reset_index().to_csv(padj_path, sep="\t", index=False)
+```
+
+## Method notes
+
+The source bridge uses ULM and stores score and adjusted-p-value matrices in
+AnnData. This template keeps ULM explicit and does not substitute MLM.
+Network provenance, target filtering, input layer, and matrix orientation must
+be recorded. Activity scores are model-based inferences, not direct protein
+activity measurements. Consult the [current decoupler
+documentation](https://decoupler.readthedocs.io/en/latest/) for alternative
+methods and network conventions.

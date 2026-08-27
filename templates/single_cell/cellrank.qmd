@@ -1,0 +1,171 @@
+---
+title: "CellRank velocity-kernel fate inference"
+format: html
+jupyter: python3
+execute:
+  echo: true
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Consume an AnnData object produced by scVelo, combine a velocity kernel with a
+connectivity kernel, and run CellRank GPCCA fate inference. CellRank consumes
+velocity-derived transitions; it does not estimate RNA velocity itself.
+
+## Input contract and parameters
+
+The input must contain scVelo velocity information, a neighbor graph, an
+embedding, and a cluster column.
+
+```{python}
+from pathlib import Path
+
+import anndata as ad
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from cellrank.estimators import GPCCA
+from cellrank.kernels import ConnectivityKernel, VelocityKernel
+
+input_path = Path("input/scvelo_output.h5ad")
+output_path = Path("output/cellrank_output.h5ad")
+fate_path = Path("output/cellrank_fate_probabilities.tsv")
+driver_path = Path("output/cellrank_lineage_drivers.tsv")
+figure_dir = Path("output/cellrank_figures")
+
+cluster_key = "cluster"
+embedding = "umap"
+n_states = 3
+velocity_weight = 0.7
+connectivity_weight = 0.3
+schur_method = "krylov"
+initial_state_policy = "predict"  # "predict" or "column"
+initial_state_column = None
+terminal_state_policy = "predict"  # "predict" or "column"
+terminal_state_column = None
+allow_overlap = True
+fate_solver = "gmres"
+fate_preconditioner = "ilu"
+fate_n_jobs = 1
+seed = 1234
+```
+
+## Analysis
+
+```{python}
+adata = ad.read_h5ad(input_path)
+if cluster_key not in adata.obs:
+    raise KeyError(f"Missing required cluster column: {cluster_key}")
+if not {"Ms", "velocity"}.issubset(adata.layers):
+    raise KeyError("Input must contain scVelo Ms and velocity layers.")
+if "velocity_graph" not in adata.uns and "velocity_graph" not in adata.obsp:
+    raise KeyError("Input must contain the scVelo velocity graph.")
+if "connectivities" not in adata.obsp:
+    raise KeyError("Input must contain a Scanpy connectivity graph.")
+if f"X_{embedding}" not in adata.obsm:
+    raise KeyError(f"Input must contain X_{embedding}.")
+
+np.random.seed(seed)
+velocity_kernel = VelocityKernel(adata).compute_transition_matrix()
+connectivity_kernel = ConnectivityKernel(adata).compute_transition_matrix()
+combined_kernel = (
+    velocity_weight * velocity_kernel +
+    connectivity_weight * connectivity_kernel
+)
+
+estimator = GPCCA(combined_kernel)
+estimator.compute_schur(method=schur_method)
+estimator.compute_macrostates(n_states=n_states, cluster_key=cluster_key)
+
+if initial_state_policy == "predict":
+    estimator.predict_initial_states(allow_overlap=allow_overlap)
+elif initial_state_policy == "column":
+    if initial_state_column is None or initial_state_column not in adata.obs:
+        raise KeyError("A valid initial_state_column is required for column policy.")
+    estimator.set_initial_states(states=adata.obs[initial_state_column])
+else:
+    raise ValueError("initial_state_policy must be 'predict' or 'column'.")
+
+if terminal_state_policy == "predict":
+    estimator.predict_terminal_states(allow_overlap=allow_overlap)
+elif terminal_state_policy == "column":
+    if terminal_state_column is None or terminal_state_column not in adata.obs:
+        raise KeyError("A valid terminal_state_column is required for column policy.")
+    estimator.set_terminal_states(states=adata.obs[terminal_state_column])
+else:
+    raise ValueError("terminal_state_policy must be 'predict' or 'column'.")
+
+estimator.compute_fate_probabilities(
+    solver=fate_solver,
+    tol=1e-5,
+    preconditioner=fate_preconditioner,
+    n_jobs=fate_n_jobs,
+)
+
+fate = estimator.fate_probabilities
+if hasattr(fate, "to_df"):
+    fate_table = fate.to_df()
+else:
+    fate_table = pd.DataFrame(fate, index=adata.obs_names)
+fate_table.index.name = "cell_id"
+
+for column in fate_table.columns:
+    adata.obs[f"fate_{column}"] = fate_table[column].reindex(adata.obs_names).to_numpy()
+
+drivers = estimator.compute_lineage_drivers(seed=seed)
+```
+
+## Diagnostics
+
+```{python}
+figure_dir.mkdir(parents=True, exist_ok=True)
+estimator.plot_macrostates(basis=f"X_{embedding}", which="terminal", show=False)
+plt.savefig(figure_dir / "terminal_macrostates.png", bbox_inches="tight")
+plt.close()
+estimator.plot_fate_probabilities(
+    basis=f"X_{embedding}",
+    same_plot=False,
+    show=False,
+)
+plt.savefig(figure_dir / "fate_probabilities.png", bbox_inches="tight")
+plt.close()
+print(fate_table.describe())
+print(drivers.head())
+```
+
+## Outputs
+
+```{python}
+output_path.parent.mkdir(parents=True, exist_ok=True)
+fate_path.parent.mkdir(parents=True, exist_ok=True)
+driver_path.parent.mkdir(parents=True, exist_ok=True)
+adata.write_h5ad(output_path)
+fate_table.reset_index().to_csv(fate_path, sep="\t", index=False)
+drivers.to_csv(driver_path, sep="\t", index=False)
+```
+
+## Method notes
+
+The source workflow combines velocity and connectivity kernels, GPCCA,
+predicted initial/terminal states, fate probabilities, and lineage drivers.
+The kernel weights, number of states, cluster key, initial-state policy, and
+terminal-state policy are scientific parameters. For manually supplied state
+columns, use categorical labels with missing values for cells that are not in a
+state. A velocity kernel alone is not complete fate inference. No biological
+root or terminal label is hard-coded here.
+
+::: {.callout-warning}
+## State-selection warning
+
+Predicted states are model-derived and manually supplied states require
+biological justification. Review the coarse-grained transition structure and
+state membership before interpreting fate probabilities as biological destiny.
+:::
+
+For current estimator and kernel behavior, consult the [official CellRank
+documentation](https://cellrank.readthedocs.io/en/latest/) before adapting this
+template to a new release.

@@ -1,0 +1,90 @@
+---
+title: "SCTransform normalization"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Normalize a filtered Seurat object with SCTransform. The assay, covariates
+regressed, number of variable features, and retention of all genes are
+explicit.
+
+## Inputs and parameters
+
+```{r}
+library(Seurat)
+library(qs2)
+library(ggplot2)
+
+input_object <- "input/seurat_object_qc.qs2"
+output_object <- "output/seurat_object_sct.qs2"
+output_plot <- "output/sct_variable_features.png"
+
+assay_name <- "RNA"
+vars_to_regress <- character()
+n_variable_features <- 3000
+return_only_variable_genes <- FALSE
+n_pcs <- 30
+pca_reduction <- "pca"
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+DefaultAssay(object) <- assay_name
+regressors <- if (length(vars_to_regress) == 0) NULL else vars_to_regress
+
+object <- SCTransform(
+  object,
+  assay = assay_name,
+  vars.to.regress = regressors,
+  variable.features.n = n_variable_features,
+  return.only.var.genes = return_only_variable_genes,
+  verbose = FALSE
+)
+object <- RunPCA(
+  object,
+  assay = "SCT",
+  features = VariableFeatures(object, assay = "SCT"),
+  npcs = n_pcs,
+  reduction.name = pca_reduction,
+  verbose = FALSE
+)
+```
+
+## Diagnostics
+
+```{r}
+dir.create(dirname(output_plot), recursive = TRUE, showWarnings = FALSE)
+print(object)
+print(head(VariableFeatures(object), 20))
+print(length(VariableFeatures(object)))
+p <- VariableFeaturePlot(object, assay = "SCT")
+ggsave(output_plot, p, width = 7, height = 5, dpi = 150)
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(object, output_object)
+```
+
+## Method notes
+
+SCTransform is not log normalization with different syntax. Regression
+variables and the resulting assay are scientific decisions. The downstream
+Harmony template expects PCA computed on the assay selected there. The output
+is PCA-ready and contains the SCT assay plus its PCA reduction. Harmony is kept
+separate so the choice between log normalization and SCTransform remains
+visible.

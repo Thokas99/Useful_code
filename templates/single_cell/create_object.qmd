@@ -1,0 +1,108 @@
+---
+title: "Create a Seurat object"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Create one RNA Seurat object from a feature-by-cell count matrix and cell metadata. The matrix orientation and cell identifiers are checked explicitly.
+
+## Inputs
+
+Set the paths to an R-serialized count matrix and a tab-separated metadata table. The metadata table must contain one row per cell.
+
+```{r}
+library(Seurat)
+library(qs2)
+library(readr)
+
+counts_path <- "input/counts.qs2"
+metadata_path <- "input/metadata.tsv"
+cell_id_column <- "cell_id"
+assay_name <- "RNA"
+min_cells <- 3
+min_features <- 200
+mitochondrial_pattern <- "^MT-"
+output_object <- "output/seurat_object.qs2"
+output_metadata <- "output/seurat_metadata.tsv"
+```
+
+## Analysis
+
+```{r}
+counts <- qs2::qs_read(counts_path)
+metadata <- read_tsv(metadata_path, show_col_types = FALSE)
+metadata <- as.data.frame(metadata)
+
+stopifnot(is.matrix(counts) || inherits(counts, "Matrix"))
+stopifnot(!is.null(rownames(counts)), !is.null(colnames(counts)))
+stopifnot(cell_id_column %in% colnames(metadata))
+stopifnot(!anyNA(metadata[[cell_id_column]]))
+stopifnot(!anyDuplicated(colnames(counts)))
+stopifnot(!anyDuplicated(metadata[[cell_id_column]]))
+
+rownames(metadata) <- metadata[[cell_id_column]]
+metadata[[cell_id_column]] <- NULL
+
+stopifnot(setequal(colnames(counts), rownames(metadata)))
+metadata <- metadata[colnames(counts), , drop = FALSE]
+
+object <- CreateSeuratObject(
+  counts = counts,
+  assay = assay_name,
+  meta.data = metadata,
+  min.cells = min_cells,
+  min.features = min_features
+)
+
+object[["percent.mt"]] <- PercentageFeatureSet(
+  object,
+  assay = assay_name,
+  pattern = mitochondrial_pattern
+)
+```
+
+## Diagnostics
+
+```{r}
+print(object)
+feature_column <- paste0("nFeature_", assay_name)
+print(summary(object[[]][[feature_column]]))
+print(summary(object[[]][["percent.mt"]]))
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_metadata), recursive = TRUE, showWarnings = FALSE)
+
+qs2::qs_save(object, output_object)
+write_tsv(
+  cbind(cell_id = rownames(object[[]]), object[[]]),
+  output_metadata
+)
+```
+
+## Method notes
+
+The object-construction filters are not biological quality thresholds. Apply
+the QC template after checking the resulting distributions. Change the
+mitochondrial pattern for the organism and genome annotation.
+
+::: {.callout-note}
+## Practical note
+
+Seurat expects features in rows and cells in columns. Metadata rows must have
+the same unique cell names as the count-matrix columns; matching by position is
+not a safe substitute for exact identifier matching.
+:::

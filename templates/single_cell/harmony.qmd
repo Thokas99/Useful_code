@@ -1,0 +1,134 @@
+---
+title: "Harmony batch integration"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Integrate a preprocessed, merged, PCA-ready Seurat object with Harmony using one
+explicit batch variable. This initial canonical uses the active RunHarmony-style
+route.
+RPCA and Seurat IntegrateLayers are not included.
+
+## Input contract and parameters
+
+The input object must already have the selected assay normalized, scaled, and
+processed with PCA. Harmony is applied to PCA coordinates; it does not replace
+QC or normalization.
+
+```{r}
+library(Seurat)
+library(harmony)
+library(lisi)
+library(qs2)
+library(readr)
+library(ggplot2)
+
+input_object <- "input/seurat_object_pca.qs2"
+output_object <- "output/seurat_object_harmony.qs2"
+output_plot <- "output/harmony_batch.png"
+output_lisi <- "output/harmony_lisi.tsv"
+output_lisi_plot <- "output/harmony_lisi.png"
+
+assay_name <- "RNA"
+pca_reduction <- "pca"
+harmony_reduction <- "harmony"
+batch_column <- "sample_id"
+n_pcs <- 30
+max_iter <- 15
+cluster_resolution <- 0.5
+seed <- 1234
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+DefaultAssay(object) <- assay_name
+stopifnot(batch_column %in% colnames(object[[]]))
+stopifnot(pca_reduction %in% Reductions(object))
+stopifnot(ncol(Embeddings(object, pca_reduction)) >= n_pcs)
+
+object <- RunHarmony(
+  object = object,
+  group.by.vars = batch_column,
+  reduction = pca_reduction,
+  assay.use = assay_name,
+  dims.use = seq_len(n_pcs),
+  reduction.save = harmony_reduction,
+  max_iter = max_iter,
+  plot_convergence = TRUE,
+  verbose = TRUE
+)
+object <- FindNeighbors(object, reduction = harmony_reduction, dims = seq_len(n_pcs))
+object <- FindClusters(object, resolution = cluster_resolution, random.seed = seed)
+object <- RunUMAP(
+  object,
+  reduction = harmony_reduction,
+  dims = seq_len(n_pcs),
+  reduction.name = "umap_harmony",
+  seed.use = seed
+)
+```
+
+## Diagnostics
+
+```{r}
+dir.create(dirname(output_plot), recursive = TRUE, showWarnings = FALSE)
+p_batch <- DimPlot(
+  object,
+  reduction = "umap_harmony",
+  group.by = batch_column
+) + ggtitle("Harmony embedding by batch")
+ggsave(output_plot, p_batch, width = 7, height = 5, dpi = 150)
+print(table(object[[batch_column]][, 1], object$seurat_clusters))
+
+lisi_dimensions <- seq_len(min(n_pcs, ncol(Embeddings(object, harmony_reduction))))
+lisi_input <- as.data.frame(Embeddings(object, harmony_reduction)[, lisi_dimensions, drop = FALSE])
+lisi_metadata <- data.frame(batch = object[[batch_column]][, 1], row.names = rownames(lisi_input))
+lisi_table <- compute_lisi(lisi_input, lisi_metadata, "batch") |>
+  as.data.frame()
+lisi_table <- cbind(cell_id = rownames(lisi_table), lisi_table)
+print(summary(lisi_table$batch))
+
+p_lisi <- ggplot(lisi_table, aes(x = batch)) +
+  geom_histogram(bins = 30, fill = "grey80", color = "black") +
+  theme_bw() +
+  labs(x = "LISI", y = "Cells")
+ggsave(output_lisi_plot, p_lisi, width = 7, height = 5, dpi = 150)
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(object, output_object)
+write_tsv(lisi_table, output_lisi)
+```
+
+## Method notes
+
+The backbone is the complete active log-normalized Harmony route in a project
+workflow, with the LISI diagnostic idea from a second integration workflow.
+The default expects PCA computed from log-normalized, scaled RNA data. SCT is
+not silently substituted; set assay_name explicitly and verify the matching
+PCA state if using SCTransform. Inspect markers, known states, and
+pre/post-integration diagnostics for overcorrection.
+
+::: {.callout-note}
+## Workflow preference
+
+Integration should be justified by a batch-related problem and checked for
+overcorrection. In this template Harmony is the explicit log-normalized,
+PCA-based route; the source also contains an SCT/IntegrateLayers alternative,
+but that scientifically different preprocessing route is not duplicated here.
+:::

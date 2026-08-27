@@ -1,0 +1,115 @@
+---
+title: "scCellFie metabolic activity"
+format: html
+jupyter: python3
+execute:
+  echo: true
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Estimate metabolic-task activity with scCellFie from an AnnData object, retain
+the relevant count, batch, and neighborhood parameters, save the enriched
+object, and write a grouped report.
+
+## Input contract and parameters
+
+The input must contain the count column, batch column, neighbor graph, and
+grouping column named below.
+
+```{python}
+from pathlib import Path
+
+import anndata as ad
+import sccellfie
+
+input_path = Path("input/processed_single_cell.h5ad")
+output_path = Path("output/sccellfie_output.h5ad")
+summary_dir = Path("output/sccellfie_summary")
+
+organism = "human"
+counts_column = "n_counts"
+batch_key = "sample_id"
+group_column = "cluster"
+neighbors_key = "neighbors"
+n_neighbors = 10
+threshold_key = "sccellfie_threshold"
+smooth_cells = True
+alpha = 0.33
+chunk_size = 5000
+```
+
+## Analysis
+
+```{python}
+adata = ad.read_h5ad(input_path)
+required_obs = {counts_column, batch_key, group_column}
+missing_obs = required_obs.difference(adata.obs.columns)
+if missing_obs:
+    raise KeyError(f"Missing AnnData obs columns: {sorted(missing_obs)}")
+if neighbors_key not in adata.uns:
+    raise KeyError(f"Missing AnnData neighbor graph: {neighbors_key}")
+
+results = sccellfie.run_sccellfie_pipeline(
+    adata,
+    organism=organism,
+    sccellfie_data_folder=None,
+    n_counts_col=counts_column,
+    process_by_group=False,
+    groupby=None,
+    neighbors_key=neighbors_key,
+    n_neighbors=n_neighbors,
+    batch_key=batch_key,
+    threshold_key=threshold_key,
+    smooth_cells=smooth_cells,
+    alpha=alpha,
+    chunk_size=chunk_size,
+    disable_pbar=False,
+    save_folder=None,
+    save_filename=None,
+)
+
+metabolic_adata = results["adata"]
+metabolic_tasks = metabolic_adata.metabolic_tasks
+metabolic_tasks.obs["group_for_report"] = metabolic_tasks.obs[group_column].astype(str)
+report = sccellfie.reports.generate_report_from_adata(
+    metabolic_tasks,
+    group_by="group_for_report",
+    tissue_col=batch_key,
+    feature_name="metabolic_task",
+)
+```
+
+## Diagnostics
+
+```{python}
+print(metabolic_adata)
+print(metabolic_tasks)
+print(report.keys() if hasattr(report, "keys") else type(report))
+```
+
+## Outputs
+
+```{python}
+output_path.parent.mkdir(parents=True, exist_ok=True)
+summary_dir.mkdir(parents=True, exist_ok=True)
+metabolic_adata.write_h5ad(output_path)
+sccellfie.io.save_result_summary(
+    # The package's documented summary writer emits CSV report tables.
+    results_dict=report,
+    output_directory=str(summary_dir),
+)
+```
+
+## Method notes
+
+The source implementation runs scCellFie and treats the output as
+metabolic-task activity estimates, not direct flux measurements. The batch
+key, threshold key, neighborhood graph, smoothing, alpha, and chunk size are
+visible because they affect the computation. Imported metabolic scores are a
+separate interoperability stage. The package's report writer is an explicit
+CSV exception to the cookbook's TSV table convention.

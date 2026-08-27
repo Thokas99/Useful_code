@@ -1,0 +1,149 @@
+---
+title: "Single-cell quality control"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Apply transparent cell-level QC thresholds to an existing Seurat object and
+save the filtered object. Thresholds are visible and are not universal
+defaults.
+
+## Inputs and parameters
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(readr)
+library(dplyr)
+
+input_object <- "input/seurat_object.qs2"
+output_object <- "output/seurat_object_qc.qs2"
+output_metadata <- "output/qc_metadata.tsv"
+output_plot <- "output/qc_distributions.png"
+output_sample_plot <- "output/qc_distributions_by_sample.png"
+
+assay_name <- "RNA"
+sample_column <- "sample_id"
+mitochondrial_pattern <- "^MT-"
+mitochondrial_column <- "percent.mt"
+min_features <- 200
+max_features <- Inf
+min_counts <- 0
+max_counts <- Inf
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+DefaultAssay(object) <- assay_name
+
+feature_column <- paste0("nFeature_", assay_name)
+count_column <- paste0("nCount_", assay_name)
+stopifnot(all(c(feature_column, count_column) %in% colnames(object[[]])))
+
+if (!mitochondrial_column %in% colnames(object[[]])) {
+  object[[mitochondrial_column]] <- PercentageFeatureSet(
+    object,
+    assay = assay_name,
+    pattern = mitochondrial_pattern
+  )
+}
+
+metadata <- object[[]]
+metadata$qc_pass <- with(
+  metadata,
+  !is.na(metadata[[feature_column]]) &
+    !is.na(metadata[[count_column]]) &
+    !is.na(metadata[[mitochondrial_column]]) &
+    metadata[[feature_column]] >= min_features &
+    metadata[[feature_column]] <= max_features &
+    metadata[[count_column]] >= min_counts &
+    metadata[[count_column]] <= max_counts
+)
+
+object_qc <- subset(object, cells = rownames(metadata)[metadata$qc_pass])
+```
+
+## Diagnostics
+
+```{r}
+dir.create(dirname(output_plot), recursive = TRUE, showWarnings = FALSE)
+qc_summary <- data.frame(
+  cells_before = ncol(object),
+  cells_after = ncol(object_qc),
+  cells_removed = ncol(object) - ncol(object_qc),
+  fraction_pass = ncol(object_qc) / ncol(object)
+)
+print(qc_summary)
+print(table(metadata$qc_pass, useNA = "ifany"))
+
+p <- VlnPlot(
+  object,
+  features = c(feature_column, count_column, mitochondrial_column),
+  group.by = if (sample_column %in% colnames(object[[]])) sample_column else NULL,
+  ncol = 3,
+  pt.size = 0
+)
+ggsave(output_plot, p, width = 11, height = 4, dpi = 150)
+
+if (sample_column %in% colnames(metadata)) {
+  sample_summary <- metadata |>
+    group_by(sample = .data[[sample_column]]) |>
+    summarise(
+      cells_before = n(),
+      cells_after = sum(qc_pass),
+      fraction_pass = cells_after / cells_before,
+      median_nFeature = median(.data[[feature_column]], na.rm = TRUE),
+      median_nCount = median(.data[[count_column]], na.rm = TRUE),
+      median_percent_mt = median(.data[[mitochondrial_column]], na.rm = TRUE),
+      .groups = "drop"
+    )
+  print(sample_summary)
+  p_sample <- VlnPlot(
+    object,
+    features = c(feature_column, count_column, mitochondrial_column),
+    group.by = sample_column,
+    ncol = 3,
+    pt.size = 0
+  )
+  ggsave(output_sample_plot, p_sample, width = 12, height = 5, dpi = 150)
+}
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_metadata), recursive = TRUE, showWarnings = FALSE)
+write_tsv(cbind(cell_id = rownames(metadata), metadata), output_metadata)
+qs2::qs_save(object_qc, output_object)
+```
+
+## Method notes
+
+The source workflows use both fixed and MAD-derived thresholds. This template
+implements fixed thresholds only; a MAD policy should be a separate method.
+The saved object is the filtered object.
+
+::: {.callout-note}
+## Workflow preference
+
+I generally inspect QC distributions separately by sample before filtering,
+because a pooled threshold can hide sample-specific behavior. Fixed thresholds
+are transparent, but they are not biological constants. Consider feature count,
+total counts, mitochondrial fraction, doublet results, and biological context
+together. The source notebooks also used distribution-aware/MAD ideas, but the
+exact multiplier is deliberately left to the project rather than silently
+choosing between incompatible policies.
+:::

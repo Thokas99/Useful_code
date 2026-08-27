@@ -1,0 +1,101 @@
+---
+title: "Log-normalization and variable features"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Normalize a filtered RNA Seurat object with Seurat log normalization, identify
+variable features, scale the selected assay, and run PCA for downstream use.
+
+## Inputs and parameters
+
+```{r}
+library(Seurat)
+library(qs2)
+library(ggplot2)
+
+input_object <- "input/seurat_object_qc.qs2"
+output_object <- "output/seurat_object_log_normalized.qs2"
+output_plot <- "output/variable_features.png"
+
+assay_name <- "RNA"
+scale_factor <- 10000
+variable_feature_method <- "vst"
+n_variable_features <- 3000
+vars_to_regress <- NULL
+n_pcs <- 30
+pca_reduction <- "pca"
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+DefaultAssay(object) <- assay_name
+
+object <- NormalizeData(
+  object,
+  assay = assay_name,
+  normalization.method = "LogNormalize",
+  scale.factor = scale_factor,
+  verbose = FALSE
+)
+object <- FindVariableFeatures(
+  object,
+  assay = assay_name,
+  selection.method = variable_feature_method,
+  nfeatures = n_variable_features,
+  verbose = FALSE
+)
+
+object <- ScaleData(
+  object,
+  assay = assay_name,
+  features = VariableFeatures(object),
+  vars.to.regress = vars_to_regress,
+  verbose = FALSE
+)
+object <- RunPCA(
+  object,
+  assay = assay_name,
+  features = VariableFeatures(object),
+  npcs = n_pcs,
+  reduction.name = pca_reduction,
+  verbose = FALSE
+)
+```
+
+## Diagnostics
+
+```{r}
+dir.create(dirname(output_plot), recursive = TRUE, showWarnings = FALSE)
+print(head(VariableFeatures(object), 20))
+print(length(VariableFeatures(object)))
+p <- VariableFeaturePlot(object, assay = assay_name)
+ggsave(output_plot, p, width = 7, height = 5, dpi = 150)
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(object, output_object)
+```
+
+## Method notes
+
+This is the baseline log-normalized route. The scale factor, feature
+selection, regression variables, and number of PCs affect downstream analysis.
+The output is PCA-ready: it contains normalized data, selected variable
+features, scaled data, and the named PCA reduction.
+SCTransform is a separate method, not a hidden branch here.
