@@ -12,7 +12,7 @@ reporting.
 | Resource | Purpose |
 |---|---|
 | [Scientific Methods documentation prompt](prompts/scientific_methods_documentation_prompt.md) | Generates detailed Methods-style repository documentation from existing analysis code |
-| [Quarto scientific-report template](https://github.com/Thokas99/Useful_code/blob/main/miscellaneous/quarto/scientific_report_template.md) | Provides a reusable structure and presentation standard for professional scientific HTML reports |
+| [Quarto scientific-report template](quarto/scientific_report_template.md) | Provides a reusable structure and presentation standard for professional scientific HTML reports |
 
 ## Organization
 
