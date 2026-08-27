@@ -47,7 +47,8 @@ atac_assay <- "ATAC"
 genome_build <- "hg38"
 peak_separator <- c(":", "-")
 min_cells <- 1L
-min_features <- 1L
+# Preserve all deliberately matched cells; filter cells in the QC stage.
+min_features <- 0L
 ```
 
 The example `hg38` build must be replaced when the data use another valid
@@ -128,4 +129,5 @@ qs2::qs_save(object, file = output_object)
 Paired multiome data require deliberate matching of cells across modalities.
 The alignment TSV records cells missing from RNA, ATAC, or metadata; the code
 intersects them and never silently unions unmatched barcodes. Fragments must be
-indexed and contain the retained barcodes. No modality QC is hidden here.
+indexed and contain the retained barcodes. Construction keeps matched cells;
+cell filtering belongs to the QC stage. No modality QC is hidden here.

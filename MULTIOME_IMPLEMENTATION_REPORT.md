@@ -46,7 +46,7 @@ R analytical objects use qs2; tables use TSV.
 - **API-DERIVED:** explicit `CreateFragmentObject`, current assay/object namespaces, and current qs2 format.
 - **MERGED:** paired matrix alignment and dropped-cell reporting added to the source scaffold.
 - **PROJECT-SPECIFIC AND OMITTED:** MAP/GSE identifiers, sample loops, downstream QC, and fixed biological labels.
-- **Scientific decisions retained:** assay names, feature orientation, minimums, peak separator, genome/build, fragments, annotation, and exact cell matching.
+- **Scientific decisions retained:** assay names, feature orientation, peak separator, genome/build, fragments, annotation, exact cell matching, and the decision to defer cell filtering to QC.
 - **Practical notes retained:** unmatched modality barcodes are reported and intersected, never silently unioned.
 - **RNA contract:** qs2 gene-by-cell matrix.
 - **ATAC contract:** qs2 peak-by-cell matrix, indexed fragments, and compatible annotation/build.
