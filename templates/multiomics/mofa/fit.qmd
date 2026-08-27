@@ -1,0 +1,214 @@
+---
+title: "MOFA2: fit a multi-view factor model"
+format: html
+editor: source
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Train a MOFA2 model from the prepared named view list. This page stops at the
+native trained model and records the choices needed to reproduce the fit.
+Diagnostics and biological interpretation belong in the downstream pages.
+
+## Inputs and parameters
+
+```{r}
+#| label: parameters
+
+prepared_views_path <- "output/mofa/prepared_views.qs2"
+model_output <- "output/mofa/mofa_model.hdf5"
+model_options_output <- "output/mofa/mofa_model_options.tsv"
+training_options_output <- "output/mofa/mofa_training_options.tsv"
+
+num_factors <- 10L
+scale_views <- FALSE
+seed <- 1234L
+convergence_mode <- "slow"
+max_iterations <- 1500L
+drop_factor_threshold <- 0.01
+use_basilisk <- FALSE
+save_data <- TRUE
+verbose <- TRUE
+
+# Declare one current MOFA2 likelihood for every view. Do not leave this
+# implicit: use gaussian for prepared continuous values, bernoulli for binary
+# presence/absence values, or poisson only when the count-scale model is
+# intentionally appropriate. Example:
+# likelihoods <- c(transcriptome = "gaussian", mutation = "bernoulli")
+likelihoods <- c()
+```
+
+::: {.callout-important}
+## MOFA is unsupervised
+
+Train the model from the omics views, not from the biological outcome that you
+later hope to interpret. Clinical groups, response labels, signatures and
+phenotypes may be associated with learned factors afterward in
+`interpretation.qmd`. Do not use a target phenotype to choose features or tune
+this model while describing it as unsupervised.
+:::
+
+## Validate the prepared object
+
+```{r}
+#| label: validate-prepared-views
+
+views <- qs2::qs_read(prepared_views_path)
+if (!is.list(views) || is.null(names(views)) || length(views) < 2L) {
+  stop("The prepared object must be a named list containing at least two views.")
+}
+if (anyDuplicated(names(views))) {
+  stop("Prepared view names must be unique.")
+}
+if (any(!vapply(views, is.matrix, logical(1))) ||
+    any(!vapply(views, is.numeric, logical(1)))) {
+  stop("Every prepared view must be a numeric matrix.")
+}
+if (any(vapply(views, function(x) nrow(x) == 0L || ncol(x) == 0L,
+            logical(1)))) {
+  stop("Prepared views must have non-zero dimensions.")
+}
+if (any(vapply(views, function(x) is.null(rownames(x)) ||
+                 anyDuplicated(rownames(x)) > 0L, logical(1)))) {
+  stop("Prepared views need valid unique feature names.")
+}
+if (any(vapply(views, function(x) is.null(colnames(x)) ||
+                 anyDuplicated(colnames(x)) > 0L, logical(1)))) {
+  stop("Prepared views need valid unique sample IDs.")
+}
+
+sample_ids <- colnames(views[[1L]])
+if (any(!vapply(views, function(x) identical(colnames(x), sample_ids),
+               logical(1)))) {
+  stop("All prepared views must use the same sample order.")
+}
+if (any(vapply(views, function(x) {
+  feature_sd <- apply(x, 1L, stats::sd, na.rm = TRUE)
+  all(!is.finite(feature_sd) | feature_sd == 0)
+}, logical(1)))) {
+  stop("A view has no variable feature available for fitting.")
+}
+if (any(vapply(views, function(x) any(!is.na(x) & !is.finite(x)),
+             logical(1)))) {
+  stop("Prepared views contain Inf or NaN values.")
+}
+
+view_summary <- data.frame(
+  view = names(views),
+  features = vapply(views, nrow, integer(1)),
+  samples = vapply(views, ncol, integer(1)),
+  missing_values = vapply(views, function(x) sum(is.na(x)), integer(1)),
+  stringsAsFactors = FALSE
+)
+print(view_summary)
+```
+
+## Configure and prepare MOFA2
+
+```{r}
+#| label: prepare-mofa
+
+dir.create(dirname(model_output), recursive = TRUE, showWarnings = FALSE)
+mofa <- MOFA2::create_mofa(views)
+view_names <- MOFA2::views_names(mofa)
+
+default_model_options <- MOFA2::get_default_model_options(mofa)
+if (length(likelihoods) == 0L) {
+  print(default_model_options$likelihoods)
+  stop("Declare likelihoods explicitly for every prepared view before fitting.")
+}
+if (is.null(names(likelihoods)) || anyDuplicated(names(likelihoods)) ||
+    !setequal(names(likelihoods), view_names)) {
+  stop("likelihoods must be named exactly for the prepared views.")
+}
+if (any(!likelihoods %in% c("gaussian", "bernoulli", "poisson", "exponential"))) {
+  stop("Use a likelihood supported by the current MOFA2 model options.")
+}
+
+data_options <- MOFA2::get_default_data_options(mofa)
+data_options$scale_views <- scale_views
+data_options$use_float32 <- TRUE
+
+model_options <- default_model_options
+model_options$num_factors <- num_factors
+model_options$likelihoods <- likelihoods[view_names]
+model_options$spikeslab_weights <- TRUE
+model_options$ard_weights <- TRUE
+model_options$ard_factors <- FALSE
+
+training_options <- MOFA2::get_default_training_options(mofa)
+training_options$seed <- seed
+training_options$convergence_mode <- convergence_mode
+training_options$maxiter <- max_iterations
+training_options$drop_factor_threshold <- drop_factor_threshold
+training_options$verbose <- verbose
+
+model_option_table <- data.frame(
+  option = c("num_factors", "scale_views", "use_float32",
+             "spikeslab_weights", "ard_weights", "ard_factors", "likelihoods"),
+  value = c(
+    as.character(model_options$num_factors),
+    as.character(data_options$scale_views),
+    as.character(data_options$use_float32),
+    as.character(model_options$spikeslab_weights),
+    as.character(model_options$ard_weights),
+    as.character(model_options$ard_factors),
+    paste(paste(names(likelihoods), likelihoods, sep = "="), collapse = ";")
+  ),
+  stringsAsFactors = FALSE
+)
+training_option_table <- data.frame(
+  option = c("seed", "convergence_mode", "maxiter",
+             "drop_factor_threshold", "save_data", "use_basilisk"),
+  value = as.character(c(seed, convergence_mode, max_iterations,
+                         drop_factor_threshold, save_data, use_basilisk)),
+  stringsAsFactors = FALSE
+)
+readr::write_tsv(model_option_table, model_options_output)
+readr::write_tsv(training_option_table, training_options_output)
+
+mofa <- MOFA2::prepare_mofa(
+  object = mofa,
+  data_options = data_options,
+  model_options = model_options,
+  training_options = training_options
+)
+```
+
+## Train and save the native model
+
+```{r}
+#| label: run-mofa
+
+mofa <- MOFA2::run_mofa(
+  object = mofa,
+  outfile = model_output,
+  save_data = save_data,
+  use_basilisk = use_basilisk
+)
+
+if (!file.exists(model_output)) {
+  stop("MOFA2 did not create the expected native HDF5 model.")
+}
+cat("Saved trained MOFA2 model to", model_output, "\n")
+```
+
+## Output contract
+
+The output is a trained MOFA2 model in native HDF5 format. The prepared views
+remain the `.qs2` input, while concise model/training option manifests are TSV.
+The requested number of factors is an initial unsupervised choice; inactive or
+redundant factors and explained variance must be reviewed in
+`diagnostics.qmd` before interpretation.
+
+::: {.callout-note}
+## R/Python environment
+
+MOFA2 calls the Python `mofapy2` backend. `use_basilisk` is exposed here rather
+than hiding an environment choice or a local Python path. Use the simplest
+working environment for the installation and consult current MOFA2 guidance if
+the backend, reticulate, or basilisk setup changes.
+:::
