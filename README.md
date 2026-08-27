@@ -1,14 +1,19 @@
 # Useful code
 
-Useful code is a curated personal bioinformatics cookbook of reusable R,
-Python, and Quarto templates derived from real analytical workflows.
+A curated personal bioinformatics cookbook of 37 reusable R, Python, and
+Quarto workflows derived from real analytical projects.
 
-Website: [thokas99.github.io/Useful_code](https://thokas99.github.io/Useful_code/)
+**Browse the catalog:** [open the website](https://thokas99.github.io/Useful_code/)
+· [browse the templates](templates/README.md) · [view the repository on GitHub](https://github.com/Thokas99/Useful_code)
 
-## What this repository is
+The website is an index, not a second copy of the science: each catalog entry
+links to the canonical notebook in this repository, where the code, parameters,
+provenance, and current status remain the source of truth.
+
+## What this repository contains
 
 The repository preserves small, understandable workflows together with the
-scientific decisions, diagnostics, implementation tricks, and provenance that
+scientific decisions, diagnostics, implementation details, and provenance that
 make them useful when reopened later. It is not an R/Python package, a
 production clinical pipeline, or a replacement for upstream documentation.
 
@@ -39,6 +44,18 @@ archive/     superseded scaffolds and historical archives
 General documentation and reporting resources are collected under
 [`miscellaneous/`](miscellaneous/README.md).
 
+## How to use the templates
+
+1. Choose a method family from the [website catalog](https://thokas99.github.io/Useful_code/)
+   or [`templates/`](templates/README.md).
+2. Read the notebook's purpose, inputs, outputs, parameters, and status before
+   adapting it.
+3. Recheck package behavior and assumptions against the relevant upstream
+   documentation and your own data.
+
+The notebooks are intentionally readable starting points. They are not
+guarantees of validation for every dataset or analysis design.
+
 ## Template philosophy
 
 Canonical notebooks keep meaningful parameters and scientific operations
@@ -65,9 +82,8 @@ provenance and worked examples; the reusable generalized versions are under
 
 ## Status
 
-The library is actively organized for later documentation, but individual
-templates remain at their stated validation status. No claim is made that every
-workflow has been executed end to end on a representative dataset.
+Individual templates remain at their stated validation status. No claim is made
+that every workflow has been executed end to end on a representative dataset.
 
 ## License
 
