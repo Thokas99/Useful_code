@@ -1,4 +1,8 @@
-# Reusable notebook templates
+# Legacy reusable notebook templates
+
+> Superseded intermediate scaffold. The active canonical library is under
+> [`../../../templates/`](../../../templates); this directory is retained for
+> history and provenance only.
 
 **Status:** Reusable computational template library; not a study-results workflow.
 
@@ -10,10 +14,8 @@ The R templates generally use `qs2::qs_read()` and `qs2::qs_save()` for serializ
 
 ## Template families
 
-- [scRNA templates](scRNA/README.md): Seurat object creation, QC, normalization/clustering, signatures, markers, descriptive trajectory summaries, activity-table import, and module scores.
-- [scATAC templates](scATAC/README.md): Signac object creation, QC/LSI clustering, and motif enrichment.
-- [Multiome templates](multiome/README.md): paired RNA/ATAC object creation, WNN construction, peak–gene linkage, and program scoring.
-- [General statistics template](general_statistics/README.md): group summaries and univariate association tests.
+- `scRNA/`, `scATAC/`, `multiome/`, and `general_statistics/` contain the
+  former scaffold components and their original QMDs.
 
 ## Shared implementation contract
 

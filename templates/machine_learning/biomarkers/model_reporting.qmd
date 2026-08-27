@@ -29,7 +29,7 @@ with dynamic columns from the model-output contract.
 ## Inputs and parameters
 
 The complete and essential TSVs are written by
-`biomarker_binary_classification_brglm2.qmd`. The essential table contains
+`binary_classification_brglm2.qmd`. The essential table contains
 the sample, split, truth, prediction, probability, threshold, and selected
 feature columns. The complete table may additionally contain metadata.
 

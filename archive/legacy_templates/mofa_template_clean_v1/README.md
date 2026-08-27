@@ -1,4 +1,8 @@
-# MOFA_TEMPLATE_CLEAN
+# Legacy MOFA_TEMPLATE_CLEAN scaffold
+
+> Superseded project-shaped scaffold. The active canonical MOFA family is
+> under [`../../../templates/multiomics/mofa/`](../../../templates/multiomics/mofa/).
+> This directory is retained for history and provenance only.
 
 **Status:** Reusable MOFA template; not a fitted project model.
 

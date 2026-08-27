@@ -615,7 +615,7 @@ if (run_reduced_panel) {
 ## Frozen prediction summaries
 
 These tables are the input contract for
-`biomarker_model_reporting.qmd`. Feature columns are prefixed with
+`model_reporting.qmd`. Feature columns are prefixed with
 `feature_`, while the complete table may additionally contain metadata joined
 after model fitting. Metadata are never used by the classifier unless they are
 explicitly added to the expression input and recipe.

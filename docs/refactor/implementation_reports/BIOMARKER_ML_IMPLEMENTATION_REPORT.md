@@ -3,7 +3,7 @@
 ## Scope
 
 This report documents the canonical biomarker machine-learning templates in
-`templates/machine_learning/`. They preserve a real sample-level binary
+`templates/machine_learning/biomarkers/`. They preserve a real sample-level binary
 classification workflow from the source notebooks while removing cohort names,
 fixed paths, identifiers, biological labels, and study-specific conclusions.
 
@@ -19,8 +19,8 @@ representative real dataset in their canonical form.
 
 | Template | Class | Status | Purpose |
 |---|---|---|---|
-| `biomarker_binary_classification_brglm2.qmd` | SOURCE-BACKED WORKFLOW | draft | Fit, tune, evaluate, and persist the primary classifier plus an optional reduced stable-feature model. |
-| `biomarker_model_reporting.qmd` | SOURCE-BACKED WORKFLOW | draft | Read frozen TSV outputs and create presentation tables and figures without refitting. |
+| `binary_classification_brglm2.qmd` | SOURCE-BACKED WORKFLOW | draft | Fit, tune, evaluate, and persist the primary classifier plus an optional reduced stable-feature model. |
+| `model_reporting.qmd` | SOURCE-BACKED WORKFLOW | draft | Read frozen TSV outputs and create presentation tables and figures without refitting. |
 
 The canonical implementation uses the source-backed bias-reduced logistic
 regression route. It does not provide a general decoupler, pathway, or generic
@@ -115,7 +115,7 @@ The primary model bundle and optional reduced-panel bundle are written with
 confusion-matrix, ROC/PR-curve, and feature-stability outputs are written as
 TSV files.
 
-`biomarker_model_reporting.qmd` consumes frozen TSV outputs. It does not refit
+`model_reporting.qmd` consumes frozen TSV outputs. It does not refit
 the model, select features, tune thresholds, or re-evaluate performance.
 HTML tables, a probability plot, and a selected-feature heatmap are reporting
 artifacts; the TSV files remain the numerical handoff.
@@ -136,7 +136,7 @@ or biological interpretation are transferable.
 
 ## Per-template implementation records
 
-### `biomarker_binary_classification_brglm2.qmd`
+### `binary_classification_brglm2.qmd`
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
@@ -208,13 +208,13 @@ tables.
 source-specific column/path names were parameterized; current typed case-weight
 and predictor-desirability syntax was used; output extraction was made explicit.
 
-### `biomarker_model_reporting.qmd`
+### `model_reporting.qmd`
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
 **Canonical source:** `examples/biomarker_ml/trento/TRENTO_gtExtras_tables.qmd`
 **Merge sources:** frozen prediction and selected-feature outputs from
-`biomarker_binary_classification_brglm2.qmd`.
+`binary_classification_brglm2.qmd`.
 
 **SOURCE-DERIVED blocks**
 
