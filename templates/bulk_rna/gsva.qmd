@@ -1,0 +1,148 @@
+---
+title: "Sample-level gene-set activity with GSVA"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  freeze: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Transform a gene-by-sample expression matrix into a gene-set-by-sample
+activity matrix with GSVA. The output is a sample-level activity score for
+each supplied gene set; it is not an edgeR test or a ranked-list GSEA result.
+
+::: {.callout-note}
+## Source-backed workflow
+
+The source scoring notebook uses the current parameter-object style
+`GSVA::gsvaParam()` followed by `GSVA::gsva()`. The canonical template keeps
+that method-specific route and makes gene-set coverage and input scale visible.
+:::
+
+## Inputs and parameters
+
+The expression table must have genes in rows, samples in columns, and a first
+column containing unique gene IDs. The gene-set table must contain `set_id`
+and `gene_id`. Use a continuous normalized expression representation for the
+default Gaussian kernel; do not pass arbitrary z-score or count transforms
+without deciding whether the selected kernel is appropriate.
+
+```{r parameters}
+expression_path <- "input/normalized_expression.tsv"
+gene_set_path <- "input/gene_sets.tsv"
+expression_gene_column <- "gene_id"
+gene_set_id_column <- "set_id"
+gene_set_gene_column <- "gene_id"
+
+kcdf <- "Gaussian"
+minimum_gene_set_size <- 5L
+maximum_gene_set_size <- 500L
+
+output_score_table <- "output/tables/gsva_scores.tsv"
+output_coverage_table <- "output/tables/gsva_gene_set_coverage.tsv"
+```
+
+## Analysis
+
+```{r load-expression}
+expression_tbl <- readr::read_tsv(expression_path, show_col_types = FALSE)
+stopifnot(expression_gene_column %in% names(expression_tbl))
+
+expr_mat <- expression_tbl |>
+  tibble::column_to_rownames(expression_gene_column) |>
+  as.matrix()
+storage.mode(expr_mat) <- "numeric"
+
+stopifnot(nrow(expr_mat) > 0L, ncol(expr_mat) > 0L)
+stopifnot(!anyDuplicated(rownames(expr_mat)))
+stopifnot(!anyDuplicated(colnames(expr_mat)))
+stopifnot(all(is.finite(expr_mat)))
+```
+
+```{r gene-set-coverage}
+gene_set_tbl <- readr::read_tsv(gene_set_path, show_col_types = FALSE)
+stopifnot(all(c(gene_set_id_column, gene_set_gene_column) %in% names(gene_set_tbl)))
+
+gene_set_tbl <- gene_set_tbl |>
+  dplyr::transmute(
+    set_id = as.character(.data[[gene_set_id_column]]),
+    gene_id = as.character(.data[[gene_set_gene_column]])
+  ) |>
+  dplyr::filter(
+    !is.na(set_id), nzchar(set_id),
+    !is.na(gene_id), nzchar(gene_id)
+  ) |>
+  dplyr::distinct()
+
+gene_sets <- split(gene_set_tbl$gene_id, gene_set_tbl$set_id)
+gene_sets_found <- lapply(gene_sets, intersect, y = rownames(expr_mat))
+
+coverage_table <- tibble::tibble(
+  set_id = names(gene_sets),
+  requested = lengths(gene_sets),
+  found = lengths(gene_sets_found)
+) |>
+  dplyr::mutate(
+    missing = requested - found,
+    coverage = found / requested
+  )
+
+gene_sets_found <- gene_sets_found[
+  lengths(gene_sets_found) >= minimum_gene_set_size
+]
+stopifnot(length(gene_sets_found) > 0L)
+```
+
+```{r run-gsva}
+param <- GSVA::gsvaParam(
+  exprData = expr_mat,
+  geneSets = gene_sets_found,
+  kcdf = kcdf,
+  minSize = minimum_gene_set_size,
+  maxSize = maximum_gene_set_size
+)
+
+gsva_result <- GSVA::gsva(param)
+score_mat <- if (inherits(gsva_result, "SummarizedExperiment")) {
+  SummarizedExperiment::assay(gsva_result, "es")
+} else {
+  as.matrix(gsva_result)
+}
+
+score_table <- as.data.frame(score_mat) |>
+  tibble::rownames_to_column("gene_set")
+
+dir.create(dirname(output_score_table), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_coverage_table), recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(score_table, output_score_table)
+readr::write_tsv(coverage_table, output_coverage_table)
+```
+
+## Outputs
+
+`gsva_scores.tsv` contains one row per gene set and one column per sample.
+`gsva_gene_set_coverage.tsv` records requested and measured genes before GSVA
+filters gene sets by the declared minimum size.
+
+## Method notes
+
+The source uses Gaussian-kernel GSVA on a transformed expression matrix. The
+canonical default keeps `kcdf = "Gaussian"` visible for continuous normalized
+input. Count-scale input and other kernels are different methodological
+choices; consult the current GSVA documentation before changing them.
+
+GSVA and singscore answer related but different questions. GSVA estimates
+sample-level gene-set activity from the expression distribution, whereas
+singscore uses within-sample ranks. Do not merge their outputs into an unnamed
+generic pathway score.
+
+This notebook writes the score matrix and coverage diagnostics as TSV. A
+separate qs2 object is not serialized because the score matrix is already the
+useful analytical handoff.

@@ -1,0 +1,165 @@
+---
+title: "tximport to edgeR object"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  freeze: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Convert a gene-level `tximport` result into an edgeR `DGEList` with explicit
+gene IDs, sample alignment, optional annotation, and visible library-size
+checks. Filtering, normalization, and downstream modeling belong to the next
+template.
+
+::: {.callout-note}
+## Source-backed workflow
+
+This template preserves the tximport-to-edgeR object construction used in the
+source RNA-seq workflow. It does not try to discover Salmon directories,
+support every quantifier, or replace the current tximport documentation.
+:::
+
+## Inputs
+
+The supported input is one `tximport` R object persisted as qs2. It should
+contain a gene-level `counts` matrix and the usual tximport sample columns.
+Sample metadata is a TSV with one row per sample and a unique `sample_id`
+column. A gene annotation TSV is optional and must contain a unique `gene_id`
+column when supplied.
+
+## Parameters
+
+```{r parameters}
+tximport_path <- "input/tximport_gene.qs2"
+metadata_path <- "input/sample_metadata.tsv"
+gene_annotation_path <- NULL
+
+strip_gene_version <- TRUE
+remove_all_zero_genes <- FALSE
+
+output_dge <- "output/objects/dge_imported.qs2"
+output_library_sizes <- "output/tables/imported_library_sizes.tsv"
+```
+
+## Analysis
+
+```{r load-and-validate-inputs}
+metadata <- readr::read_tsv(metadata_path, show_col_types = FALSE)
+stopifnot("sample_id" %in% names(metadata))
+stopifnot(!anyDuplicated(metadata$sample_id))
+
+txi <- qs2::qs_read(tximport_path)
+stopifnot(all(c("counts", "countsFromAbundance") %in% names(txi)))
+stopifnot(is.matrix(txi$counts))
+stopifnot(!is.null(rownames(txi$counts)))
+stopifnot(!is.null(colnames(txi$counts)))
+
+raw_gene_ids <- rownames(txi$counts)
+gene_ids <- if (strip_gene_version) {
+  sub("\\..*$", "", raw_gene_ids)
+} else {
+  raw_gene_ids
+}
+
+stopifnot(all(nzchar(gene_ids)))
+if (anyDuplicated(gene_ids)) {
+  stop(
+    "Gene IDs become duplicated after identifier cleanup. ",
+    "Resolve the annotation upstream rather than silently collapsing tximport rows."
+  )
+}
+
+stopifnot(setequal(colnames(txi$counts), metadata$sample_id))
+sample_order <- match(metadata$sample_id, colnames(txi$counts))
+
+txi$counts <- txi$counts[, sample_order, drop = FALSE]
+rownames(txi$counts) <- gene_ids
+
+for (field in intersect(c("abundance", "length"), names(txi))) {
+  if (is.matrix(txi[[field]]) && nrow(txi[[field]]) == length(raw_gene_ids)) {
+    stopifnot(identical(rownames(txi[[field]]), raw_gene_ids))
+    txi[[field]] <- txi[[field]][, sample_order, drop = FALSE]
+    rownames(txi[[field]]) <- gene_ids
+  }
+}
+
+stopifnot(identical(colnames(txi$counts), metadata$sample_id))
+stopifnot(all(is.finite(txi$counts)))
+stopifnot(all(txi$counts >= 0))
+```
+
+```{r construct-dgelist}
+annotation <- NULL
+if (!is.null(gene_annotation_path)) {
+  annotation <- readr::read_tsv(gene_annotation_path, show_col_types = FALSE)
+  stopifnot("gene_id" %in% names(annotation))
+  stopifnot(!anyDuplicated(annotation$gene_id))
+  annotation <- annotation[match(gene_ids, annotation$gene_id), , drop = FALSE]
+  stopifnot(identical(annotation$gene_id, gene_ids))
+}
+
+dge <- edgeR::DGEListFromTximport(
+  txi,
+  genes = annotation,
+  remove.zeros = remove_all_zero_genes
+)
+
+stopifnot(inherits(dge, "DGEList"))
+stopifnot(identical(colnames(dge), metadata$sample_id))
+stopifnot(!anyDuplicated(rownames(dge)))
+
+# Keep sample-level metadata with the DGEList without overwriting edgeR's
+# library-size and normalization-factor columns.
+metadata_extra <- metadata[, setdiff(names(metadata), "sample_id"), drop = FALSE]
+metadata_extra <- metadata_extra[, setdiff(names(metadata_extra), names(dge$samples)), drop = FALSE]
+dge$samples <- cbind(dge$samples, metadata_extra)
+
+library_size_tbl <- dge$samples |>
+  tibble::rownames_to_column("sample_id") |>
+  dplyr::select(sample_id, dplyr::everything())
+
+dir.create(dirname(output_dge), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_library_sizes), recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(dge, output_dge)
+readr::write_tsv(library_size_tbl, output_library_sizes)
+```
+
+## Diagnostics
+
+```{r object-summary}
+cat("genes:", nrow(dge), "\n")
+cat("samples:", ncol(dge), "\n")
+print(dge$samples[, c("lib.size", "norm.factors"), drop = FALSE])
+```
+
+## Outputs
+
+- `dge_imported.qs2`: the gene-level edgeR `DGEList` before QC filtering and
+  normalization;
+- `imported_library_sizes.tsv`: sample names, edgeR library sizes, normalized
+  factors, and non-conflicting metadata columns.
+
+## Method notes
+
+`tximport` provides matrices whose rows are features and whose columns are
+samples. The exact sample names must match the metadata; reordering is explicit
+and the final object is checked again. Gene-version stripping is conservative:
+if it creates duplicate gene IDs, the template stops rather than silently
+changing the count model.
+
+The source project also contains a raw count-matrix route that collapses
+duplicate gene symbols by summing counts and removes all-zero rows. That is a
+different input contract and belongs in the QC/normalization stage when it is
+needed; this notebook intentionally supports one tximport object path.
+
+`DGEListFromTximport()` creates the edgeR object. It does not perform the
+scientific filtering, normalization, design specification, or differential
+testing decisions documented in later templates.
