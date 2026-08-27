@@ -1,0 +1,131 @@
+---
+title: "Create a Paired RNA/ATAC Object"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Create one Seurat object with matched RNA and Signac ATAC assays. This page
+handles object construction and cell matching only; modality-specific QC and
+reductions belong to their respective canonical templates.
+
+## Inputs and parameters
+
+The supported contract is one qs2 R matrix for RNA, one qs2 R matrix for ATAC
+peaks, a metadata TSV with `cell_id`, a tabix-indexed fragments file, and a qs2
+gene-annotation object. Both matrices are feature-by-cell.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SeuratObject)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(tibble)
+})
+
+rna_counts_path <- "input/rna_counts.qs2"
+atac_counts_path <- "input/atac_peak_counts.qs2"
+metadata_path <- "input/cell_metadata.tsv"
+fragments_path <- "input/fragments.tsv.gz"
+annotation_path <- "input/gene_annotation.qs2"
+output_object <- "output/multiome_created.qs2"
+alignment_table <- "output/multiome_cell_alignment.tsv"
+
+rna_assay <- "RNA"
+atac_assay <- "ATAC"
+genome_build <- "hg38"
+peak_separator <- c(":", "-")
+min_cells <- 1L
+min_features <- 1L
+```
+
+The example `hg38` build must be replaced when the data use another valid
+build. Peak coordinates, fragments, annotations, and downstream sequence
+resources must use compatible builds and chromosome naming.
+
+## Analysis
+
+```{r}
+rna_counts <- qs2::qs_read(file = rna_counts_path)
+atac_counts <- qs2::qs_read(file = atac_counts_path)
+metadata <- readr::read_tsv(metadata_path, show_col_types = FALSE)
+annotation <- qs2::qs_read(file = annotation_path)
+
+stopifnot(is.matrix(rna_counts) || inherits(rna_counts, "Matrix"))
+stopifnot(is.matrix(atac_counts) || inherits(atac_counts, "Matrix"))
+stopifnot(!is.null(colnames(rna_counts)), !is.null(colnames(atac_counts)))
+stopifnot(!anyDuplicated(colnames(rna_counts)), !anyDuplicated(colnames(atac_counts)))
+stopifnot(!anyDuplicated(rownames(rna_counts)), !anyDuplicated(rownames(atac_counts)))
+stopifnot("cell_id" %in% colnames(metadata), !anyDuplicated(metadata$cell_id))
+stopifnot(file.exists(fragments_path), file.exists(paste0(fragments_path, ".tbi")))
+
+all_cells <- unique(c(colnames(rna_counts), colnames(atac_counts), metadata$cell_id))
+alignment <- tibble::tibble(
+  cell_id = all_cells,
+  in_rna = cell_id %in% colnames(rna_counts),
+  in_atac = cell_id %in% colnames(atac_counts),
+  in_metadata = cell_id %in% metadata$cell_id
+)
+readr::write_tsv(alignment, alignment_table)
+
+shared_cells <- all_cells[alignment$in_rna & alignment$in_atac & alignment$in_metadata]
+stopifnot(length(shared_cells) > 0)
+rna_counts <- rna_counts[, shared_cells, drop = FALSE]
+atac_counts <- atac_counts[, shared_cells, drop = FALSE]
+metadata <- metadata[match(shared_cells, metadata$cell_id), , drop = FALSE]
+rownames(metadata) <- metadata$cell_id
+
+fragment_object <- Signac::CreateFragmentObject(
+  path = fragments_path,
+  cells = shared_cells,
+  validate.fragments = TRUE
+)
+chromatin_assay <- Signac::CreateChromatinAssay(
+  counts = atac_counts,
+  sep = peak_separator,
+  genome = genome_build,
+  annotation = annotation,
+  fragments = fragment_object,
+  min.cells = min_cells,
+  min.features = min_features,
+  validate.fragments = TRUE
+)
+
+object <- Seurat::CreateSeuratObject(
+  counts = rna_counts,
+  assay = rna_assay,
+  meta.data = metadata,
+  min.features = min_features
+)
+object[[atac_assay]] <- chromatin_assay
+DefaultAssay(object) <- rna_assay
+
+stopifnot(identical(colnames(object), shared_cells))
+stopifnot(inherits(object[[atac_assay]], "ChromatinAssay"))
+stopifnot(length(Signac::Fragments(object[[atac_assay]])) > 0)
+
+readr::write_tsv(
+  tibble::tibble(cells = ncol(object), genes = nrow(object[[rna_assay]]),
+                 peaks = nrow(object[[atac_assay]]), genome_build = genome_build),
+  "output/multiome_created_summary.tsv"
+)
+qs2::qs_save(object, file = output_object)
+```
+
+## Method notes
+
+Paired multiome data require deliberate matching of cells across modalities.
+The alignment TSV records cells missing from RNA, ATAC, or metadata; the code
+intersects them and never silently unions unmatched barcodes. Fragments must be
+indexed and contain the retained barcodes. No modality QC is hidden here.

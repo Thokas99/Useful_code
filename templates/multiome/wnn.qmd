@@ -1,0 +1,125 @@
+---
+title: "Paired RNA/ATAC Weighted Nearest Neighbors"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Build RNA and ATAC representations, combine them with Seurat weighted nearest
+neighbors, and cluster/visualize the paired object. This does not repeat
+fragment-aware QC.
+
+::: {.callout-warning}
+## WNN is not batch correction
+
+Weighted nearest neighbors combine modalities for cell-cell neighborhood
+construction. WNN does not, by itself, remove technical batch effects between
+samples.
+:::
+
+## Parameters
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(tibble)
+})
+
+input_object <- "input/multiome_created.qs2"
+output_object <- "output/multiome_wnn.qs2"
+metadata_table <- "output/multiome_wnn_metadata.tsv"
+cluster_table <- "output/multiome_wnn_clusters.tsv"
+
+rna_assay <- "RNA"
+atac_assay <- "ATAC"
+rna_reduction <- "pca"
+atac_reduction <- "lsi"
+wnn_reduction <- "wnn.umap"
+weighted_nn_name <- "weighted.nn"
+knn_graph_name <- "wknn"
+snn_graph_name <- "wsnn"
+modality_weight_name <- "RNA.weight"
+n_variable_features <- 2000L
+n_pcs <- 30L
+n_svd <- 50L
+rna_dims <- 1:n_pcs
+atac_dims <- 1:30
+neighbors_k <- 20L
+cluster_resolution <- 0.5
+seed <- 1L
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(file = input_object)
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(rna_assay, atac_assay) %in% Assays(object)))
+stopifnot(identical(colnames(object[[rna_assay]]), colnames(object[[atac_assay]])))
+set.seed(seed)
+
+DefaultAssay(object) <- rna_assay
+object <- NormalizeData(object, assay = rna_assay)
+object <- FindVariableFeatures(object, assay = rna_assay, nfeatures = n_variable_features)
+object <- ScaleData(object, assay = rna_assay, features = VariableFeatures(object, assay = rna_assay))
+object <- RunPCA(object, assay = rna_assay, npcs = n_pcs, reduction.name = rna_reduction)
+
+DefaultAssay(object) <- atac_assay
+object <- Signac::RunTFIDF(object, assay = atac_assay)
+object <- Signac::FindTopFeatures(object, assay = atac_assay, min.cutoff = "q0")
+object <- Signac::RunSVD(object, assay = atac_assay, n = n_svd, reduction.name = atac_reduction)
+
+object <- FindMultiModalNeighbors(
+  object,
+  reduction.list = list(rna_reduction, atac_reduction),
+  dims.list = list(rna_dims, atac_dims),
+  k.nn = neighbors_k,
+  knn.graph.name = knn_graph_name,
+  snn.graph.name = snn_graph_name,
+  weighted.nn.name = weighted_nn_name,
+  modality.weight.name = modality_weight_name
+)
+object <- RunUMAP(
+  object,
+  nn.name = weighted_nn_name,
+  reduction.name = wnn_reduction,
+  reduction.key = "wnnUMAP_",
+  seed.use = seed
+)
+object <- FindClusters(
+  object, graph.name = snn_graph_name, resolution = cluster_resolution,
+  random.seed = seed
+)
+
+cluster_column <- paste0(snn_graph_name, "_res.", cluster_resolution)
+readr::write_tsv(
+  object[[]] |>
+    tibble::rownames_to_column("cell_id"),
+  metadata_table
+)
+readr::write_tsv(
+  tibble::tibble(cluster = object[[]][[cluster_column]]) |>
+    dplyr::count(cluster, name = "n_cells"),
+  cluster_table
+)
+qs2::qs_save(object, file = output_object)
+```
+
+## Method notes
+
+RNA PCA and ATAC LSI are distinct modality reductions. The dimension vectors,
+neighbor/graph names, k, resolution, and seed are exposed because they affect
+the neighborhood result. The default ATAC vector includes LSI1; inspect its
+depth relationship before changing it.
