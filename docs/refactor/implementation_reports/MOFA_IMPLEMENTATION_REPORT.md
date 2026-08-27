@@ -65,18 +65,18 @@ the trained model is not redundantly serialized as `.qs2`.
 
 Primary source notebooks inspected:
 
-- `CODE_MAP/code_MOFA/MOFA_TEMPLATE_CLEAN/01_multiomics_input_prep.qmd`
-- `CODE_MAP/code_MOFA/MOFA_TEMPLATE_CLEAN/03_mofa_model.qmd`
-- `CODE_MAP/code_MOFA/03_MOFA.qmd`
+- `archive/legacy_templates/mofa_template_clean_v1/01_multiomics_input_prep.qmd`
+- `archive/legacy_templates/mofa_template_clean_v1/03_mofa_model.qmd`
+- `examples/multiomics/tcga_mofa/03_MOFA.qmd`
 
 Additional provenance inspected:
 
-- `CODE_MAP/code_MOFA/MOFA_TEMPLATE_CLEAN/00_project_setup.qmd`
-- `CODE_MAP/code_MOFA/MOFA_TEMPLATE_CLEAN/02_signature_scoring.qmd`
-- `CODE_MAP/code_MOFA/00_TCGA_LUAD_multiomics_download.qmd`
-- `CODE_MAP/code_MOFA/01_TCGA_LUAD_scoring_tf.qmd`
-- `CODE_MAP/code_MOFA/MOFA_TEMPLATE_CLEAN/helpers/helpers_from_MOFA.R`
-- `CODE_MAP/code_MOFA/MOFA_TEMPLATE_CLEAN/README.md`
+- `archive/legacy_templates/mofa_template_clean_v1/00_project_setup.qmd`
+- `archive/legacy_templates/mofa_template_clean_v1/02_signature_scoring.qmd`
+- `examples/multiomics/tcga_mofa/00_TCGA_LUAD_multiomics_download.qmd`
+- `examples/multiomics/tcga_mofa/01_TCGA_LUAD_scoring_tf.qmd`
+- `archive/legacy_templates/mofa_template_clean_v1/helpers/helpers_from_MOFA.R`
+- `archive/legacy_templates/mofa_template_clean_v1/README.md`
 
 Current API checks used the installed MOFA2 1.22.0 package and the official
 MOFA2 documentation for the current `prepare_mofa()`, `run_mofa()`,
@@ -92,10 +92,11 @@ include `run_mofa(..., outfile = ..., save_data = ..., use_basilisk = ...)`,
 
 - **Template class:** `SOURCE-BACKED WORKFLOW`
 - **Status:** `draft`
-- **Canonical source:** `MOFA_TEMPLATE_CLEAN/01_multiomics_input_prep.qmd`
-- **Merge sources:** view construction and filtering in `03_MOFA.qmd` and
-  `MOFA_TEMPLATE_CLEAN/03_mofa_model.qmd`; matrix-validation safeguards from
-  the original workflow.
+- **Canonical source:** `archive/legacy_templates/mofa_template_clean_v1/01_multiomics_input_prep.qmd`
+- **Merge sources:** view construction and filtering in
+  `examples/multiomics/tcga_mofa/03_MOFA.qmd` and
+  `archive/legacy_templates/mofa_template_clean_v1/03_mofa_model.qmd`;
+  matrix-validation safeguards from the original workflow.
 - **SOURCE-DERIVED:** named view-list preparation; feature-by-sample matrix
   contract; strict intersection of samples across views; removal of
   non-variable features; qs2 persistence; sample-order checks.
@@ -139,10 +140,11 @@ include `run_mofa(..., outfile = ..., save_data = ..., use_basilisk = ...)`,
 
 - **Template class:** `SOURCE-BACKED WORKFLOW`
 - **Status:** `draft`
-- **Canonical sources:** `MOFA_TEMPLATE_CLEAN/03_mofa_model.qmd` and
-  `03_MOFA.qmd`.
+- **Canonical sources:**
+  `archive/legacy_templates/mofa_template_clean_v1/03_mofa_model.qmd` and
+  `examples/multiomics/tcga_mofa/03_MOFA.qmd`.
 - **Merge sources:** prepared-view contract from
-  `MOFA_TEMPLATE_CLEAN/01_multiomics_input_prep.qmd`.
+  `archive/legacy_templates/mofa_template_clean_v1/01_multiomics_input_prep.qmd`.
 - **SOURCE-DERIVED:** `create_mofa()`; default data/model/training options;
   explicit factor count; view scaling choice; ARD/sparsity settings; seed,
   convergence mode, iteration limit, factor-dropping threshold and
@@ -189,8 +191,9 @@ include `run_mofa(..., outfile = ..., save_data = ..., use_basilisk = ...)`,
 
 - **Template class:** `SOURCE-BACKED WORKFLOW`
 - **Status:** `draft`
-- **Canonical sources:** `MOFA_TEMPLATE_CLEAN/03_mofa_model.qmd` and
-  diagnostic sections of `03_MOFA.qmd`.
+- **Canonical sources:**
+  `archive/legacy_templates/mofa_template_clean_v1/03_mofa_model.qmd` and
+  diagnostic sections of `examples/multiomics/tcga_mofa/03_MOFA.qmd`.
 - **Merge sources:** source factor extraction and Spearman factor-correlation
   plot; current MOFA2 variance accessor contract.
 - **SOURCE-DERIVED:** loading the native model; variance-explained review;
@@ -234,8 +237,9 @@ include `run_mofa(..., outfile = ..., save_data = ..., use_basilisk = ...)`,
 
 - **Template class:** `SOURCE-BACKED WORKFLOW`
 - **Status:** `draft`
-- **Canonical sources:** `MOFA_TEMPLATE_CLEAN/03_mofa_model.qmd` and
-  interpretation sections of `03_MOFA.qmd`.
+- **Canonical sources:**
+  `archive/legacy_templates/mofa_template_clean_v1/03_mofa_model.qmd` and
+  interpretation sections of `examples/multiomics/tcga_mofa/03_MOFA.qmd`.
 - **Merge sources:** source factor/weight extraction and group summaries; the
   current tidy accessor API.
 - **SOURCE-DERIVED:** native model loading; factor-score and feature-weight

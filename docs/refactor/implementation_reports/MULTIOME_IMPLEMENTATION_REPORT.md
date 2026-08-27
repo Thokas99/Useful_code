@@ -40,8 +40,8 @@ R analytical objects use qs2; tables use TSV.
 ### `templates/multiome/create_object.qmd`
 
 - **Class/status:** SOURCE-BACKED WORKFLOW; draft.
-- **Canonical source:** `CODE_MAP/code_MAP/notebook_templates/multiome/01_create_multiome_object.qmd`.
-- **Merge sources:** Seurat multimodal object examples, `CODE_MAP/code_MAP/00_MAP_ATAC_qc_integration.qmd`, and current Signac object APIs.
+- **Canonical source:** `archive/legacy_templates/notebook_templates_v1/multiome/01_create_multiome_object.qmd`.
+- **Merge sources:** Seurat multimodal object examples, `examples/single_cell/map/00_MAP_ATAC_qc_integration.qmd`, and current Signac object APIs.
 - **SOURCE-DERIVED:** RNA/ATAC assay construction, `CreateChromatinAssay`, fragments, metadata, genome, and initial checks.
 - **API-DERIVED:** explicit `CreateFragmentObject`, current assay/object namespaces, and current qs2 format.
 - **MERGED:** paired matrix alignment and dropped-cell reporting added to the source scaffold.
@@ -60,7 +60,7 @@ R analytical objects use qs2; tables use TSV.
 ### `templates/multiome/wnn.qmd`
 
 - **Class/status:** SOURCE-BACKED WORKFLOW; draft.
-- **Canonical source:** `CODE_MAP/code_MAP/notebook_templates/multiome/02_qc_integration_wnn.qmd`.
+- **Canonical source:** `archive/legacy_templates/notebook_templates_v1/multiome/02_qc_integration_wnn.qmd`.
 - **Merge sources:** current Seurat `FindMultiModalNeighbors`/WNN API and scATAC LSI source.
 - **SOURCE-DERIVED:** RNA normalization/PCA, ATAC TF-IDF/SVD, WNN graph construction, UMAP, and graph clustering.
 - **API-DERIVED:** explicit current WNN graph/reduction names, k, dimensions, resolution, and seed.
@@ -79,7 +79,7 @@ R analytical objects use qs2; tables use TSV.
 ### `templates/multiome/rna_atac_linkage.qmd`
 
 - **Class/status:** SOURCE-BACKED WORKFLOW; draft.
-- **Canonical source:** `CODE_MAP/code_MAP/notebook_templates/multiome/03_rna_atac_linkage.qmd`.
+- **Canonical source:** `archive/legacy_templates/notebook_templates_v1/multiome/03_rna_atac_linkage.qmd`.
 - **Merge sources:** current Signac `LinkPeaks`, `Links`, and `CoveragePlot` API inspection.
 - **SOURCE-DERIVED:** LinkPeaks call, explicit RNA/ATAC assays, distance parameter, links extraction, CoveragePlot pattern, and TSV export.
 - **API-DERIVED:** explicit gene coordinate object and current namespace-qualified accessors.
@@ -98,8 +98,8 @@ R analytical objects use qs2; tables use TSV.
 ### `templates/multiome/rna_to_atac_label_transfer.qmd`
 
 - **Class/status:** SOURCE-BACKED WORKFLOW; draft.
-- **Canonical source:** `CODE_MAP/code_MAP/001_RNA_ATAC_LT.qmd`.
-- **Merge sources:** `CODE_MAP/code_MAP/notebook_templates/multiome/01_create_multiome_object.qmd` and current Seurat/Signac APIs.
+- **Canonical source:** `examples/single_cell/map/001_RNA_ATAC_LT.qmd`.
+- **Merge sources:** `archive/legacy_templates/notebook_templates_v1/multiome/01_create_multiome_object.qmd` and current Seurat/Signac APIs.
 - **SOURCE-DERIVED:** GeneActivity, query ACTIVITY assay, normalization/scaling, RPCA anchors, LSI-weighted TransferData, metadata attachment, and qs2 save.
 - **API-DERIVED:** current `CreateAssay5Object`, explicit feature overlap, prediction TSV export, and current Seurat transfer signatures.
 - **MERGED:** real label-transfer flow plus directional input contracts and retained confidence output.

@@ -124,11 +124,11 @@ artifacts; the TSV files remain the numerical handoff.
 
 Primary source:
 
-- `CODE_MAP/TRENTO_models_miRNA_vs_PD_L1.qmd`
+- `examples/biomarker_ml/trento/TRENTO_models_miRNA_vs_PD_L1.qmd`
 
 Merge source:
 
-- `CODE_MAP/TRENTO_gtExtras_tables.qmd`
+- `examples/biomarker_ml/trento/TRENTO_gtExtras_tables.qmd`
 
 The source notebooks are provenance/examples and remain unchanged. The
 canonical templates do not claim that the source labels, cohort, feature names,
@@ -140,9 +140,9 @@ or biological interpretation are transferable.
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
-**Canonical source:** `CODE_MAP/TRENTO_models_miRNA_vs_PD_L1.qmd`
+**Canonical source:** `examples/biomarker_ml/trento/TRENTO_models_miRNA_vs_PD_L1.qmd`
 **Merge sources:** the source notebook's reduced stable-feature section; frozen
-table/plot contracts from `CODE_MAP/TRENTO_gtExtras_tables.qmd`.
+table/plot contracts from `examples/biomarker_ml/trento/TRENTO_gtExtras_tables.qmd`.
 
 **SOURCE-DERIVED blocks**
 
@@ -212,7 +212,7 @@ and predictor-desirability syntax was used; output extraction was made explicit.
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
-**Canonical source:** `CODE_MAP/TRENTO_gtExtras_tables.qmd`
+**Canonical source:** `examples/biomarker_ml/trento/TRENTO_gtExtras_tables.qmd`
 **Merge sources:** frozen prediction and selected-feature outputs from
 `biomarker_binary_classification_brglm2.qmd`.
 

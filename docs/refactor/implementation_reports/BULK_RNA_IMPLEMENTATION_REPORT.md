@@ -20,12 +20,12 @@ to validate against.
 
 | Template | Class | Status | Canonical source |
 |---|---|---|---|
-| `tximport_edger.qmd` | SOURCE-BACKED WORKFLOW | draft | `CODE_MAP/code_MAP/simple_QC_MGI_organoids.qmd` |
-| `qc_normalization_edger.qmd` | SOURCE-BACKED WORKFLOW | draft | `CODE_MAP/code_MAP/simple_QC_MGI_organoids.qmd` |
+| `tximport_edger.qmd` | SOURCE-BACKED WORKFLOW | draft | `examples/bulk_rna/mgi_organoids/simple_QC_MGI_organoids.qmd` |
+| `qc_normalization_edger.qmd` | SOURCE-BACKED WORKFLOW | draft | `examples/bulk_rna/mgi_organoids/simple_QC_MGI_organoids.qmd` |
 | `differential_expression_edger.qmd` | API / TUTORIAL REMINDER | draft | No complete reusable source implementation found |
-| `gsea.qmd` | SOURCE-BACKED WORKFLOW | draft | `CODE_MAP/code_MAP/GSEA_of_DEGs.qmd` |
-| `singscore.qmd` | SOURCE-BACKED WORKFLOW | draft | `CODE_MAP/code_MAP/HALLMARK_50.qmd` |
-| `gsva.qmd` | SOURCE-BACKED WORKFLOW | draft | `CODE_MAP/code_MAP/00_CPTAC_LUAD_scoring` |
+| `gsea.qmd` | SOURCE-BACKED WORKFLOW | draft | `examples/bulk_rna/mgi_organoids/GSEA_of_DEGs.qmd` |
+| `singscore.qmd` | SOURCE-BACKED WORKFLOW | draft | `examples/bulk_rna/mgi_organoids/HALLMARK_50.qmd` |
+| `gsva.qmd` | SOURCE-BACKED WORKFLOW | draft | `examples/multiomics/cptac_luad/00_CPTAC_LUAD_scoring` |
 
 ## Canonical bulk RNA contracts
 
@@ -112,8 +112,8 @@ The current source material supports the following decisions:
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
-**Canonical source:** `CODE_MAP/code_MAP/simple_QC_MGI_organoids.qmd`
-**Merge sources:** `CODE_MAP/rnaseq_normalization_cheatsheet.md` and current
+**Canonical source:** `examples/bulk_rna/mgi_organoids/simple_QC_MGI_organoids.qmd`
+**Merge sources:** `cheatsheets/rnaseq_normalization_cheatsheet.md` and current
 tximport/edgeR object documentation.
 
 **SOURCE-DERIVED blocks**
@@ -180,9 +180,10 @@ or by a declared aggregation policy.
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
-**Canonical source:** `CODE_MAP/code_MAP/simple_QC_MGI_organoids.qmd`
-**Merge sources:** `CODE_MAP/rnaseq_normalization_cheatsheet.md` and source
-QC/object-flow notes in `CODE_MAP/code_MAP/README.md`.
+**Canonical source:** `examples/bulk_rna/mgi_organoids/simple_QC_MGI_organoids.qmd`
+**Merge sources:** `cheatsheets/rnaseq_normalization_cheatsheet.md` and source
+QC/object-flow notes in the project-example README under
+`examples/single_cell/map/README.md`.
 
 **SOURCE-DERIVED blocks**
 
@@ -297,7 +298,7 @@ contrast, replication unit, and reporting threshold.
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
-**Canonical source:** `CODE_MAP/code_MAP/GSEA_of_DEGs.qmd`
+**Canonical source:** `examples/bulk_rna/mgi_organoids/GSEA_of_DEGs.qmd`
 **Merge sources:** current clusterProfiler documentation and the normalization
 cheat sheet's distinction between statistics and transformed expression.
 
@@ -357,8 +358,8 @@ whether GO simplification is appropriate for the intended report.
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
-**Canonical source:** `CODE_MAP/code_MAP/HALLMARK_50.qmd`
-**Merge sources:** `CODE_MAP/code_MAP/00_CPTAC_LUAD_scoring` and current
+**Canonical source:** `examples/bulk_rna/mgi_organoids/HALLMARK_50.qmd`
+**Merge sources:** `examples/multiomics/cptac_luad/00_CPTAC_LUAD_scoring` and current
 singscore documentation.
 
 **SOURCE-DERIVED blocks**
@@ -411,8 +412,8 @@ appropriate.
 
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
-**Canonical source:** `CODE_MAP/code_MAP/00_CPTAC_LUAD_scoring`
-**Merge sources:** `CODE_MAP/code_MAP/HALLMARK_50.qmd` coverage and reporting
+**Canonical source:** `examples/multiomics/cptac_luad/00_CPTAC_LUAD_scoring`
+**Merge sources:** `examples/bulk_rna/mgi_organoids/HALLMARK_50.qmd` coverage and reporting
 patterns, plus current GSVA documentation.
 
 **SOURCE-DERIVED blocks**

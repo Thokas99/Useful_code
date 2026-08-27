@@ -41,8 +41,8 @@ outputs use TSV.
 ### `templates/scatac/create_object.qmd`
 
 - **Class/status:** SOURCE-BACKED WORKFLOW; draft.
-- **Canonical source:** `CODE_MAP/code_MAP/00_MAP_ATAC_qc_integration.qmd`.
-- **Merge sources:** `CODE_MAP/code_MAP/notebook_templates/scATAC/01_create_signac_object.qmd` and Seurat/Signac object-contract documentation.
+- **Canonical source:** `examples/single_cell/map/00_MAP_ATAC_qc_integration.qmd`.
+- **Merge sources:** `archive/legacy_templates/notebook_templates_v1/scATAC/01_create_signac_object.qmd` and Seurat/Signac object-contract documentation.
 - **SOURCE-DERIVED:** peak matrix orientation, `CreateChromatinAssay`, `CreateSeuratObject`, `sep = c(":", "-")`, `hg38` example, fragments, annotation, `min.cells`, and cell-level object checks.
 - **API-DERIVED:** explicit `CreateFragmentObject` construction and current qs2/API spelling where the source passed the fragment path directly.
 - **MERGED:** source object construction plus explicit barcode intersection/alignment reporting.
@@ -60,8 +60,8 @@ outputs use TSV.
 ### `templates/scatac/qc.qmd`
 
 - **Class/status:** SOURCE-BACKED WORKFLOW; draft.
-- **Canonical source:** `CODE_MAP/code_MAP/00_MAP_ATAC_qc_integration.qmd`.
-- **Merge sources:** `CODE_MAP/code_MAP/notebook_templates/scATAC/02_quality_control_integration.qmd`.
+- **Canonical source:** `examples/single_cell/map/00_MAP_ATAC_qc_integration.qmd`.
+- **Merge sources:** `archive/legacy_templates/notebook_templates_v1/scATAC/02_quality_control_integration.qmd`.
 - **SOURCE-DERIVED:** passed filters, peak-region fragments, FRiP, blacklist ratio, peak counts, nucleosome signal, TSS enrichment, per-sample QC, explicit failure logic, plots, and before/after counts.
 - **API-DERIVED:** current direct `NucleosomeSignal`/`TSSEnrichment` calls and explicit metric alignment.
 - **MERGED:** Cell Ranger-style metrics plus Signac metrics in one compact canonical object flow.
@@ -79,8 +79,8 @@ outputs use TSV.
 ### `templates/scatac/lsi_clustering.qmd`
 
 - **Class/status:** SOURCE-BACKED WORKFLOW; draft.
-- **Canonical source:** `CODE_MAP/code_MAP/00_MAP_ATAC_qc_integration.qmd` LSI section.
-- **Merge sources:** `CODE_MAP/code_MAP/notebook_templates/scATAC/02_quality_control_integration.qmd`.
+- **Canonical source:** `examples/single_cell/map/00_MAP_ATAC_qc_integration.qmd` LSI section.
+- **Merge sources:** `archive/legacy_templates/notebook_templates_v1/scATAC/02_quality_control_integration.qmd`.
 - **SOURCE-DERIVED:** TF-IDF → `FindTopFeatures` → `RunSVD` → LSI UMAP/neighbors/clustering and `q5` feature cutoff.
 - **API-DERIVED:** explicit graph naming, current `DepthCor`, neighbor, cluster, and UMAP argument spelling.
 - **MERGED:** source LSI path with a visible dimension vector and depth-correlation diagnostic.
@@ -98,8 +98,8 @@ outputs use TSV.
 ### `templates/scatac/motif_enrichment_findmotifs.qmd`
 
 - **Class/status:** SOURCE-BACKED WORKFLOW; draft.
-- **Canonical source:** `CODE_MAP/code_MAP/002_ATAC_MOTIF.qmd`.
-- **Merge sources:** `CODE_MAP/code_MAP/notebook_templates/scATAC/03_motif_enrichment.qmd` and current Signac/JASPAR API checks.
+- **Canonical source:** `examples/single_cell/map/002_ATAC_MOTIF.qmd`.
+- **Merge sources:** `archive/legacy_templates/notebook_templates_v1/scATAC/03_motif_enrichment.qmd` and current Signac/JASPAR API checks.
 - **SOURCE-DERIVED:** JASPAR2024, TFBSTools PFM retrieval, CORE vertebrate/human selection, hg38 BSgenome, `AddMotifs`, `FindMotifs`, and `MotifPlot`.
 - **API-DERIVED:** explicit foreground/background TSV contract and current namespace-qualified calls.
 - **MERGED:** real motif setup plus explicit external peak-set definitions and TSV export.

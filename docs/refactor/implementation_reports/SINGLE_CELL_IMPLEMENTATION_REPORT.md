@@ -93,10 +93,10 @@ the templates and does not replace version-specific package documentation.
 ### `create_object.qmd`
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
-- **Canonical source:** `code_MAP/code_MAP/notebook_templates/scRNA/01_create_seurat_object.qmd`.
-- **Merge sources:** `code_MAP/code_MAP/00_MAP_qc_integration.qmd`,
-  `code_MAP/code_MAP/00_MAP_RNA_qc_integration.qmd`, and
-  `code_MAP/code_MAP/GSE171145.qmd` for matrix/metadata alignment and
+- **Canonical source:** `archive/legacy_templates/notebook_templates_v1/scRNA/01_create_seurat_object.qmd`.
+- **Merge sources:** `examples/single_cell/map/00_MAP_qc_integration.qmd`,
+  `examples/single_cell/map/00_MAP_RNA_qc_integration.qmd`, and
+  `examples/single_cell/gse171145.qmd` for matrix/metadata alignment and
   identifier safeguards.
 - **SOURCE-DERIVED blocks:** `CreateSeuratObject()` and
   `PercentageFeatureSet()` object construction.
@@ -133,9 +133,9 @@ the templates and does not replace version-specific package documentation.
 ### `qc.qmd`
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
-- **Canonical sources:** `code_MAP/code_MAP/notebook_templates/scRNA/02_quality_control.qmd`,
-  `code_MAP/code_MAP/00_MAP_RNA_qc_integration.qmd`, and
-  `code_MAP/code_MAP/00_MAP_qc_integration.qmd`.
+- **Canonical sources:** `archive/legacy_templates/notebook_templates_v1/scRNA/02_quality_control.qmd`,
+  `examples/single_cell/map/00_MAP_RNA_qc_integration.qmd`, and
+  `examples/single_cell/map/00_MAP_qc_integration.qmd`.
 - **SOURCE-DERIVED blocks:** feature/count/mitochondrial metrics, transparent
   pass flag, before/after accounting, VlnPlot diagnostics, and filtered-object
   save.
@@ -174,8 +174,8 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical sources:** scDblFinder blocks in
-  `code_MAP/code_MAP/00_MAP_RNA_qc_integration.qmd` and
-  `code_MAP/code_MAP/GSE171145.qmd`.
+  `examples/single_cell/map/00_MAP_RNA_qc_integration.qmd` and
+  `examples/single_cell/gse171145.qmd`.
 - **SOURCE-DERIVED blocks:** Seurat-to-SingleCellExperiment conversion,
   sample-aware `scDblFinder()`, class/score attachment, and per-sample counts.
 - **API-DERIVED blocks:** none.
@@ -207,7 +207,7 @@ the templates and does not replace version-specific package documentation.
 ### `normalization_log.qmd`
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
-- **Canonical sources:** `code_MAP/code_MAP/notebook_templates/scRNA/03_normalization_integration_clustering.qmd`
+- **Canonical sources:** `archive/legacy_templates/notebook_templates_v1/scRNA/03_normalization_integration_clustering.qmd`
   plus the standard log-normalization/PCA route in the MAP workflows.
 - **SOURCE-DERIVED blocks:** `NormalizeData`, `FindVariableFeatures`,
   `ScaleData`, and variable-feature diagnostics.
@@ -243,7 +243,7 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** SCTransform route in
-  `code_MAP/code_MAP/00_MAP_qc_integration.qmd`.
+  `examples/single_cell/map/00_MAP_qc_integration.qmd`.
 - **SOURCE-DERIVED blocks:** `SCTransform`, explicit regression variables,
   variable-feature retention, and SCT feature diagnostics.
 - **API-DERIVED blocks:** current `RunPCA` placement on the SCT assay.
@@ -275,9 +275,9 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** active log-normalized `RunHarmony` route in
-  `code_MAP/code_MAP/00_MAP_RNA_qc_integration.qmd`.
+  `examples/single_cell/map/00_MAP_RNA_qc_integration.qmd`.
 - **Merge sources:** LISI diagnostics from
-  `code_MAP/code_MAP/00_MAP_qc_integration.qmd`.
+  `examples/single_cell/map/00_MAP_qc_integration.qmd`.
 - **SOURCE-DERIVED blocks:** PCA-based `RunHarmony`, post-Harmony neighbors,
   clustering, UMAP, and batch diagnostics.
 - **API-DERIVED blocks:** current package call syntax was checked against the
@@ -312,9 +312,9 @@ the templates and does not replace version-specific package documentation.
 ### `ucell.qmd`
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
-- **Canonical source:** `code_MAP/code_MAP/01_MAP_c1_scoring.qmd`.
-- **Merge sources:** `code_MAP/code_MAP/02_MAP_c1_scoring.qmd` and
-  `code_MAP/code_MAP/09_MAP_C1_Core_refined_signature.qmd` for signature
+- **Canonical source:** `examples/single_cell/map/01_MAP_c1_scoring.qmd`.
+- **Merge sources:** `examples/single_cell/map/02_MAP_c1_scoring.qmd` and
+  `examples/single_cell/map/09_MAP_C1_Core_refined_signature.qmd` for signature
   coverage and direction handling.
 - **SOURCE-DERIVED blocks:** `AddModuleScore_UCell`, UP/DOWN components,
   coverage checks, and metadata attachment.
@@ -348,9 +348,9 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** actual CytoTRACE2 call in
-  `code_MAP/code_MAP/01_MAP_c1_scoring.qmd`.
+  `examples/single_cell/map/01_MAP_c1_scoring.qmd`.
 - **Merge sources:** raw-count and alignment details from
-  `code_MAP/code_MAP/02_MAP_c1_scoring.qmd`.
+  `examples/single_cell/map/02_MAP_c1_scoring.qmd`.
 - **SOURCE-DERIVED blocks:** raw-count call, score/potency extraction, and
   cell-ID alignment.
 - **API-DERIVED blocks:** validation note for the current CytoTRACE2 version,
@@ -382,9 +382,9 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** focused marker scaffold
-  `code_MAP/code_MAP/notebook_templates/scRNA/05_marker_identification_and_export.qmd`.
+  `archive/legacy_templates/notebook_templates_v1/scRNA/05_marker_identification_and_export.qmd`.
 - **Merge sources:** marker/export conventions in
-  `code_MAP/code_MAP/03_MAP_state_markers_statistics_export.qmd`.
+  `examples/single_cell/map/03_MAP_state_markers_statistics_export.qmd`.
 - **SOURCE-DERIVED blocks:** two-group `FindMarkers`, group-size accounting,
   compact DotPlot, and TSV export.
 - **API-DERIVED blocks:** none.
@@ -419,7 +419,7 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** API / TUTORIAL REMINDER; `draft`.
 - **Canonical source:** none. The cited
-  `code_MAP/code_MAP/04_MAP_c1_gene_programs_tradeSeq.qmd` contains no
+  `examples/single_cell/map/04_MAP_c1_gene_programs_tradeSeq.qmd` contains no
   `slingshot()` call; it uses a continuous C1-derived score for one-lineage
   tradeSeq pseudotime.
 - **Merge sources:** descriptive pseudotime scaffold only for the downstream
@@ -459,9 +459,9 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** actual `fitGAM()` and `startVsEndTest()` workflow in
-  `code_MAP/code_MAP/04_MAP_c1_gene_programs_tradeSeq.qmd`.
+  `examples/single_cell/map/04_MAP_c1_gene_programs_tradeSeq.qmd`.
 - **Merge sources:** pseudotime input/output contract from
-  `code_MAP/code_MAP/notebook_templates/scRNA/06_trajectory_gene_programs.qmd`.
+  `archive/legacy_templates/notebook_templates_v1/scRNA/06_trajectory_gene_programs.qmd`.
 - **SOURCE-DERIVED blocks:** raw counts, one-lineage pseudotime/weights,
   expression filter, negative-binomial GAM, parallel backend, endpoint test,
   and BH correction.
@@ -499,9 +499,9 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** complete velocity section in
-  `code_MAP/code_MAP/07_MAP_velocity_scvelo_cellrank.qmd`.
+  `examples/single_cell/map/07_MAP_velocity_scvelo_cellrank.qmd`.
 - **Merge sources:** minimal velocity scaffold in
-  `code_MAP/code_MAP/notebook_templates/scRNA/09_velocity_scvelo_cellrank.qmd`
+  `archive/legacy_templates/notebook_templates_v1/scRNA/09_velocity_scvelo_cellrank.qmd`
   and a concise upstream provenance note.
 - **SOURCE-DERIVED blocks:** spliced/unspliced preprocessing, filtering,
   normalization, neighbors, moments, dynamical recovery, velocity, graph,
@@ -544,7 +544,7 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** complete CellRank2 workflow in
-  `code_MAP/code_MAP/07_MAP_velocity_scvelo_cellrank.qmd`.
+  `examples/single_cell/map/07_MAP_velocity_scvelo_cellrank.qmd`.
 - **Merge sources:** no separate scientific source; current CellRank API
   documentation was used to check the modular kernels/GPCCA structure.
 - **SOURCE-DERIVED blocks:** velocity/connectivity kernels, weighted kernel
@@ -589,7 +589,7 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** active Python bridge in
-  `code_MAP/code_MAP/04_MAP_decoupler_bridge.qmd`.
+  `examples/single_cell/map/04_MAP_decoupler_bridge.qmd`.
 - **Merge sources:** no deprecated R workflow was merged; current Python API
   documentation was used to check `dc.mt.ulm` and output accessors.
 - **SOURCE-DERIVED blocks:** AnnData construction contract, long-format prior
@@ -626,7 +626,7 @@ the templates and does not replace version-specific package documentation.
 ### `hdwgcna.qmd`
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
-- **Canonical source:** `code_MAP/code_MAP/06_MAP_coexpression_modules.qmd`.
+- **Canonical source:** `examples/single_cell/map/06_MAP_coexpression_modules.qmd`.
 - **Merge sources:** none required; old predefined module scoring is not a
   coexpression source.
 - **SOURCE-DERIVED blocks:** variable features, metacells, metacell
@@ -665,7 +665,7 @@ the templates and does not replace version-specific package documentation.
 
 - **Template class / status:** SOURCE-BACKED WORKFLOW; `draft`.
 - **Canonical source:** actual pipeline in
-  `code_MAP/code_MAP/08_MAP_metabolic_activity_scCellFie.qmd`.
+  `examples/single_cell/map/08_MAP_metabolic_activity_scCellFie.qmd`.
 - **Merge sources:** old metabolic-score importer was inspected but not used as
   the computational backbone.
 - **SOURCE-DERIVED blocks:** scCellFie pipeline call, organism, count/batch/
@@ -792,7 +792,7 @@ not evidence that the source ran Slingshot.
 No original notebook is deleted. After execution and output comparison, the
 following old scaffolds may become redundant as active template copies:
 
-- `code_MAP/code_MAP/notebook_templates/scRNA/01_create_seurat_object.qmd`
+- `archive/legacy_templates/notebook_templates_v1/scRNA/01_create_seurat_object.qmd`
 - `02_quality_control.qmd`
 - `03_normalization_integration_clustering.qmd` (split across stages)
 - `09_velocity_scvelo_cellrank.qmd` (split across scVelo and CellRank)
@@ -810,8 +810,8 @@ workflow exists.
 The MAP project notebooks remain examples of complete biological analyses and
 practical implementation choices, especially:
 
-- `code_MAP/code_MAP/00_MAP_RNA_qc_integration.qmd` and
-  `00_MAP_qc_integration.qmd` for richer QC/integration context;
+- `examples/single_cell/map/00_MAP_RNA_qc_integration.qmd` and
+  `examples/single_cell/map/00_MAP_qc_integration.qmd` for richer QC/integration context;
 - `01_MAP_c1_scoring.qmd` and related C1 scoring notebooks for project
   interpretation and signature decisions;
 - `04_MAP_c1_gene_programs_tradeSeq.qmd` for the original one-lineage score
