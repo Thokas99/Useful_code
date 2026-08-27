@@ -1,0 +1,821 @@
+---
+title: "TRENTO Model Tables"
+subtitle: "Model Performance and Cohort Summary"
+author: "Thomas Sirchi"
+date: today
+date-format: "DD MMMM YYYY"
+
+format:
+  html:
+    output-file: "TRENTO_gtExtras_tables.html"
+
+    page-layout: full
+
+    toc: true
+    toc-title: "Contents"
+    toc-location: left
+    toc-depth: 3
+
+    number-sections: true
+    number-depth: 3
+
+    theme:
+      light: lux
+      dark: darkly
+
+    title-block-banner: true
+
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+
+    embed-resources: true
+    self-contained-math: true
+
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-newwindow: true
+
+    fig-width: 16
+    fig-height: 12
+    fig-align: center
+    fig-dpi: 300
+    fig-cap-location: bottom
+
+    tbl-cap-location: top
+
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: false
+  freeze: false
+
+editor: source
+---
+
+This notebook is an output-focused companion to the responder-model analysis. It reads the complete and essential train/test summaries already produced by the fitted bias-reduced logistic regression and turns them into presentation-ready `gt` tables with `gtExtras` styling.
+
+The complete table is intended for audit and supplementary use: it retains the model output, every available metadata field, and the 10 miRNAs retained by the final model. The essential table is intended for review and presentation: it keeps the main model, clinical, immune, treatment, and ECOG fields while retaining the same final-model miRNA expression values.
+
+Both tables use Test and Train row groups, clear column spanners, probability color scales, and a consistent miRNA expression palette. The essential table additionally uses inline probability bars. The notebook also saves a probability plot and a miRNA-expression heatmap as independent figure files.
+
+## Setup and input tables
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(gt)
+library(gtExtras)
+library(scales)
+
+output_table_dir <- "output/gt_tables"
+output_figure_dir <- "output/gt_figures"
+dir.create(output_table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(output_figure_dir, recursive = TRUE, showWarnings = FALSE)
+
+complete_tbl <- readr::read_tsv(
+  "output/tables/br_logreg_train_test_complete.tsv",
+  name_repair = "minimal",
+  show_col_types = FALSE
+)
+
+essential_tbl <- readr::read_tsv(
+  "output/tables/br_logreg_train_test_essential.tsv",
+  name_repair = "minimal",
+  show_col_types = FALSE
+)
+
+model_display_cols <- c(
+  "sample_id",
+  "train_test",
+  "model",
+  "true_class",
+  "predicted_class",
+  "responder_probability",
+  "non_responder_probability",
+  "model_threshold"
+)
+
+mirna_cols <- names(essential_tbl)[
+  startsWith(names(essential_tbl), "miRNA_")
+]
+
+complete_metadata_cols <- setdiff(
+  names(complete_tbl),
+  c(model_display_cols, "split", mirna_cols)
+)
+
+essential_metadata_cols <- setdiff(
+  names(essential_tbl),
+  c(model_display_cols, "responder_bar", "split", mirna_cols)
+)
+
+stopifnot(
+  nrow(complete_tbl) == 71L,
+  nrow(essential_tbl) == nrow(complete_tbl),
+  identical(complete_tbl$sample_id, essential_tbl$sample_id),
+  length(mirna_cols) == 10L,
+  all(c("Test", "Train") %in% complete_tbl$split),
+  identical(
+    names(complete_tbl)[(ncol(complete_tbl) - length(mirna_cols) + 1):ncol(complete_tbl)],
+    mirna_cols
+  ),
+  identical(
+    names(essential_tbl)[(ncol(essential_tbl) - length(mirna_cols) + 1):ncol(essential_tbl)],
+    mirna_cols
+  )
+)
+
+complete_tbl <- complete_tbl |>
+  mutate(split = factor(split, levels = c("Test", "Train")))
+
+essential_tbl <- essential_tbl |>
+  mutate(
+    split = factor(split, levels = c("Test", "Train")),
+    responder_bar = responder_probability
+  )
+
+essential_model_display_cols <- c(model_display_cols, "responder_bar")
+
+mirna_domain <- range(
+  unlist(essential_tbl[mirna_cols], use.names = FALSE),
+  na.rm = TRUE
+)
+
+model_labels <- c(
+  sample_id = "Sample",
+  train_test = "Set",
+  model = "Model",
+  true_class = "True class",
+  predicted_class = "Predicted class",
+  responder_probability = "P(responder)",
+  non_responder_probability = "P(non-responder)",
+  model_threshold = "Threshold"
+)
+
+essential_labels <- c(
+  histology_2class = "Histology",
+  pdl1_class = "PD-L1",
+  pdl1_percent = "PD-L1 (%)",
+  cd274_group = "CD274",
+  Signature_IFNG_class = "IFNG",
+  age_diagnosis = "Age",
+  sex = "Sex",
+  smoking_2class = "Smoking",
+  treatment_type = "Treatment",
+  ecog_group = "ECOG"
+)
+
+miRNA_labels <- setNames(
+  sub("^miRNA_", "", mirna_cols),
+  mirna_cols
+)
+
+```
+
+## Complete table: all metadata, model output, and model miRNAs
+
+This table keeps every column from the complete model summary. The spanners separate model output, available metadata, and the final-model miRNA expression block. The responder probability and miRNA expression cells use continuous color scales; the row-group colors distinguish independent Test samples from in-sample Train evaluations.
+
+```{r}
+#| label: complete-gt-table
+#| tbl-cap: "Complete TRENTO train/test model summary"
+
+complete_gt <- complete_tbl |>
+  gt::gt(
+    groupname_col = "split",
+    id = "trento_complete_model_summary"
+  ) |>
+  gtExtras::gt_theme_538() |>
+  gt::tab_header(
+    title = gt::md("**Complete TRENTO model summary**"),
+    subtitle = gt::md(
+      "All available metadata, model predictions, and final-model miRNA expression"
+    )
+  ) |>
+  gt::cols_label(
+    !!!as.list(model_labels),
+    !!!as.list(miRNA_labels)
+  ) |>
+  gt::tab_spanner(
+    label = "Model output",
+    columns = dplyr::all_of(model_display_cols)
+  ) |>
+  gt::tab_spanner(
+    label = "All available metadata",
+    columns = dplyr::all_of(complete_metadata_cols)
+  ) |>
+  gt::tab_spanner(
+    label = "Final-model miRNA expression",
+    columns = dplyr::all_of(mirna_cols)
+  ) |>
+  gt::fmt_number(
+    columns = dplyr::all_of(c(
+      "responder_probability",
+      "non_responder_probability",
+      "model_threshold",
+      "pdl1_percent",
+      mirna_cols
+    )),
+    decimals = 3
+  ) |>
+  gt::sub_missing(
+    columns = gt::everything(),
+    missing_text = "—"
+  ) |>
+  gtExtras::gt_color_rows(
+    columns = dplyr::all_of(c(
+      "responder_probability",
+      "non_responder_probability",
+      "model_threshold"
+    )),
+    palette = c("#FFF7EC", "#2C7FB8"),
+    pal_type = "continuous",
+    domain = c(0, 1)
+  ) |>
+  gtExtras::gt_color_rows(
+    columns = dplyr::all_of(mirna_cols),
+    palette = c("#F7FBFF", "#08306B"),
+    pal_type = "continuous",
+    domain = mirna_domain
+  ) |>
+  gt::cols_align(
+    align = "center",
+    columns = dplyr::all_of(c(
+      "train_test",
+      "true_class",
+      "predicted_class",
+      "responder_probability",
+      "non_responder_probability",
+      "model_threshold",
+      mirna_cols
+    ))
+  ) |>
+  gt::tab_style(
+    style = list(
+      gt::cell_fill(color = "#E8F1FB"),
+      gt::cell_text(weight = "bold")
+    ),
+    locations = gt::cells_row_groups(groups = "Test")
+  ) |>
+  gt::tab_style(
+    style = list(
+      gt::cell_fill(color = "#EAF5EA"),
+      gt::cell_text(weight = "bold")
+    ),
+    locations = gt::cells_row_groups(groups = "Train")
+  ) |>
+  gt::tab_options(
+    table.font.size = gt::px(8),
+    data_row.padding = gt::px(2),
+    column_labels.font.weight = "bold",
+    row_group.font.weight = "bold",
+    heading.title.font.size = gt::px(16),
+    heading.subtitle.font.size = gt::px(11)
+  ) |>
+  gt::tab_source_note(
+    source_note = gt::md(
+      "**Interpretation:** Test rows are independent held-out evaluations; Train rows are in-sample evaluations of the finalized workflow."
+    )
+  )
+
+complete_gt
+
+gt::gtsave(
+  complete_gt,
+  file.path(output_table_dir, "trento_complete_model_summary.html")
+)
+```
+
+## Essential table: presentation-ready model summary
+
+This compact version keeps the fields most useful for clinical review while preserving all 10 final-model miRNAs. The responder probability is shown both numerically and as an inline bar, and miRNA cells retain a shared expression color scale so values can be compared across samples and features.
+
+```{r}
+#| label: essential-gt-table
+#| tbl-cap: "Essential TRENTO train/test model summary"
+
+essential_gt <- essential_tbl |>
+  gt::gt(
+    groupname_col = "split",
+    id = "trento_essential_model_summary"
+  ) |>
+  gtExtras::gt_theme_538() |>
+  gt::tab_header(
+    title = gt::md("**Essential TRENTO model summary**"),
+    subtitle = gt::md(
+      "Clinical context, model calls, and final-model miRNA expression"
+    )
+  ) |>
+  gt::cols_label(
+    !!!as.list(model_labels),
+    responder_bar = "Probability bar",
+    !!!as.list(essential_labels),
+    !!!as.list(miRNA_labels)
+  ) |>
+  gt::tab_spanner(
+    label = "Model output",
+    columns = dplyr::all_of(essential_model_display_cols)
+  ) |>
+  gt::tab_spanner(
+    label = "Essential metadata",
+    columns = dplyr::all_of(essential_metadata_cols)
+  ) |>
+  gt::tab_spanner(
+    label = "Final-model miRNA expression",
+    columns = dplyr::all_of(mirna_cols)
+  ) |>
+  gt::fmt_number(
+    columns = dplyr::all_of(c(
+      "responder_probability",
+      "non_responder_probability",
+      "model_threshold",
+      "pdl1_percent",
+      mirna_cols
+    )),
+    decimals = 3
+  ) |>
+  gt::sub_missing(
+    columns = gt::everything(),
+    missing_text = "—"
+  ) |>
+  gtExtras::gt_color_rows(
+    columns = responder_probability,
+    palette = c("#FFF7EC", "#2C7FB8"),
+    pal_type = "continuous",
+    domain = c(0, 1)
+  ) |>
+  gtExtras::gt_plt_bar(
+    column = responder_bar,
+    keep_column = FALSE,
+    color = "#2C7FB8",
+    width = 95,
+    scale_type = "percent"
+  ) |>
+  gtExtras::gt_color_rows(
+    columns = dplyr::all_of(mirna_cols),
+    palette = c("#F7FBFF", "#08306B"),
+    pal_type = "continuous",
+    domain = mirna_domain
+  ) |>
+  gt::cols_align(
+    align = "center",
+    columns = dplyr::all_of(c(
+      "train_test",
+      "true_class",
+      "predicted_class",
+      "responder_probability",
+      "non_responder_probability",
+      "model_threshold",
+      "responder_bar",
+      mirna_cols
+    ))
+  ) |>
+  gt::cols_width(
+    sample_id ~ gt::px(85),
+    responder_probability ~ gt::px(105),
+    responder_bar ~ gt::px(105),
+    non_responder_probability ~ gt::px(90),
+    model_threshold ~ gt::px(75),
+    dplyr::all_of(mirna_cols) ~ gt::px(78)
+  ) |>
+  gt::tab_style(
+    style = list(
+      gt::cell_fill(color = "#E8F1FB"),
+      gt::cell_text(weight = "bold")
+    ),
+    locations = gt::cells_row_groups(groups = "Test")
+  ) |>
+  gt::tab_style(
+    style = list(
+      gt::cell_fill(color = "#EAF5EA"),
+      gt::cell_text(weight = "bold")
+    ),
+    locations = gt::cells_row_groups(groups = "Train")
+  ) |>
+  gt::tab_options(
+    table.font.size = gt::px(9),
+    data_row.padding = gt::px(3),
+    column_labels.font.weight = "bold",
+    row_group.font.weight = "bold",
+    heading.title.font.size = gt::px(16),
+    heading.subtitle.font.size = gt::px(11)
+  ) |>
+  gt::tab_source_note(
+    source_note = gt::md(
+      "**Interpretation:** Train rows are in-sample; Test rows are independent held-out evaluations. Probability bars show P(responder)."
+    )
+  )
+
+essential_gt
+
+gt::gtsave(
+  essential_gt,
+  file.path(output_table_dir, "trento_essential_model_summary.html")
+)
+
+```
+
+## Model probability plot
+
+The plot below makes the train/test distinction explicit. The dashed line is the tuned probability threshold, while point color indicates the observed class and point shape indicates whether the prediction was correct.
+
+```{r}
+#| label: model-probability-plot
+#| fig-cap: "Final-model responder probabilities by split and observed class"
+
+probability_plot_data <- essential_tbl |>
+  mutate(
+    sample_id = forcats::fct_reorder(
+      sample_id,
+      responder_probability,
+      .desc = FALSE
+    ),
+    correct = predicted_class == true_class
+  )
+
+model_probability_plot <- ggplot(
+  probability_plot_data,
+  aes(sample_id, responder_probability, color = true_class, shape = correct)
+) +
+  geom_hline(
+    data = distinct(probability_plot_data, model_threshold),
+    aes(yintercept = model_threshold),
+    linetype = "dashed", color = "#555555", linewidth = 0.7,
+    inherit.aes = FALSE
+  ) +
+  geom_point(size = 2.8, alpha = 0.9) +
+  facet_wrap(~split, ncol = 1, scales = "free_x") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::label_percent(accuracy = 1)) +
+  scale_color_manual(values = c(responder = "#1B9E77", `non-responder` = "#D95F02")) +
+  scale_shape_manual(
+    values = c(`TRUE` = 16, `FALSE` = 1),
+    labels = c(`TRUE` = "Correct", `FALSE` = "Incorrect")
+  ) +
+  labs(
+    title = "Final-model responder probabilities",
+    subtitle = "Dashed line: tuned probability threshold",
+    x = NULL,
+    y = "Predicted probability of responder",
+    color = "Observed class",
+    shape = "Prediction"
+  ) +
+  ggpubr::theme_pubclean(base_size = 9) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold")
+  )
+
+ggsave(
+  file.path(output_figure_dir, "trento_model_probability_plot.png"),
+  model_probability_plot,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+model_probability_plot
+
+```
+
+## Final-model miRNA expression heatmap
+
+This heatmap uses the same ten miRNAs shown in both tables. Values are displayed on the original expression scale used by the model summary, with samples ordered by split and predicted responder probability.
+
+```{r}
+#| label: model-mirna-heatmap
+#| fig-cap: "Expression of the ten miRNAs retained by the final model"
+
+library(dplyr)
+library(tibble)
+library(ComplexHeatmap)
+library(circlize)
+library(viridisLite)
+library(grid)
+
+# ==============================================================================
+# 1. Build miRNA expression matrix
+# ==============================================================================
+
+mat <- essential_tbl |>
+  select(sample_id, all_of(mirna_cols)) |>
+  column_to_rownames("sample_id") |>
+  as.matrix()
+
+# Remove miRNAs with zero variance, since they cannot be meaningfully
+# z-scored or used for correlation-based clustering.
+keep <- apply(mat, 2, sd, na.rm = TRUE) > 0
+mat <- mat[, keep, drop = FALSE]
+
+# Z-score each miRNA across samples.
+# At this point:
+#   rows    = samples
+#   columns = miRNAs
+mat <- scale(mat)
+
+# Transpose so ComplexHeatmap receives:
+#   rows    = miRNAs
+#   columns = samples
+mat <- t(mat)
+
+# Clean miRNA names for plotting
+rownames(mat) <- sub("^miRNA_", "", rownames(mat))
+
+
+# ==============================================================================
+# 2. Prepare sample metadata
+# ==============================================================================
+
+meta <- essential_tbl |>
+  select(
+    sample_id,
+    split,
+    true_class,
+    histology_2class,
+    sex,
+    pdl1_class,
+    smoking_2class,
+    responder_probability
+  ) |>
+  filter(sample_id %in% colnames(mat)) |>
+  mutate(
+    # Explicit ordering keeps Train before Test in the heatmap
+    split = factor(split, levels = c("Train", "Test"))
+  ) |>
+  arrange(split)
+
+# Ensure matrix columns and metadata rows are in exactly the same order
+mat <- mat[, meta$sample_id, drop = FALSE]
+
+
+# ==============================================================================
+# 3. Viridis color scale for miRNA z-scores
+# ==============================================================================
+
+# Use symmetric limits so negative and positive z-scores span
+# the same numerical range.
+z_limit <- max(abs(mat), na.rm = TRUE)
+
+col_fun <- colorRamp2(
+  seq(-z_limit, z_limit, length.out = 256),
+  viridis(256)
+)
+
+
+# ==============================================================================
+# 4. Metadata annotation colors
+# ==============================================================================
+
+# Each metadata variable uses a distinct color family to avoid visual ambiguity.
+
+# Observed responder class: green / orange
+class_cols <- setNames(
+  c("#1B9E77", "#D95F02"),
+  unique(na.omit(meta$true_class))
+)
+
+# Histology: purple family
+histology_cols <- setNames(
+  c("#6A3D9A", "#CAB2D6"),
+  unique(na.omit(meta$histology_2class))
+)
+
+# Sex: blue family
+sex_cols <- setNames(
+  c("#2166AC", "#92C5DE"),
+  unique(na.omit(meta$sex))
+)
+
+# PD-L1: yellow / red inferno palette
+pdl1_levels <- unique(na.omit(meta$pdl1_class))
+
+pdl1_cols <- setNames(
+  inferno(
+    length(pdl1_levels),
+    begin = 0.20,
+    end = 0.85
+  ),
+  pdl1_levels
+)
+
+# Smoking: brown / beige family
+smoking_cols <- setNames(
+  c("#8C510A", "#DFC27D","grey45"),
+  unique(na.omit(meta$smoking_2class))
+)
+
+
+# ==============================================================================
+# 5. Top sample annotations
+# ==============================================================================
+
+ha <- HeatmapAnnotation(
+  `Observed class` = meta$true_class,
+  Histology = meta$histology_2class,
+  Sex = meta$sex,
+  `PD-L1 class` = meta$pdl1_class,
+  Smoking = meta$smoking_2class,
+
+  col = list(
+    `Observed class` = class_cols,
+    Histology = histology_cols,
+    Sex = sex_cols,
+    `PD-L1 class` = pdl1_cols,
+    Smoking = smoking_cols
+  ),
+
+  # Missing metadata values
+  na_col = "#D9D9D9",
+
+  # Annotation label formatting
+  annotation_name_gp = gpar(
+    fontsize = 9,
+    fontface = "bold"
+  ),
+
+  # Height of each annotation track
+  simple_anno_size = unit(4, "mm")
+)
+
+
+# ==============================================================================
+# 6. Build ComplexHeatmap
+# ==============================================================================
+
+mirna_heatmap <- Heatmap(
+  mat,
+
+  # ---------------------------------------------------------------------------
+  # Expression color scale
+  # ---------------------------------------------------------------------------
+  name = "Z-score",
+  col = col_fun,
+  na_col = "#D9D9D9",
+
+  # ---------------------------------------------------------------------------
+  # Keep Train and Test as separate column slices
+  # ---------------------------------------------------------------------------
+  column_split = meta$split,
+
+  # Do not cluster Train and Test slices against each other
+  cluster_column_slices = FALSE,
+
+  # ---------------------------------------------------------------------------
+  # Sample clustering
+  #
+  # ComplexHeatmap natively converts Pearson correlation to a distance
+  # and then performs average-linkage hierarchical clustering.
+  #
+  # Samples are clustered independently within Train and Test.
+  # ---------------------------------------------------------------------------
+  cluster_columns = TRUE,
+  clustering_distance_columns = "pearson",
+  clustering_method_columns = "average",
+
+  # ---------------------------------------------------------------------------
+  # miRNA clustering
+  #
+  # miRNAs are clustered globally so both Train and Test retain the
+  # same row order and remain directly comparable.
+  # ---------------------------------------------------------------------------
+  cluster_rows = TRUE,
+  clustering_distance_rows = "pearson",
+  clustering_method_rows = "average",
+
+  # ---------------------------------------------------------------------------
+  # Sample annotations
+  # ---------------------------------------------------------------------------
+  top_annotation = ha,
+
+  # ---------------------------------------------------------------------------
+  # Dendrograms
+  # ---------------------------------------------------------------------------
+  show_row_dend = TRUE,
+  show_column_dend = TRUE,
+
+  row_dend_width = unit(18, "mm"),
+  column_dend_height = unit(15, "mm"),
+
+  # ---------------------------------------------------------------------------
+  # Labels
+  # ---------------------------------------------------------------------------
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+
+  # Sample labels at 45 degrees
+  column_names_rot = 45,
+
+  row_names_gp = gpar(
+    fontsize = 9
+  ),
+
+  column_names_gp = gpar(
+    fontsize = 8,
+    fontface = "bold"
+  ),
+
+  column_title_gp = gpar(
+    fontsize = 11,
+    fontface = "bold"
+  ),
+
+  # ---------------------------------------------------------------------------
+  # Heatmap appearance
+  # ---------------------------------------------------------------------------
+  border = TRUE,
+
+  # ---------------------------------------------------------------------------
+  # Z-score legend
+  # ---------------------------------------------------------------------------
+  heatmap_legend_param = list(
+    title = "Z-score",
+    title_gp = gpar(fontface = "bold")
+  )
+)
+
+
+# ==============================================================================
+# 7. Display heatmap
+# ==============================================================================
+
+draw(
+  mirna_heatmap,
+
+  # Put both heatmap and metadata legends on the right
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+
+  # Stack all legends together in the same legend column
+  merge_legends = TRUE,
+
+  # Overall figure title
+  column_title = "Final-model miRNA expression",
+  column_title_gp = gpar(
+    fontsize = 14,
+    fontface = "bold"
+  )
+)
+
+
+# ==============================================================================
+# 8. Save as high-resolution PNG
+# ==============================================================================
+
+png(
+  filename = file.path(
+    output_figure_dir,
+    "trento_model_mirna_heatmap.png"
+  ),
+  width = 16,
+  height = 12,
+  units = "in",
+  res = 300
+)
+
+draw(
+  mirna_heatmap,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  merge_legends = TRUE,
+  column_title = "Final-model miRNA expression",
+  column_title_gp = gpar(
+    fontsize = 14,
+    fontface = "bold"
+  )
+)
+
+dev.off()
+
+```
+
+## Generated artifacts
+
+The notebook writes the complete and essential `gt` tables to `output/gt_tables/` and the two supporting plots to `output/gt_figures/`. The complete table remains HTML-first because all metadata columns cannot be made paper-width without hiding information; the essential table also receives a PNG export for quick inclusion in presentations or drafts.
+
+```{r}
+#| label: artifact-inventory
+#| echo: false
+
+tibble(
+  artifact = c(
+    "Complete gt table",
+    "Essential gt table",
+    "Essential gt table PNG",
+    "Model probability plot",
+    "Final-model miRNA heatmap"
+  ),
+  path = c(
+    file.path(output_table_dir, "trento_complete_model_summary.html"),
+    file.path(output_table_dir, "trento_essential_model_summary.html"),
+    file.path(output_table_dir, "trento_essential_model_summary.png"),
+    file.path(output_figure_dir, "trento_model_probability_plot.png"),
+    file.path(output_figure_dir, "trento_model_mirna_heatmap.png")
+  )
+) |>
+  mutate(created = file.exists(path))
+```

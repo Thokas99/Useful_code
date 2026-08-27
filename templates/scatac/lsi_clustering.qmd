@@ -1,0 +1,101 @@
+---
+title: "scATAC TF-IDF, LSI, and Clustering"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Run the source-backed unintegrated Signac representation and clustering path:
+
+```text
+filtered Signac object → TF-IDF → top features → SVD → diagnostics
+                         → neighbors → clusters → UMAP
+```
+
+TF-IDF/LSI is a representation and dimension-reduction workflow. It is not
+batch correction.
+
+## Parameters
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(tibble)
+})
+
+input_object <- "input/scatac_qc_filtered.qs2"
+output_object <- "output/scatac_lsi_clusters.qs2"
+lsi_table <- "output/scatac_lsi_embeddings.tsv"
+cluster_table <- "output/scatac_cluster_counts.tsv"
+lsi_figure <- "output/scatac_lsi_depth_correlation.pdf"
+
+assay_name <- "ATAC"
+min_feature_cutoff <- "q5"
+n_svd <- 50L
+lsi_dims <- 1:30
+neighbors_k <- 20L
+cluster_resolution <- 0.5
+umap_seed <- 1L
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(file = input_object)
+stopifnot(inherits(object, "Seurat"), assay_name %in% Seurat::Assays(object))
+DefaultAssay(object) <- assay_name
+
+object <- Signac::RunTFIDF(object)
+object <- Signac::FindTopFeatures(object, min.cutoff = min_feature_cutoff)
+object <- Signac::RunSVD(object, n = n_svd)
+
+pdf(lsi_figure, width = 7, height = 5)
+print(Signac::DepthCor(object, reduction = "lsi"))
+dev.off()
+
+object <- Seurat::FindNeighbors(
+  object, reduction = "lsi", dims = lsi_dims, k.param = neighbors_k,
+  graph.name = c("atac_nn", "atac_snn")
+)
+object <- Seurat::FindClusters(
+  object, graph.name = "atac_snn", resolution = cluster_resolution,
+  random.seed = umap_seed
+)
+cluster_column <- paste0("atac_snn_res.", cluster_resolution)
+object <- Seurat::RunUMAP(
+  object, reduction = "lsi", dims = lsi_dims, seed.use = umap_seed,
+  reduction.name = "umap_atac", reduction.key = "atacUMAP_"
+)
+
+lsi_embeddings <- Embeddings(object, "lsi") |>
+  as.data.frame() |>
+  tibble::rownames_to_column("cell_id")
+readr::write_tsv(lsi_embeddings, lsi_table)
+readr::write_tsv(
+  tibble::tibble(cluster = object[[]][[cluster_column]]) |>
+    dplyr::count(cluster, name = "n_cells"),
+  cluster_table
+)
+qs2::qs_save(object, file = output_object)
+```
+
+## Diagnostics and method notes
+
+The source used `min.cutoff = "q5"`; this is exposed rather than hidden. The
+default dimension vector includes LSI1. Inspect its relationship with depth
+and QC in `DepthCor` before deciding whether to use `2:30` or another range.
+Discarding LSI1 automatically can remove a depth-related axis, but retaining
+it blindly can also make depth dominate neighborhoods. That is a visible
+representation decision, not an integration setting.

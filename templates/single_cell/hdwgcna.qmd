@@ -1,0 +1,146 @@
+---
+title: "hdWGCNA co-expression modules"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Construct co-expression modules and module eigengenes with hdWGCNA from a
+processed Seurat object. This is network/module inference, not predefined
+gene-set scoring.
+
+## Inputs and parameters
+
+The object must contain an expression assay, a reduction for metacell
+construction, a sample column, and a biological grouping column.
+
+```{r}
+library(Seurat)
+library(hdWGCNA)
+library(qs2)
+library(patchwork)
+library(ggplot2)
+library(readr)
+
+input_object <- "input/seurat_object_processed.qs2"
+output_object <- "output/seurat_object_hdwgcna.qs2"
+output_modules <- "output/hdwgcna_modules.tsv"
+output_hubs <- "output/hdwgcna_hub_genes.tsv"
+output_power <- "output/hdwgcna_power_table.tsv"
+output_power_plot <- "output/hdwgcna_soft_powers.png"
+output_kme_plot <- "output/hdwgcna_kme.png"
+
+assay_name <- "SCT"
+expression_layer <- "data"
+metacell_reduction <- "harmony"
+metacell_group_columns <- c("sample_id", "cluster")
+module_group_column <- "cluster"
+eigengene_batch_column <- "sample_id"
+metacell_k <- 25
+max_shared <- 10
+wgcna_name <- "wgcna"
+network_type <- "signed hybrid"
+soft_power <- 4
+n_variable_features <- 3000
+seed <- 1234
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+DefaultAssay(object) <- assay_name
+stopifnot(all(metacell_group_columns %in% colnames(object[[]])))
+stopifnot(metacell_reduction %in% Reductions(object))
+
+features <- head(VariableFeatures(object), n_variable_features)
+stopifnot(length(features) > 0)
+
+object <- SetupForWGCNA(
+  object,
+  features = features,
+  wgcna_name = wgcna_name
+)
+object <- MetacellsByGroups(
+  seurat_obj = object,
+  group.by = metacell_group_columns,
+  reduction = metacell_reduction,
+  k = metacell_k,
+  max_shared = max_shared,
+  ident.group = module_group_column
+)
+object <- NormalizeMetacells(object)
+
+module_groups <- unique(as.character(object[[module_group_column]][, 1]))
+object <- SetDatExpr(
+  object,
+  group_name = module_groups,
+  group.by = module_group_column,
+  assay = assay_name,
+  layer = expression_layer
+)
+object <- TestSoftPowers(object, networkType = network_type)
+power_table <- GetPowerTable(object)
+object <- ConstructNetwork(
+  object,
+  randomSeed = seed,
+  soft_power = soft_power,
+  overwrite_tom = TRUE,
+  tom_name = wgcna_name
+)
+object <- ModuleEigengenes(
+  object,
+  assay = assay_name,
+  group.by.vars = eigengene_batch_column
+)
+object <- ModuleConnectivity(
+  object,
+  group.by = module_group_column,
+  group_name = module_groups
+)
+
+modules <- GetModules(object)
+modules <- modules[modules$module != "grey", , drop = FALSE]
+hub_genes <- modules[order(-abs(modules$kME_max), na.last = NA), , drop = FALSE]
+```
+
+## Diagnostics
+
+```{r}
+dir.create(dirname(output_power_plot), recursive = TRUE, showWarnings = FALSE)
+power_plot <- wrap_plots(PlotSoftPowers(object), ncol = 2)
+ggsave(output_power_plot, power_plot, width = 10, height = 7, dpi = 150)
+print(power_table)
+print(head(modules))
+print(head(hub_genes))
+kme_plot <- PlotKMEs(object, ncol = 3)
+ggsave(output_kme_plot, kme_plot, width = 10, height = 7, dpi = 150)
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_modules), recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(object, output_object)
+write_tsv(as.data.frame(power_table), output_power)
+write_tsv(as.data.frame(modules), output_modules)
+write_tsv(as.data.frame(hub_genes), output_hubs)
+```
+
+## Method notes
+
+Metacell grouping, sample grouping, network type, soft power, and hub ranking
+are scientific decisions. The source used cluster-focused grouping; this
+template exposes sample and cluster grouping so replicate structure is not
+silently discarded. A soft-power value should be justified from diagnostics.
+AddModuleScore-style scoring is not this network analysis.

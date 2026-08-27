@@ -1,0 +1,296 @@
+---
+title: "MOFA2: interpret factors and feature weights"
+format: html
+editor: source
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Interpret a fitted MOFA2 model through sample-level factor scores, feature
+weights and optional metadata associations. This page loads the native model;
+it never retrains it. Factor selection is explicit and post hoc.
+
+## Inputs and parameters
+
+```{r}
+#| label: parameters
+
+model_path <- "output/mofa/mofa_model.hdf5"
+factor_scores_output <- "output/mofa/factor_scores.tsv"
+factor_weights_output <- "output/mofa/factor_weights.tsv"
+top_weights_output <- "output/mofa/top_feature_weights.tsv"
+continuous_association_output <- "output/mofa/factor_continuous_associations.tsv"
+categorical_association_output <- "output/mofa/factor_categorical_associations.tsv"
+group_summary_output <- "output/mofa/factor_group_summaries.tsv"
+
+# Empty means export all factors/views. Otherwise use current factor/view names,
+# after reviewing diagnostics; do not assume Factor1 is privileged.
+factors_to_interpret <- character()
+views_to_report <- character()
+top_features_per_factor <- 20L
+
+metadata_path <- NULL
+metadata_sample_column <- "sample_id"
+continuous_metadata_columns <- character()
+categorical_metadata_column <- NULL
+```
+
+::: {.callout-warning}
+## Post hoc factor selection
+
+MOFA fitting is unsupervised, but downstream factor selection can still become
+outcome-driven. If you screen many factors against a phenotype and focus only
+on the strongest association, treat that as exploratory post hoc analysis and
+report the multiple-testing context. Do not describe the selected factor as if
+the phenotype had been an independent validation target.
+:::
+
+::: {.callout-note}
+## Interpretation language
+
+Factor weights identify covariance structure and high-weight features help
+characterize a latent factor. Factor/phenotype associations are associations;
+MOFA does not establish causal regulatory relationships. Prefer
+“top-weight features” or “features contributing strongly to the factor” over
+causal language.
+:::
+
+## Load the fitted model and extract factors
+
+```{r}
+#| label: extract-factor-scores
+
+model <- MOFA2::load_model(model_path, verbose = FALSE)
+factor_scores <- MOFA2::get_factors(
+  model,
+  groups = "all",
+  factors = "all",
+  as.data.frame = TRUE
+)
+names(factor_scores)[names(factor_scores) == "sample"] <- "sample_id"
+readr::write_tsv(factor_scores, factor_scores_output)
+
+factor_list <- MOFA2::get_factors(model, groups = "all", factors = "all")
+if (length(factor_list) != 1L) {
+  stop("This compact interpretation template expects one sample group.")
+}
+factor_matrix <- factor_list[[1L]]
+available_factors <- colnames(factor_matrix)
+selected_factors <- if (length(factors_to_interpret) == 0L) {
+  available_factors
+} else {
+  if (any(!factors_to_interpret %in% available_factors)) {
+    stop("factors_to_interpret contains an unavailable factor name.")
+  }
+  factors_to_interpret
+}
+```
+
+The factor table is tidy (`sample_id`, `factor`, `value`) and the matrix used
+for plots/associations has one row per sample. Factor sign and order are
+model-specific and should not be compared across independent fits without an
+explicit alignment step.
+
+## Extract signed feature weights
+
+```{r}
+#| label: extract-feature-weights
+
+factor_weights <- MOFA2::get_weights(
+  model,
+  views = "all",
+  factors = "all",
+  scale = FALSE,
+  as.data.frame = TRUE
+)
+names(factor_weights)[names(factor_weights) == "value"] <- "weight"
+factor_weights$abs_weight <- abs(factor_weights$weight)
+readr::write_tsv(factor_weights, factor_weights_output)
+
+if (length(views_to_report) > 0L) {
+  if (any(!views_to_report %in% unique(factor_weights$view))) {
+    stop("views_to_report contains an unavailable view name.")
+  }
+  factor_weights <- factor_weights[factor_weights$view %in% views_to_report,
+                                   , drop = FALSE]
+}
+factor_weights <- factor_weights[factor_weights$factor %in% selected_factors,
+                                 , drop = FALSE]
+
+weight_groups <- split(
+  seq_len(nrow(factor_weights)),
+  list(factor_weights$view, factor_weights$factor),
+  drop = TRUE
+)
+top_weight_indices <- unlist(lapply(weight_groups, function(indices) {
+  ordered <- indices[
+    order(factor_weights$abs_weight[indices], decreasing = TRUE)
+  ]
+  head(ordered, top_features_per_factor)
+}))
+top_weights <- factor_weights[top_weight_indices, , drop = FALSE]
+readr::write_tsv(top_weights, top_weights_output)
+```
+
+Top features are ranked by absolute weight while retaining the signed weight.
+This is a characterization of the fitted factor, not a causal feature list.
+
+## Optional metadata associations
+
+```{r}
+#| label: metadata-associations
+
+if (!is.null(metadata_path) &&
+    (length(continuous_metadata_columns) > 0L ||
+     !is.null(categorical_metadata_column))) {
+  metadata <- readr::read_tsv(metadata_path, show_col_types = FALSE)
+  if (!metadata_sample_column %in% names(metadata)) {
+    stop("metadata_sample_column is absent from the metadata table.")
+  }
+  if (anyDuplicated(metadata[[metadata_sample_column]])) {
+    stop("Metadata sample IDs must be unique.")
+  }
+  if (any(!rownames(factor_matrix) %in% metadata[[metadata_sample_column]])) {
+    stop("All model samples must be present in the metadata table.")
+  }
+  metadata <- metadata[
+    match(rownames(factor_matrix), metadata[[metadata_sample_column]]),
+    ,
+    drop = FALSE
+  ]
+
+  continuous_rows <- list()
+  continuous_index <- 0L
+  for (metadata_column in continuous_metadata_columns) {
+    if (!metadata_column %in% names(metadata) ||
+        !is.numeric(metadata[[metadata_column]])) {
+      stop("continuous_metadata_columns must name numeric columns.")
+    }
+    for (factor_name in selected_factors) {
+      keep <- stats::complete.cases(
+        metadata[[metadata_column]],
+        factor_matrix[, factor_name]
+      )
+      if (sum(keep) >= 3L &&
+          length(unique(metadata[[metadata_column]][keep])) > 1L &&
+          length(unique(factor_matrix[keep, factor_name])) > 1L) {
+        test <- suppressWarnings(stats::cor.test(
+          metadata[[metadata_column]][keep],
+          factor_matrix[keep, factor_name],
+          method = "spearman",
+          exact = FALSE
+        ))
+        continuous_index <- continuous_index + 1L
+        continuous_rows[[continuous_index]] <- data.frame(
+          metadata_column = metadata_column,
+          factor = factor_name,
+          n_samples = sum(keep),
+          rho = unname(test$estimate),
+          p_value = test$p.value,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  if (length(continuous_rows) > 0L) {
+    continuous_associations <- do.call(rbind, continuous_rows)
+    continuous_associations$adjusted_p_value <- stats::p.adjust(
+      continuous_associations$p_value,
+      method = "BH"
+    )
+    readr::write_tsv(
+      continuous_associations,
+      continuous_association_output
+    )
+  }
+
+  if (!is.null(categorical_metadata_column)) {
+    if (!categorical_metadata_column %in% names(metadata)) {
+      stop("categorical_metadata_column is absent from the metadata table.")
+    }
+    category_rows <- list()
+    group_rows <- list()
+    category_index <- 0L
+    group_index <- 0L
+    for (factor_name in selected_factors) {
+      grouping <- metadata[[categorical_metadata_column]]
+      keep <- !is.na(grouping) & !is.na(factor_matrix[, factor_name])
+      if (sum(keep) >= 3L && length(unique(grouping[keep])) >= 2L) {
+        test <- stats::kruskal.test(
+          factor_matrix[keep, factor_name] ~ as.factor(grouping[keep])
+        )
+        category_index <- category_index + 1L
+        category_rows[[category_index]] <- data.frame(
+          metadata_column = categorical_metadata_column,
+          factor = factor_name,
+          n_samples = sum(keep),
+          groups = length(unique(grouping[keep])),
+          p_value = test$p.value,
+          stringsAsFactors = FALSE
+        )
+        for (group_name in unique(grouping[keep])) {
+          group_index <- group_index + 1L
+          group_rows[[group_index]] <- data.frame(
+            metadata_column = categorical_metadata_column,
+            group = as.character(group_name),
+            factor = factor_name,
+            n_samples = sum(keep & grouping == group_name),
+            median_score = stats::median(
+              factor_matrix[keep & grouping == group_name, factor_name]
+            ),
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+    if (length(category_rows) > 0L) {
+      categorical_associations <- do.call(rbind, category_rows)
+      categorical_associations$adjusted_p_value <- stats::p.adjust(
+        categorical_associations$p_value,
+        method = "BH"
+      )
+      readr::write_tsv(
+        categorical_associations,
+        categorical_association_output
+      )
+      readr::write_tsv(do.call(rbind, group_rows), group_summary_output)
+    }
+  }
+}
+```
+
+Continuous associations use Spearman correlation and adjust the tested
+factor-variable combinations with Benjamini-Hochberg correction. The optional
+categorical section uses a modest Kruskal-Wallis comparison without assuming two
+groups and reports group medians. In both cases, one sample is one observation;
+multiple views do not create replicated samples.
+
+## Factor-score heatmap
+
+```{r}
+#| label: factor-score-heatmap
+
+heatmap_matrix <- factor_matrix[, selected_factors, drop = FALSE]
+if (nrow(heatmap_matrix) > 1L && ncol(heatmap_matrix) > 0L) {
+  heatmap(
+    heatmap_matrix,
+    scale = "none",
+    Colv = NA,
+    main = "Selected MOFA factor scores"
+  )
+}
+```
+
+The heatmap needs no biological group annotation and therefore does not require
+a fixed phenotype label. Ordering by metadata, if added for a particular study,
+should remain an explicit post hoc choice.
+
+## Output contract
+
+This page consumes `mofa_model.hdf5` and exports tidy factor scores, signed
+feature weights, absolute-weight top-feature tables, and optional metadata
+associations/group summaries. It does not refit the model and does not recreate
+signature scoring, pathway enrichment, motif analysis or TF-activity workflows.

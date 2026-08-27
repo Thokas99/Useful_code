@@ -1,0 +1,147 @@
+---
+title: "Sample-level signature scoring with singscore"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  freeze: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Score a directional gene signature separately in each sample using within-
+sample gene ranks. This is a sample-level score, not a gene-set enrichment
+p-value and not differential expression.
+
+::: {.callout-note}
+## Source-backed workflow
+
+The source Hallmark and sample-scoring notebooks use `rankGenes()` followed by
+`simpleScore()`. The canonical version keeps the useful coverage checks and
+up/down components while making the signature and expression input generic.
+:::
+
+## Inputs and parameters
+
+Use an expression matrix with genes in rows and samples in columns. The matrix
+should be a comparable expression representation such as logCPM, logTPM, or
+another declared normalized scale. The signature TSV must contain `gene_id`
+and `direction`, with directions `UP` and `DOWN`.
+
+```{r parameters}
+expression_path <- "input/normalized_expression.tsv"
+signature_path <- "input/signature.tsv"
+gene_id_column <- "gene_id"
+direction_column <- "direction"
+center_score <- TRUE
+minimum_genes_per_direction <- 1L
+
+output_score_table <- "output/tables/singscore_scores.tsv"
+output_coverage_table <- "output/tables/singscore_gene_coverage.tsv"
+```
+
+## Analysis
+
+```{r load-expression}
+expression_tbl <- readr::read_tsv(expression_path, show_col_types = FALSE)
+stopifnot(gene_id_column %in% names(expression_tbl))
+
+expr_mat <- expression_tbl |>
+  tibble::column_to_rownames(gene_id_column) |>
+  as.matrix()
+storage.mode(expr_mat) <- "numeric"
+
+stopifnot(nrow(expr_mat) > 0L, ncol(expr_mat) > 0L)
+stopifnot(!anyDuplicated(rownames(expr_mat)))
+stopifnot(!anyDuplicated(colnames(expr_mat)))
+stopifnot(all(is.finite(expr_mat)))
+```
+
+```{r signature-coverage}
+signature_tbl <- readr::read_tsv(signature_path, show_col_types = FALSE)
+stopifnot(all(c(gene_id_column, direction_column) %in% names(signature_tbl)))
+
+signature_tbl <- signature_tbl |>
+  dplyr::transmute(
+    gene_id = as.character(.data[[gene_id_column]]),
+    direction = toupper(as.character(.data[[direction_column]]))
+  ) |>
+  dplyr::filter(
+    !is.na(gene_id),
+    nzchar(gene_id),
+    direction %in% c("UP", "DOWN")
+  ) |>
+  dplyr::distinct()
+
+up_genes <- intersect(
+  signature_tbl$gene_id[signature_tbl$direction == "UP"],
+  rownames(expr_mat)
+)
+down_genes <- intersect(
+  signature_tbl$gene_id[signature_tbl$direction == "DOWN"],
+  rownames(expr_mat)
+)
+
+coverage_table <- tibble::tibble(
+  direction = c("UP", "DOWN"),
+  requested = c(
+    sum(signature_tbl$direction == "UP"),
+    sum(signature_tbl$direction == "DOWN")
+  ),
+  found = c(length(up_genes), length(down_genes))
+) |>
+  dplyr::mutate(
+    missing = requested - found,
+    coverage = found / requested
+  )
+
+stopifnot(
+  length(up_genes) >= minimum_genes_per_direction,
+  length(down_genes) >= minimum_genes_per_direction
+)
+```
+
+```{r score-samples}
+rank_data <- singscore::rankGenes(expr_mat)
+
+score_table <- singscore::simpleScore(
+  rankData = rank_data,
+  upSet = up_genes,
+  downSet = down_genes,
+  centerScore = center_score
+) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("sample_id")
+
+stopifnot(identical(score_table$sample_id, colnames(expr_mat)))
+
+dir.create(dirname(output_score_table), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_coverage_table), recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(score_table, output_score_table)
+readr::write_tsv(coverage_table, output_coverage_table)
+```
+
+## Outputs
+
+The score TSV retains `TotalScore`, `UpScore`, `DownScore`, and the associated
+dispersion columns returned by singscore. Preserve these components before any
+optional downstream standardization or group comparison.
+
+## Method notes
+
+Singscore ranks the measured genes within each sample. It is therefore
+scientifically distinct from ranked-list GSEA, GSVA, single-cell UCell, and
+regulatory-activity methods such as decoupler. The direction of the signature
+is explicit: up genes and down genes contribute separate components to the
+directional score.
+
+Signature coverage is a diagnostic, not proof that a score is biologically
+valid. Low coverage, many tied values, inconsistent gene identifiers, or
+platform-specific missingness should be investigated before interpretation.
+The source example uses Hallmark signatures, but Hallmark is not mandatory in
+this reusable template.

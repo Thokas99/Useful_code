@@ -1,0 +1,104 @@
+---
+title: "Single-cell marker comparison"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Compare two explicitly named cell groups with Seurat FindMarkers and export a
+compact marker table. The printed group sizes are a basic diagnostic. This is a
+group comparison, not an all-cluster marker
+screen.
+
+## Inputs and parameters
+
+```{r}
+library(Seurat)
+library(qs2)
+library(readr)
+library(ggplot2)
+
+input_object <- "input/seurat_object_clustered.qs2"
+output_markers <- "output/markers_group_1_vs_group_2.tsv"
+output_plot <- "output/marker_dotplot.png"
+
+assay_name <- "RNA"
+group_column <- "cluster"
+group_1 <- "group_1"
+group_2 <- "group_2"
+test_use <- "wilcox"
+min_pct <- 0.10
+logfc_threshold <- 0.25
+only_positive <- FALSE
+n_plot_genes <- 12
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+DefaultAssay(object) <- assay_name
+stopifnot(group_column %in% colnames(object[[]]))
+Idents(object) <- object[[group_column, drop = TRUE]]
+group_counts <- table(Idents(object))
+stopifnot(all(c(group_1, group_2) %in% names(group_counts)))
+print(group_counts[c(group_1, group_2)])
+
+markers <- FindMarkers(
+  object,
+  ident.1 = group_1,
+  ident.2 = group_2,
+  assay = assay_name,
+  test.use = test_use,
+  min.pct = min_pct,
+  logfc.threshold = logfc_threshold,
+  only.pos = only_positive
+)
+markers <- data.frame(gene = rownames(markers), markers, row.names = NULL)
+```
+
+## Diagnostics
+
+```{r}
+dir.create(dirname(output_plot), recursive = TRUE, showWarnings = FALSE)
+print(head(markers, 20))
+print(nrow(markers))
+if (nrow(markers) > 0) {
+  top_genes <- head(markers$gene, n_plot_genes)
+  p <- DotPlot(object, features = top_genes, group.by = group_column) + RotatedAxis()
+  ggsave(output_plot, p, width = 10, height = 5, dpi = 150)
+}
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_markers), recursive = TRUE, showWarnings = FALSE)
+write_tsv(markers, output_markers)
+```
+
+## Method notes
+
+The test, minimum detection fraction, and log-fold-change threshold remain
+visible. FindMarkers is not a substitute for a replicated pseudobulk or
+design-based differential-expression analysis. Add an all-cluster marker
+template only if that is a separate supported use case.
+
+::: {.callout-warning}
+## Biological replication warning
+
+`FindMarkers()` here is a cell-level exploratory comparison. When patients or
+samples are the biological replicates, treating thousands of cells from a few
+samples as independent replicates can produce overconfident inference. Use a
+sample-aware design or pseudobulk analysis for replicated claims; that workflow
+is intentionally outside this template.
+:::

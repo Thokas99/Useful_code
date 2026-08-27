@@ -1,0 +1,98 @@
+---
+title: "Single-cell doublet detection with scDblFinder"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Call doublets with scDblFinder, attach the calls to a Seurat object, and make
+the exclusion policy explicit. The default output retains all cells and
+records the calls.
+
+## Inputs and parameters
+
+```{r}
+library(Seurat)
+library(SingleCellExperiment)
+library(scDblFinder)
+library(qs2)
+library(readr)
+
+input_object <- "input/seurat_object_qc.qs2"
+output_object <- "output/seurat_object_doublet_calls.qs2"
+output_calls <- "output/doublet_calls.tsv"
+
+assay_name <- "RNA"
+sample_column <- "sample_id"
+remove_doublets <- FALSE
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+DefaultAssay(object) <- assay_name
+stopifnot(sample_column %in% colnames(object[[]]))
+
+sce <- as.SingleCellExperiment(object, assay = assay_name)
+sce <- scDblFinder(
+  sce,
+  samples = colData(sce)[[sample_column]]
+)
+
+calls <- data.frame(
+  cell_id = colnames(sce),
+  doublet_class = colData(sce)$scDblFinder.class,
+  doublet_score = colData(sce)$scDblFinder.score,
+  sample_id = colData(sce)[[sample_column]],
+  row.names = colnames(sce)
+)
+
+object[["scDblFinder.class"]] <- calls[colnames(object), "doublet_class"]
+object[["scDblFinder.score"]] <- calls[colnames(object), "doublet_score"]
+
+if (remove_doublets) {
+  object <- subset(object, subset = scDblFinder.class == "singlet")
+}
+```
+
+## Diagnostics
+
+```{r}
+print(table(calls$doublet_class, calls$sample_id, useNA = "ifany"))
+print(summary(calls$doublet_score))
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_calls), recursive = TRUE, showWarnings = FALSE)
+write_tsv(calls, output_calls)
+qs2::qs_save(object, output_object)
+```
+
+## Method notes
+
+The source workflows apply doublet handling in a sample-aware context. Confirm
+whether calls should be made before or after merging samples for the study
+design. The `sample_column` should represent an independent capture/library
+loading experiment; unrelated libraries should not be silently pooled as one
+capture. A doublet score is not a biological state.
+
+::: {.callout-warning}
+## Capture-library contract
+
+Doublet detection is conditioned on the cells that could have co-occurred in a
+capture. Use a sample/library column that reflects that experimental unit and
+review the per-library call counts before deciding whether to remove cells.
+:::

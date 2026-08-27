@@ -1,0 +1,714 @@
+---
+title: "Biomarker binary classification with bias-reduced logistic regression"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  freeze: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Fit a small-cohort binary biomarker classifier with a fixed train/test split,
+training-only preprocessing, supervised feature selection inside resampling,
+class weighting, bias-reduced logistic regression, and explicit held-out
+evaluation. The reduced stable-feature model is a secondary sensitivity
+analysis, not a replacement for the primary model.
+
+::: {.callout-note}
+## Source-backed workflow
+
+This notebook preserves the implemented modeling route and reporting contracts
+from the source biomarker analysis. Project labels, identifiers, and paths are
+replaced by explicit inputs and parameters.
+:::
+
+## Inputs and parameters
+
+The expression file is a wide CSV with one feature identifier column and one
+sample per remaining column. The split and signature files are TSV files. The
+split file must contain one row per sample and the columns named below.
+
+```{r}
+# Input contract
+expression_path <- "input/feature_expression.csv"
+split_path <- "input/train_test_split.tsv"
+signature_path <- "input/signature_features.tsv"
+metadata_path <- NULL
+feature_id_column <- 1L
+
+sample_id_column <- "sample_id"
+outcome_column <- "outcome"
+split_column <- "train_test"
+train_label <- "train"
+test_label <- "test"
+positive_class <- "positive"
+negative_class <- "negative"
+
+# Modeling decisions
+class_weight_alpha <- 0.5
+mc_prop <- 0.70
+mc_times <- 200L
+top_n_features <- 10L
+threshold_grid <- seq(0.45, 0.80, by = 0.05)
+stability_cutoff <- 0.50
+reduced_panel_size <- 4L
+run_reduced_panel <- TRUE
+seed <- 1234L
+
+# Output contract
+output_model <- "output/models/biomarker_brglm2_fit_bundle.qs2"
+output_reduced_model <- "output/models/biomarker_brglm2_reduced_fit_bundle.qs2"
+output_table_dir <- "output/tables"
+output_figure_dir <- "output/figures"
+dir.create(dirname(output_model), recursive = TRUE, showWarnings = FALSE)
+dir.create(output_table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(output_figure_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+## Analysis
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(tailor)
+library(filtro)
+library(important)
+library(desirability2)
+library(brglm2)
+library(bundle)
+library(qs2)
+
+tidymodels_prefer()
+set.seed(seed)
+
+split_raw <- readr::read_tsv(split_path, show_col_types = FALSE)
+stopifnot(all(c(sample_id_column, outcome_column, split_column) %in% names(split_raw)))
+
+split_tbl <- split_raw |>
+  dplyr::transmute(
+    sample_id = .data[[sample_id_column]],
+    outcome = .data[[outcome_column]],
+    train_test = .data[[split_column]]
+  )
+
+stopifnot(
+  !anyNA(split_tbl$sample_id),
+  !anyDuplicated(split_tbl$sample_id),
+  all(split_tbl$train_test %in% c(train_label, test_label)),
+  all(split_tbl$outcome %in% c(positive_class, negative_class))
+)
+
+split_tbl <- split_tbl |>
+  dplyr::mutate(
+    outcome = factor(outcome, levels = c(positive_class, negative_class))
+  )
+
+signature_tbl <- readr::read_tsv(signature_path, show_col_types = FALSE)
+signature_features <- signature_tbl[[1]] |>
+  as.character() |>
+  unique()
+stopifnot(length(signature_features) > 0L, !anyNA(signature_features))
+
+expression_wide <- readr::read_csv(expression_path, show_col_types = FALSE)
+names(expression_wide)[feature_id_column] <- "feature_id"
+expression_sample_ids <- setdiff(names(expression_wide), "feature_id")
+
+stopifnot(
+  !anyDuplicated(expression_wide$feature_id),
+  !anyNA(expression_wide$feature_id),
+  !anyDuplicated(expression_sample_ids),
+  all(split_tbl$sample_id %in% expression_sample_ids),
+  all(signature_features %in% expression_wide$feature_id)
+)
+
+expression_matrix <- expression_wide |>
+  dplyr::filter(feature_id %in% signature_features) |>
+  tidyr::pivot_longer(
+    -feature_id,
+    names_to = "sample_id",
+    values_to = "expression"
+  ) |>
+  tidyr::pivot_wider(
+    names_from = feature_id,
+    values_from = expression
+  )
+
+original_features <- setdiff(names(expression_matrix), "sample_id")
+predictor_names <- make.names(original_features, unique = TRUE)
+predictor_map <- tibble::tibble(
+  original_feature = original_features,
+  predictor = predictor_names
+)
+names(expression_matrix)[-1] <- predictor_names
+
+model_data <- split_tbl |>
+  dplyr::inner_join(expression_matrix, by = "sample_id")
+stopifnot(nrow(model_data) == nrow(split_tbl))
+
+train_data <- model_data |>
+  dplyr::filter(train_test == train_label) |>
+  dplyr::select(-train_test)
+test_data <- model_data |>
+  dplyr::filter(train_test == test_label) |>
+  dplyr::select(-train_test)
+
+stopifnot(
+  nrow(train_data) > 1L,
+  nrow(test_data) > 0L,
+  dplyr::n_distinct(train_data$outcome) == 2L,
+  dplyr::n_distinct(test_data$outcome) == 2L,
+  !anyDuplicated(train_data$sample_id),
+  !anyDuplicated(test_data$sample_id),
+  !anyDuplicated(intersect(train_data$sample_id, test_data$sample_id)),
+  top_n_features > 0L,
+  top_n_features <= length(predictor_names)
+)
+
+class_weight_tbl <- train_data |>
+  dplyr::count(outcome) |>
+  dplyr::mutate(
+    class_weight = (sum(n) / (dplyr::n_distinct(outcome) * n)) ^ class_weight_alpha,
+    class_weight = class_weight / stats::weighted.mean(class_weight, n)
+  ) |>
+  dplyr::select(outcome, class_weight)
+
+train_data <- train_data |>
+  dplyr::left_join(class_weight_tbl, by = "outcome") |>
+  dplyr::mutate(
+    class_weight = hardhat::importance_weights(as.numeric(class_weight))
+  )
+
+readr::write_tsv(
+  class_weight_tbl,
+  file.path(output_table_dir, "class_weights.tsv")
+)
+```
+
+The recipe is estimated separately inside every resampling split. The
+supervised filter therefore cannot use assessment or test observations when it
+selects features. Importance weights are represented as a typed case-weight
+column rather than as an ordinary biomarker predictor.
+
+```{r}
+filter_goals <- desirability2::desirability(
+  maximize(roc_auc),
+  maximize(aov_fstat)
+)
+
+filter_prop <- top_n_features / length(predictor_names)
+
+model_recipe <- recipes::recipe(outcome ~ ., data = train_data) |>
+  recipes::update_role(sample_id, new_role = "id") |>
+  recipes::step_zv(recipes::all_predictors()) |>
+  important::step_predictor_desirability(
+    recipes::all_predictors(),
+    score = filter_goals,
+    prop_terms = filter_prop
+  ) |>
+  recipes::step_normalize(recipes::all_predictors())
+
+training_balance <- model_recipe |>
+  recipes::prep() |>
+  recipes::bake(new_data = NULL) |>
+  dplyr::count(outcome, name = "n")
+
+readr::write_tsv(
+  training_balance,
+  file.path(output_table_dir, "training_balance_after_preprocessing.tsv")
+)
+
+cv_folds <- rsample::mc_cv(
+  train_data,
+  prop = mc_prop,
+  times = mc_times,
+  strata = outcome
+)
+
+tune_metrics <- yardstick::metric_set(
+  yardstick::bal_accuracy,
+  yardstick::kap,
+  yardstick::f_meas,
+  yardstick::roc_auc,
+  yardstick::accuracy,
+  yardstick::sens,
+  yardstick::spec,
+  yardstick::recall,
+  yardstick::mcc
+)
+
+extract_selected_features <- function(x) {
+  selected_predictors <- workflows::extract_mold(x)$predictors |>
+    names() |>
+    intersect(predictor_names)
+
+  tibble::tibble(predictor = selected_predictors)
+}
+
+brglm_spec <- parsnip::logistic_reg() |>
+  parsnip::set_engine(
+    "glm",
+    family = stats::binomial(),
+    method = brglm2::brglm_fit,
+    type = "AS_mean"
+  ) |>
+  parsnip::set_mode("classification")
+
+threshold_tailor <- tailor::tailor() |>
+  tailor::adjust_probability_threshold(threshold = tune::tune())
+
+brglm_workflow <- workflows::workflow() |>
+  workflows::add_recipe(model_recipe) |>
+  workflows::add_model(brglm_spec) |>
+  workflows::add_tailor(threshold_tailor)
+
+brglm_tune <- tune::tune_grid(
+  brglm_workflow,
+  resamples = cv_folds,
+  grid = tibble::tibble(threshold = threshold_grid),
+  metrics = tune_metrics,
+  control = tune::control_grid(
+    save_pred = TRUE,
+    extract = extract_selected_features
+  )
+)
+
+best_brglm <- tune::select_best(
+  brglm_tune,
+  metric = "bal_accuracy"
+)
+
+brglm_fit <- tune::finalize_workflow(brglm_workflow, best_brglm) |>
+  parsnip::fit(data = train_data)
+
+brglm_fit_bundle <- bundle::bundle(brglm_fit)
+qs2::qs_save(brglm_fit_bundle, output_model)
+
+readr::write_tsv(
+  tune::collect_metrics(brglm_tune),
+  file.path(output_table_dir, "tuning_metrics.tsv")
+)
+```
+
+## Held-out diagnostics
+
+The test set is used once for final evaluation. ROC-AUC and PR-AUC describe
+probability ranking; threshold-dependent metrics describe the selected cutoff.
+Undefined metrics remain `NA` when a class is absent from the predictions.
+
+```{r}
+test_predictions <- test_data |>
+  dplyr::select(sample_id, outcome) |>
+  dplyr::bind_cols(
+    predict(brglm_fit, new_data = test_data, type = "prob"),
+    predict(brglm_fit, new_data = test_data, type = "class")
+  ) |>
+  dplyr::mutate(
+    truth = factor(outcome, levels = c(positive_class, negative_class)),
+    .pred_class = factor(.pred_class, levels = c(positive_class, negative_class))
+  )
+
+test_metrics <- dplyr::bind_rows(
+  tune_metrics(
+    test_predictions,
+    truth = truth,
+    estimate = .pred_class,
+    .pred_positive,
+    event_level = "first"
+  ),
+  yardstick::pr_auc(
+    test_predictions,
+    truth = truth,
+    .pred_positive,
+    event_level = "first"
+  ),
+  yardstick::precision(
+    test_predictions,
+    truth = truth,
+    estimate = .pred_class,
+    event_level = "first"
+  ),
+  yardstick::npv(
+    test_predictions,
+    truth = truth,
+    estimate = .pred_class,
+    event_level = "first"
+  ),
+  yardstick::j_index(
+    test_predictions,
+    truth = truth,
+    estimate = .pred_class,
+    event_level = "first"
+  )
+) |>
+  dplyr::mutate(
+    model = "bias-reduced logistic regression",
+    evaluation = paste0(
+      "held-out test; threshold = ",
+      round(best_brglm$threshold, 3)
+    )
+  )
+
+confusion_table <- test_predictions |>
+  dplyr::count(truth, prediction = .pred_class, name = "n")
+
+roc_curve <- yardstick::roc_curve(
+  test_predictions,
+  truth = truth,
+  .pred_positive,
+  event_level = "first"
+)
+pr_curve <- yardstick::pr_curve(
+  test_predictions,
+  truth = truth,
+  .pred_positive,
+  event_level = "first"
+)
+
+readr::write_tsv(test_predictions, file.path(output_table_dir, "test_predictions.tsv"))
+readr::write_tsv(test_metrics, file.path(output_table_dir, "test_metrics.tsv"))
+readr::write_tsv(confusion_table, file.path(output_table_dir, "test_confusion_matrix.tsv"))
+readr::write_tsv(roc_curve, file.path(output_table_dir, "test_roc_curve.tsv"))
+readr::write_tsv(pr_curve, file.path(output_table_dir, "test_pr_curve.tsv"))
+
+roc_plot <- autoplot(roc_curve) +
+  ggplot2::labs(title = "Held-out ROC curve")
+pr_plot <- autoplot(pr_curve) +
+  ggplot2::labs(title = "Held-out precision-recall curve")
+ggplot2::ggsave(
+  file.path(output_figure_dir, "test_roc_curve.png"),
+  roc_plot,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
+ggplot2::ggsave(
+  file.path(output_figure_dir, "test_pr_curve.png"),
+  pr_plot,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
+```
+
+## Feature stability
+
+Feature stability is calculated from one selected-feature record per Monte
+Carlo resample. The final model's selected features and the full stability
+table are both retained.
+
+```{r}
+selected_features_by_resample <- tune::collect_extracts(brglm_tune) |>
+  dplyr::select(id, .extracts) |>
+  dplyr::distinct(id, .keep_all = TRUE) |>
+  tidyr::unnest(.extracts)
+
+n_resamples <- dplyr::n_distinct(selected_features_by_resample$id)
+
+feature_stability <- selected_features_by_resample |>
+  dplyr::group_by(predictor) |>
+  dplyr::summarise(
+    n_selected = dplyr::n_distinct(id),
+    selection_frequency = n_selected / n_resamples,
+    .groups = "drop"
+  ) |>
+  dplyr::left_join(predictor_map, by = "predictor") |>
+  dplyr::mutate(
+    feature = dplyr::coalesce(original_feature, predictor),
+    stability_class = dplyr::case_when(
+      selection_frequency >= 0.70 ~ "highly stable",
+      selection_frequency >= stability_cutoff ~ "stable",
+      TRUE ~ "unstable"
+    )
+  ) |>
+  dplyr::select(feature, predictor, n_selected, selection_frequency, stability_class) |>
+  dplyr::arrange(dplyr::desc(selection_frequency), feature)
+
+final_predictors <- workflows::extract_mold(brglm_fit)$predictors |>
+  names() |>
+  intersect(predictor_names)
+
+final_feature_stability <- feature_stability |>
+  dplyr::filter(predictor %in% final_predictors)
+
+readr::write_tsv(
+  feature_stability,
+  file.path(output_table_dir, "feature_stability.tsv")
+)
+readr::write_tsv(
+  final_feature_stability,
+  file.path(output_table_dir, "final_feature_stability.tsv")
+)
+
+stability_plot <- feature_stability |>
+  dplyr::slice_max(selection_frequency, n = 20, with_ties = FALSE) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = selection_frequency,
+      y = forcats::fct_reorder(feature, selection_frequency),
+      fill = stability_class
+    )
+  ) +
+  ggplot2::geom_col() +
+  ggplot2::scale_x_continuous(limits = c(0, 1)) +
+  ggplot2::labs(
+    title = "Feature-selection stability",
+    x = "Selection frequency",
+    y = NULL,
+    fill = "Stability"
+  ) +
+  ggplot2::theme_bw()
+
+ggplot2::ggsave(
+  file.path(output_figure_dir, "feature_stability.png"),
+  stability_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+## Secondary reduced stable-feature model
+
+This sensitivity model uses only features that meet the declared stability
+cutoff. Its feature panel is selected from training resamples before the
+held-out test evaluation. It must not replace the primary model silently.
+
+```{r}
+if (run_reduced_panel) {
+  stable_predictors <- feature_stability |>
+    dplyr::filter(selection_frequency >= stability_cutoff) |>
+    dplyr::arrange(dplyr::desc(selection_frequency), feature) |>
+    dplyr::slice_head(n = reduced_panel_size) |>
+    dplyr::pull(predictor)
+
+  stopifnot(length(stable_predictors) == reduced_panel_size)
+
+  reduced_recipe <- recipes::recipe(outcome ~ ., data = train_data) |>
+    recipes::update_role(sample_id, new_role = "id") |>
+    recipes::step_rm(
+      tidyselect::all_of(setdiff(predictor_names, stable_predictors))
+    ) |>
+    recipes::step_zv(recipes::all_predictors()) |>
+    recipes::step_normalize(recipes::all_predictors())
+
+  reduced_workflow <- workflows::workflow() |>
+    workflows::add_recipe(reduced_recipe) |>
+    workflows::add_model(brglm_spec) |>
+    workflows::add_tailor(threshold_tailor)
+
+  reduced_tune <- tune::tune_grid(
+    reduced_workflow,
+    resamples = cv_folds,
+    grid = tibble::tibble(threshold = threshold_grid),
+    metrics = tune_metrics,
+    control = tune::control_grid(save_pred = TRUE)
+  )
+  reduced_best <- tune::select_best(reduced_tune, metric = "bal_accuracy")
+  reduced_fit <- tune::finalize_workflow(reduced_workflow, reduced_best) |>
+    parsnip::fit(data = train_data)
+
+  reduced_fit_bundle <- bundle::bundle(reduced_fit)
+  qs2::qs_save(reduced_fit_bundle, output_reduced_model)
+
+  reduced_test_predictions <- test_data |>
+    dplyr::select(sample_id, outcome) |>
+    dplyr::bind_cols(
+      predict(reduced_fit, new_data = test_data, type = "prob"),
+      predict(reduced_fit, new_data = test_data, type = "class")
+    ) |>
+    dplyr::mutate(
+      truth = factor(outcome, levels = c(positive_class, negative_class)),
+      .pred_class = factor(.pred_class, levels = c(positive_class, negative_class))
+    )
+
+  reduced_test_metrics <- dplyr::bind_rows(
+    tune_metrics(
+      reduced_test_predictions,
+      truth = truth,
+      estimate = .pred_class,
+      .pred_positive,
+      event_level = "first"
+    ),
+    yardstick::pr_auc(
+      reduced_test_predictions,
+      truth = truth,
+      .pred_positive,
+      event_level = "first"
+    ),
+    yardstick::precision(
+      reduced_test_predictions,
+      truth = truth,
+      estimate = .pred_class,
+      event_level = "first"
+    ),
+    yardstick::npv(
+      reduced_test_predictions,
+      truth = truth,
+      estimate = .pred_class,
+      event_level = "first"
+    ),
+    yardstick::j_index(
+      reduced_test_predictions,
+      truth = truth,
+      estimate = .pred_class,
+      event_level = "first"
+    )
+  ) |>
+    dplyr::mutate(
+      model = paste0("reduced stable-feature panel (n=", length(stable_predictors), ")"),
+      evaluation = paste0(
+        "held-out test; threshold = ",
+        round(reduced_best$threshold, 3)
+      )
+    )
+
+  reduced_confusion_table <- reduced_test_predictions |>
+    dplyr::count(truth, prediction = .pred_class, name = "n")
+  reduced_roc_curve <- yardstick::roc_curve(
+    reduced_test_predictions,
+    truth = truth,
+    .pred_positive,
+    event_level = "first"
+  )
+  reduced_pr_curve <- yardstick::pr_curve(
+    reduced_test_predictions,
+    truth = truth,
+    .pred_positive,
+    event_level = "first"
+  )
+
+  readr::write_tsv(
+    feature_stability |>
+      dplyr::filter(predictor %in% stable_predictors) |>
+      dplyr::slice_head(n = reduced_panel_size),
+    file.path(output_table_dir, "reduced_stable_features.tsv")
+  )
+  readr::write_tsv(
+    reduced_test_predictions,
+    file.path(output_table_dir, "reduced_test_predictions.tsv")
+  )
+  readr::write_tsv(
+    reduced_test_metrics,
+    file.path(output_table_dir, "reduced_test_metrics.tsv")
+  )
+  readr::write_tsv(
+    reduced_confusion_table,
+    file.path(output_table_dir, "reduced_test_confusion_matrix.tsv")
+  )
+  readr::write_tsv(
+    reduced_roc_curve,
+    file.path(output_table_dir, "reduced_test_roc_curve.tsv")
+  )
+  readr::write_tsv(
+    reduced_pr_curve,
+    file.path(output_table_dir, "reduced_test_pr_curve.tsv")
+  )
+}
+```
+
+## Frozen prediction summaries
+
+These tables are the input contract for
+`model_reporting.qmd`. Feature columns are prefixed with
+`feature_`, while the complete table may additionally contain metadata joined
+after model fitting. Metadata are never used by the classifier unless they are
+explicitly added to the expression input and recipe.
+
+```{r}
+feature_output_names <- paste0("feature_", final_predictors)
+feature_values <- model_data |>
+  dplyr::select(sample_id, dplyr::all_of(final_predictors))
+names(feature_values)[-1] <- feature_output_names
+
+all_predictions <- model_data |>
+  dplyr::select(sample_id, train_test, outcome) |>
+  dplyr::bind_cols(
+    predict(brglm_fit, new_data = model_data, type = "prob"),
+    predict(brglm_fit, new_data = model_data, type = "class")
+  ) |>
+  dplyr::transmute(
+    sample_id,
+    split = train_test,
+    truth = as.character(outcome),
+    predicted_class = as.character(.pred_class),
+    probability_positive = .pred_positive,
+    probability_negative = .pred_negative,
+    threshold = best_brglm$threshold
+  ) |>
+  dplyr::left_join(feature_values, by = "sample_id")
+
+complete_summary <- all_predictions
+
+if (!is.null(metadata_path)) {
+  metadata <- readr::read_tsv(metadata_path, show_col_types = FALSE)
+  stopifnot(sample_id_column %in% names(metadata))
+  names(metadata)[names(metadata) == sample_id_column] <- "sample_id"
+  stopifnot(!anyDuplicated(metadata$sample_id))
+  complete_summary <- complete_summary |>
+    dplyr::left_join(metadata, by = "sample_id")
+}
+
+essential_columns <- c(
+  "sample_id",
+  "split",
+  "truth",
+  "predicted_class",
+  "probability_positive",
+  "probability_negative",
+  "threshold",
+  feature_output_names
+)
+essential_summary <- complete_summary |>
+  dplyr::select(dplyr::all_of(essential_columns))
+
+readr::write_tsv(
+  complete_summary,
+  file.path(output_table_dir, "biomarker_train_test_complete.tsv")
+)
+readr::write_tsv(
+  essential_summary,
+  file.path(output_table_dir, "biomarker_train_test_essential.tsv")
+)
+
+if (requireNamespace("sessioninfo", quietly = TRUE)) {
+  capture.output(sessioninfo::session_info(), file = "output/session_info.txt")
+}
+```
+
+## Method notes
+
+- The train/test split is supplied, not inferred from the feature matrix.
+- Feature selection, normalization, and threshold tuning occur using training
+  data and resampling only; the test set remains held out until the final
+  evaluation.
+- The supervised top-feature filter and class weighting are retained from the
+  source workflow. The number of Monte Carlo resamples is exposed because it
+  affects stability and runtime.
+- Bias-reduced logistic regression is a modeling choice from the source
+  workflow, not a guarantee against small-sample optimism or separation.
+- ROC-AUC, PR-AUC, threshold metrics, confusion counts, coefficient summaries,
+  and feature stability answer different questions and should be reviewed
+  together.
+- The reduced panel is a training-derived sensitivity analysis. Panel size and
+  stability cutoff are scientific decisions and should not be selected from
+  held-out performance.
+
+::: {.callout-warning}
+## Replication and validation warning
+
+Rows in this notebook are observations for the classifier. If multiple rows
+come from the same patient, donor, or experimental unit, a row-level split can
+overstate generalization. Use grouped splitting or external validation when
+the biological replicate is not the individual row.
+:::
+
+Before using this template, verify the current `tidymodels`, `tailor`,
+`filtro`, `desirability2`, `brglm2`, and `bundle` APIs, reproduce the held-out
+metrics with representative inputs, inspect undefined metrics, and confirm
+that the model bundle can be reloaded with `qs2::qs_read()`.

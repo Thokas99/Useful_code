@@ -1,0 +1,150 @@
+---
+title: "scATAC Quality Control"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Compute fragment-aware ATAC QC metrics, inspect them by sample, apply an
+explicit baseline filter, and save the filtered object. The source workflow
+combined Cell Ranger per-barcode metrics with Signac/fragtk metrics and kept
+before/after accounting.
+
+## Inputs and parameters
+
+The metrics TSV should contain `cell_id`, `passed_filters`,
+`peak_region_fragments`, and `blacklist_region_fragments`. The latter two are
+used to calculate FRiP and blacklist ratio when those columns are not already
+present.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+})
+
+input_object <- "input/scatac_created.qs2"
+metrics_path <- "input/singlecell_metrics.tsv"
+output_object <- "output/scatac_qc_filtered.qs2"
+qc_table_path <- "output/scatac_qc_per_cell.tsv"
+sample_summary_path <- "output/scatac_qc_by_sample.tsv"
+figure_path <- "output/scatac_qc_distributions.pdf"
+
+assay_name <- "ATAC"
+sample_column <- "sample_id"
+
+# These defaults mirror the active source workflow, but are not biological constants.
+min_peak_counts <- 1000
+min_passed_filters <- 3000
+min_pct_reads_in_peaks <- 25
+max_blacklist_ratio <- 0.05
+max_nucleosome_signal <- 1.5
+min_tss_enrichment <- 6
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(file = input_object)
+metrics <- readr::read_tsv(metrics_path, show_col_types = FALSE)
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(sample_column) %in% colnames(object[[]])))
+peak_count_column <- paste0("nCount_", assay_name)
+stopifnot(peak_count_column %in% colnames(object[[]]))
+stopifnot(all(c("cell_id", "passed_filters", "peak_region_fragments",
+                "blacklist_region_fragments") %in% colnames(metrics)))
+stopifnot(!anyDuplicated(metrics$cell_id))
+fragment_path <- Signac::Fragments(object[[assay_name]])[[1]]@path
+stopifnot(file.exists(paste0(fragment_path, ".tbi")))
+
+metrics <- metrics[match(colnames(object), metrics$cell_id), , drop = FALSE]
+stopifnot(all(metrics$cell_id == colnames(object)))
+metrics$pct_reads_in_peaks <- 100 * metrics$peak_region_fragments / metrics$passed_filters
+metrics$blacklist_ratio <- metrics$blacklist_region_fragments / metrics$peak_region_fragments
+rownames(metrics) <- metrics$cell_id
+
+metric_columns <- setdiff(colnames(metrics), c("cell_id", colnames(object[[]])))
+object <- Seurat::AddMetaData(object, metadata = metrics[, metric_columns, drop = FALSE])
+DefaultAssay(object) <- assay_name
+object <- Signac::NucleosomeSignal(object, assay = assay_name)
+object <- Signac::TSSEnrichment(object, assay = assay_name, fast = TRUE)
+
+qc_table <- object[[]] |>
+  tibble::rownames_to_column("cell_id") |>
+  mutate(
+    qc_pass =
+      .data[[peak_count_column]] >= min_peak_counts &
+      passed_filters >= min_passed_filters &
+      pct_reads_in_peaks >= min_pct_reads_in_peaks &
+      blacklist_ratio <= max_blacklist_ratio &
+      nucleosome_signal <= max_nucleosome_signal &
+      TSS.enrichment >= min_tss_enrichment
+  )
+
+before_by_sample <- qc_table |>
+  count(.data[[sample_column]], name = "cells_before")
+after_by_sample <- qc_table |>
+  filter(qc_pass) |>
+  count(.data[[sample_column]], name = "cells_after")
+sample_summary <- full_join(before_by_sample, after_by_sample, by = sample_column) |>
+  mutate(cells_after = coalesce(cells_after, 0L))
+
+readr::write_tsv(qc_table, qc_table_path)
+readr::write_tsv(sample_summary, sample_summary_path)
+
+object$qc_pass <- qc_table$qc_pass[match(colnames(object), qc_table$cell_id)]
+cells_before <- ncol(object)
+keep_cells <- qc_table$cell_id[which(qc_table$qc_pass)]
+object <- subset(object, cells = keep_cells)
+cells_after <- ncol(object)
+
+pdf(figure_path, width = 11, height = 8)
+print(VlnPlot(object, features = c(peak_count_column,
+                                  paste0("nFeature_", assay_name),
+                                  "nucleosome_signal", "TSS.enrichment"),
+              group.by = sample_column, pt.size = 0, ncol = 2))
+dev.off()
+
+readr::write_tsv(
+  tibble::tibble(cells_before = cells_before, cells_after = cells_after,
+                 peaks = nrow(object[[assay_name]])),
+  "output/scatac_qc_before_after.tsv"
+)
+qs2::qs_save(object, file = output_object)
+```
+
+## Diagnostics and method notes
+
+The source workflow used passed-filter fragments, fraction of reads in peaks,
+blacklist ratio, peak counts, nucleosome signal, and TSS enrichment together.
+The PDF and TSV outputs preserve distributions, per-cell flags, per-sample
+counts, and before/after accounting. Missing or non-finite values should be
+investigated rather than treated as high-quality cells.
+
+::: {.callout-note}
+## Workflow preference
+
+I prefer inspecting QC distributions separately by sample and looking at
+several metrics together. A pooled threshold can hide sample-specific behavior.
+Fixed cutoffs are transparent and useful as a baseline, but they are not
+universal constants; protocol, library depth, and biological context matter.
+An unusual sample or cell is a reason to investigate, not an automatic deletion
+rule. Doublet detection should be considered alongside, not hidden inside, QC.
+:::
+
+The source also contains distribution-aware/MAD ideas in other workflows, but
+their exact multipliers are not made universal here. If a MAD policy is used,
+make its direction, multiplier, and sample scope explicit before filtering.

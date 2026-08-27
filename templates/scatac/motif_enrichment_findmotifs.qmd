@@ -1,0 +1,121 @@
+---
+title: "scATAC Motif Enrichment with FindMotifs"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Add JASPAR motif matches to a Signac assay and test enrichment in a selected
+foreground peak set against an explicit background universe. This preserves the
+real `002_ATAC_MOTIF.qmd` pattern without retaining project clusters or TF
+interpretation.
+
+## Inputs and parameters
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(tibble)
+  library(TFBSTools)
+  library(JASPAR2024)
+  library(RSQLite)
+  library(BSgenome.Hsapiens.UCSC.hg38)
+})
+
+input_object <- "input/scatac_lsi_clusters.qs2"
+foreground_path <- "input/foreground_peaks.tsv"
+background_path <- "input/background_peaks.tsv"
+output_object <- "output/scatac_motifs.qs2"
+motif_table_path <- "output/scatac_findmotifs.tsv"
+motif_figure_path <- "output/scatac_motif_plot.pdf"
+
+assay_name <- "ATAC"
+peak_id_column <- "peak_id"
+genome_build <- "hg38"
+jaspar_database <- "JASPAR2024"
+species_tax_id <- 9606L
+top_motifs_to_plot <- 6L
+stopifnot(genome_build == "hg38", jaspar_database == "JASPAR2024")
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(file = input_object)
+foreground <- readr::read_tsv(foreground_path, show_col_types = FALSE)
+background <- readr::read_tsv(background_path, show_col_types = FALSE)
+stopifnot(inherits(object, "Seurat"), assay_name %in% Assays(object))
+stopifnot(all(c(peak_id_column) %in% colnames(foreground)))
+stopifnot(all(c(peak_id_column) %in% colnames(background)))
+stopifnot(!anyDuplicated(foreground[[peak_id_column]]))
+stopifnot(!anyDuplicated(background[[peak_id_column]]))
+stopifnot(all(foreground[[peak_id_column]] %in% rownames(object[[assay_name]])))
+stopifnot(all(background[[peak_id_column]] %in% rownames(object[[assay_name]])))
+
+jaspar_resource <- JASPAR2024::JASPAR2024()
+jaspar_db <- RSQLite::dbConnect(RSQLite::SQLite(), JASPAR2024::db(jaspar_resource))
+pfm <- TFBSTools::getMatrixSet(
+  jaspar_db,
+  opts = list(
+    collection = "CORE",
+    tax_group = "vertebrates",
+    species = species_tax_id,
+    all_versions = FALSE
+  )
+)
+RSQLite::dbDisconnect(jaspar_db)
+
+DefaultAssay(object) <- assay_name
+object <- Signac::AddMotifs(
+  object = object,
+  genome = BSgenome.Hsapiens.UCSC.hg38,
+  pfm = pfm,
+  assay = assay_name
+)
+
+foreground_peaks <- foreground[[peak_id_column]]
+background_peaks <- background[[peak_id_column]]
+motif_results <- Signac::FindMotifs(
+  object = object,
+  features = foreground_peaks,
+  background = background_peaks,
+  assay = assay_name,
+  p.adjust.method = "BH"
+)
+
+readr::write_tsv(
+  tibble::rownames_to_column(as.data.frame(motif_results), "motif_id"),
+  motif_table_path
+)
+
+pdf(motif_figure_path, width = 9, height = 7)
+if (nrow(motif_results) > 0) {
+  print(Signac::MotifPlot(object, motifs = head(rownames(motif_results), top_motifs_to_plot)))
+}
+dev.off()
+qs2::qs_save(object, file = output_object)
+```
+
+## Method notes
+
+The foreground definition is intentionally external and visible: it may be a
+selected or differential peak set, but the selection rule belongs in the
+upstream analysis. The background is also explicit rather than silently using
+an arbitrary default. Peak coordinates, `genome_build`, the BSgenome sequence,
+and JASPAR motif resources must agree. The source used JASPAR2024, CORE
+vertebrate motifs, human taxon 9606, and current-version-only matrices.
+
+`FindMotifs` is peak-set enrichment. chromVAR is a separate per-cell deviation
+analysis; motif enrichment p-values are not chromVAR activity scores.

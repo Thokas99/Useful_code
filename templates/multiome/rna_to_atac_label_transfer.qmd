@@ -1,0 +1,113 @@
+---
+title: "RNA-to-ATAC Label Transfer"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Transfer labels from an RNA reference to an ATAC query by creating a
+GeneActivity assay in the query and finding anchors in shared gene space. The
+reference/query roles are directional. This is label transfer, not generic
+batch integration.
+
+::: {.callout-warning}
+## GeneActivity is not measured RNA
+
+GeneActivity is an accessibility-derived proxy summarized in gene space. It is
+useful for mapping an ATAC query to an RNA reference, but it is not observed
+RNA expression and should not be interpreted as replacing the RNA assay.
+:::
+
+## Parameters
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(SeuratObject)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(tibble)
+})
+
+reference_object_path <- "input/rna_reference.qs2"
+query_object_path <- "input/atac_query.qs2"
+output_query_object <- "output/atac_query_label_transferred.qs2"
+prediction_table <- "output/atac_label_transfer_predictions.tsv"
+
+reference_assay <- "RNA"
+query_atac_assay <- "ATAC"
+activity_assay <- "ACTIVITY"
+reference_label_column <- "cell_type"
+query_atac_reduction <- "lsi"
+anchor_reduction <- "rpca"
+anchor_dims <- 1:30
+weight_dims <- 1:39
+```
+
+## Analysis
+
+```{r}
+reference <- qs2::qs_read(file = reference_object_path)
+query <- qs2::qs_read(file = query_object_path)
+stopifnot(inherits(reference, "Seurat"), inherits(query, "Seurat"))
+stopifnot(reference_assay %in% Assays(reference), query_atac_assay %in% Assays(query))
+stopifnot(reference_label_column %in% colnames(reference[[]]))
+stopifnot(query_atac_reduction %in% Reductions(query))
+stopifnot(anchor_reduction == "rpca")
+stopifnot("pca" %in% Reductions(reference))
+stopifnot(max(weight_dims) <= ncol(Embeddings(query, query_atac_reduction)))
+stopifnot(!activity_assay %in% Assays(query))
+
+transfer_features <- VariableFeatures(reference, assay = reference_assay)
+stopifnot(length(transfer_features) > 0)
+gene_activities <- Signac::GeneActivity(
+  query, assay = query_atac_assay, features = transfer_features
+)
+query[[activity_assay]] <- SeuratObject::CreateAssay5Object(counts = gene_activities)
+query <- NormalizeData(query, assay = activity_assay)
+query <- ScaleData(query, assay = activity_assay, features = rownames(query[[activity_assay]]))
+
+shared_features <- intersect(transfer_features, rownames(query[[activity_assay]]))
+stopifnot(length(shared_features) > 0)
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = query,
+  reference.assay = reference_assay,
+  query.assay = activity_assay,
+  features = shared_features,
+  reduction = anchor_reduction,
+  dims = anchor_dims
+)
+
+predictions <- TransferData(
+  anchorset = anchors,
+  refdata = setNames(reference[[]][[reference_label_column]], rownames(reference[[]])),
+  query = query,
+  weight.reduction = query[[query_atac_reduction]],
+  dims = weight_dims
+)
+stopifnot(identical(rownames(predictions), colnames(query)))
+query <- AddMetaData(query, metadata = predictions)
+prediction_table_data <- tibble::rownames_to_column(as.data.frame(predictions), "cell_id")
+readr::write_tsv(prediction_table_data, prediction_table)
+qs2::qs_save(query, file = output_query_object)
+```
+
+## Diagnostics and method notes
+
+The prediction table retains predicted labels and confidence columns returned
+by the current Seurat API. Review score distributions, cell-level identities,
+and reference/query compatibility; there is no universal acceptance threshold.
+The source workflow used `reduction = "rpca"` and weighted transfer using the
+query LSI reduction, which are retained explicitly here. RPCA anchors in this
+context are a transfer choice, not a claim that the query was batch-integrated.

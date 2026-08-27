@@ -1,0 +1,91 @@
+---
+title: "RNA–ATAC Peak–Gene Linkage"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Use Signac `LinkPeaks` to estimate statistical associations between RNA
+expression and nearby ATAC peaks in a paired object. Links are regulatory
+evidence for follow-up, not proof of enhancer causality.
+
+## Parameters
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(Signac)
+  library(qs2)
+  library(readr)
+  library(tibble)
+})
+
+input_object <- "input/multiome_wnn.qs2"
+gene_coordinates_path <- "input/gene_coordinates.qs2"
+output_object <- "output/multiome_rna_atac_links.qs2"
+links_table <- "output/multiome_rna_atac_links.tsv"
+coverage_figure <- "output/multiome_coverage_links.pdf"
+
+rna_assay <- "RNA"
+atac_assay <- "ATAC"
+genes_to_link <- NULL
+link_distance <- 500000L
+min_link_cells <- 10L
+link_method <- "pearson"
+coverage_region <- NULL
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(file = input_object)
+gene_coordinates <- qs2::qs_read(file = gene_coordinates_path)
+stopifnot(inherits(object, "Seurat"))
+stopifnot(all(c(rna_assay, atac_assay) %in% Assays(object)))
+stopifnot(identical(colnames(object[[rna_assay]]), colnames(object[[atac_assay]])))
+stopifnot(inherits(gene_coordinates, "GRanges"))
+
+DefaultAssay(object) <- atac_assay
+object <- Signac::LinkPeaks(
+  object = object,
+  peak.assay = atac_assay,
+  expression.assay = rna_assay,
+  expression.slot = "data",
+  peak.slot = "counts",
+  gene.coords = gene_coordinates,
+  genes.use = genes_to_link,
+  distance = link_distance,
+  min.cells = min_link_cells,
+  method = link_method
+)
+links <- Signac::Links(object[[atac_assay]])
+link_table <- tibble::as_tibble(as.data.frame(links))
+readr::write_tsv(link_table, links_table)
+
+pdf(coverage_figure, width = 9, height = 4)
+if (!is.null(coverage_region)) {
+  print(Signac::CoveragePlot(
+    object, region = coverage_region, assay = atac_assay,
+    expression.assay = rna_assay
+  ))
+}
+dev.off()
+qs2::qs_save(object, file = output_object)
+```
+
+## Method notes
+
+The distance window, gene coordinate object, expression/peak assays, and model
+method are explicit. `LinkPeaks` relies on compatible genomic coordinates and
+an appropriate expression representation; inspect its returned scores and
+correlations rather than treating every nearby peak as linked. Set
+`coverage_region` to a real region only after checking the coordinate build.

@@ -1,0 +1,121 @@
+---
+title: "Slingshot trajectory inference"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: API / TUTORIAL REMINDER
+
+## What it does
+
+Slingshot infers a cluster-level lineage structure from a reduced-dimensional
+representation and fits smooth principal curves through the inferred lineages.
+It is useful when a continuous transition or branching process is biologically
+plausible and clustering has already been performed.
+
+::: {.callout-note}
+## API reminder
+
+This is an API/tutorial reminder constructed from the current official
+Slingshot API, not an executed analysis pipeline. Consult the current package
+documentation and vignette before applying it to real data.
+:::
+
+## Inputs and parameters
+
+The input Seurat object must contain a reduced-dimensional embedding and a
+cell-level cluster column. The cluster resolution and the choice of reduction
+are scientific decisions, not merely plotting settings.
+
+```{r}
+library(Seurat)
+library(SingleCellExperiment)
+library(slingshot)
+library(qs2)
+library(readr)
+
+input_object <- "input/seurat_object_clustered.qs2"
+output_object <- "output/slingshot_sce.qs2"
+output_pseudotime <- "output/slingshot_pseudotime.tsv"
+output_weights <- "output/slingshot_curve_weights.tsv"
+output_plot <- "output/slingshot_trajectories.png"
+
+assay_name <- "RNA"
+reduction_name <- "pca"
+cluster_column <- "cluster"
+start_cluster <- NULL
+end_clusters <- NULL
+```
+
+## Minimal API
+
+```{r}
+object <- qs2::qs_read(input_object)
+stopifnot(reduction_name %in% Reductions(object))
+stopifnot(cluster_column %in% colnames(object[[]]))
+stopifnot(identical(rownames(Embeddings(object, reduction_name)), colnames(object)))
+
+sce <- as.SingleCellExperiment(object, assay = assay_name)
+stopifnot(identical(colnames(sce), colnames(object)))
+reducedDim(sce, reduction_name) <- Embeddings(object, reduction_name)
+colData(sce)[[cluster_column]] <- factor(object[[cluster_column, drop = TRUE]])
+
+sce <- slingshot(
+  sce,
+  clusterLabels = cluster_column,
+  reducedDim = reduction_name,
+  start.clus = start_cluster,
+  end.clus = end_clusters
+)
+
+pseudotime <- slingPseudotime(sce)
+curve_weights <- slingCurveWeights(sce)
+```
+
+## Outputs and diagnostic
+
+```{r}
+print(dim(pseudotime))
+print(colSums(!is.na(pseudotime)))
+
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+png(output_plot, width = 900, height = 700)
+plot(
+  reducedDim(sce, reduction_name)[, 1:2],
+  col = as.integer(colData(sce)[[cluster_column]]),
+  pch = 16,
+  asp = 1,
+  xlab = reduction_name,
+  ylab = paste0(reduction_name, " 2")
+)
+lines(SlingshotDataSet(sce), lwd = 2)
+dev.off()
+
+qs2::qs_save(sce, output_object)
+write_tsv(
+  data.frame(cell_id = rownames(pseudotime), pseudotime),
+  output_pseudotime
+)
+write_tsv(
+  data.frame(cell_id = rownames(curve_weights), curve_weights),
+  output_weights
+)
+```
+
+## Method notes
+
+Review the reduction, cluster resolution, root/starting cluster, terminal
+constraints, branching plausibility, and curve fit before interpreting
+pseudotime. The pseudotime matrix and curve weights can be passed to tradeSeq;
+tradeSeq is a separate gene-level GAM analysis.
+
+For current arguments, branching constraints, lineage diagnostics, and
+version-specific behavior, consult the [official Slingshot package
+documentation](https://bioconductor.org/packages/release/bioc/html/slingshot.html)
+and [vignette](https://github.com/kstreet13/slingshot/blob/main/vignettes/vignette.Rmd).

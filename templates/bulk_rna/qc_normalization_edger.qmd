@@ -1,0 +1,283 @@
+---
+title: "Bulk RNA-seq QC and normalization with edgeR"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  freeze: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Inspect sample-level bulk RNA-seq quality, filter lowly expressed genes,
+estimate library-composition normalization factors, and create a normalized
+logCPM representation while retaining the filtered raw counts for edgeR
+modeling.
+
+::: {.callout-note}
+## Source-backed workflow
+
+This is the detailed QC baseline reconstructed from the source RNA-seq
+workflow. It keeps library size, detected genes, expression distributions,
+sample correlation, PCA, and clustering visible before any sample is removed.
+:::
+
+::: {.callout-warning}
+## QC is not an automatic deletion rule
+
+An unusual sample is a reason to investigate. It should not be removed because
+of one plot or one threshold without considering library size, detected genes,
+expression distributions, correlation, PCA, the experimental design, and the
+source of the outlier signal.
+:::
+
+## Inputs
+
+The input is a qs2-persisted edgeR `DGEList`, normally produced by
+`tximport_edger.qmd`. Its counts must still be raw count-scale values. Metadata
+may be attached in `dge$samples`; the first column is expected to remain the
+edgeR library-size column and the row names must be sample IDs.
+
+## Parameters
+
+```{r parameters}
+input_dge <- "output/objects/dge_imported.qs2"
+output_dge <- "output/objects/dge_qc_normalized.qs2"
+output_table_dir <- "output/tables"
+
+min_cpm <- 1
+min_samples <- 5
+normalization_method <- "TMMwsp"
+prior_count <- 1
+
+# Optional column in dge$samples used only to color the PCA display.
+pca_color_column <- NULL
+```
+
+## Analysis
+
+```{r load-and-check-counts}
+dge <- qs2::qs_read(input_dge)
+stopifnot(inherits(dge, "DGEList"))
+stopifnot(!is.null(dge$counts))
+stopifnot(!is.null(rownames(dge$counts)))
+stopifnot(!is.null(colnames(dge$counts)))
+stopifnot(!anyDuplicated(rownames(dge$counts)))
+stopifnot(!anyDuplicated(colnames(dge$counts)))
+stopifnot(all(is.finite(dge$counts)))
+stopifnot(all(dge$counts >= 0))
+
+counts_before <- dge$counts
+sample_ids <- colnames(counts_before)
+
+qc_before <- tibble::tibble(
+  sample_id = sample_ids,
+  library_size = colSums(counts_before),
+  detected_genes = colSums(counts_before > 0)
+)
+```
+
+```{r filter-counts}
+keep_gene <- rowSums(edgeR::cpm(dge) > min_cpm) >= min_samples
+
+filter_accounting <- tibble::tibble(
+  metric = c("genes_before", "genes_retained", "genes_removed"),
+  value = c(
+    nrow(dge),
+    sum(keep_gene),
+    sum(!keep_gene)
+  )
+)
+
+# Keep the raw counts and library-size accounting consistent after filtering.
+dge <- dge[keep_gene, , keep.lib.sizes = FALSE]
+```
+
+```{r normalize-and-logcpm}
+dge <- edgeR::normLibSizes(dge, method = normalization_method)
+
+# logCPM is for diagnostics, plots, correlations, and downstream scoring.
+# The filtered raw counts remain in dge for edgeR likelihood modeling.
+cpm_mat <- edgeR::cpm(dge)
+logcpm_mat <- edgeR::cpm(
+  dge,
+  log = TRUE,
+  prior.count = prior_count
+)
+
+qc_after <- tibble::tibble(
+  sample_id = colnames(dge),
+  library_size = colSums(dge$counts),
+  detected_genes = colSums(dge$counts > 0),
+  median_cpm = apply(cpm_mat, 2, stats::median),
+  median_logCPM = apply(logcpm_mat, 2, stats::median),
+  iqr_logCPM = apply(logcpm_mat, 2, stats::IQR),
+  norm_factor = dge$samples$norm.factors
+)
+
+qc_sample_summary <- dplyr::left_join(
+  qc_before,
+  qc_after,
+  by = "sample_id",
+  suffix = c("_before", "_after")
+)
+```
+
+## Diagnostics
+
+### Library size and expression distributions
+
+```{r distribution-diagnostics}
+qc_sample_summary
+
+boxplot(
+  as.data.frame(logcpm_mat),
+  las = 2,
+  main = "TMMwsp-normalized logCPM by sample",
+  ylab = "logCPM"
+)
+
+hist(
+  qc_after$library_size,
+  breaks = 20,
+  main = "Library sizes after gene filtering",
+  xlab = "Counts"
+)
+```
+
+### Sample correlation and PCA
+
+```{r correlation-pca}
+stopifnot(nrow(logcpm_mat) >= 2L, ncol(logcpm_mat) >= 2L)
+
+sample_correlation <- stats::cor(
+  logcpm_mat,
+  method = "spearman",
+  use = "pairwise.complete.obs"
+)
+
+heatmap(
+  sample_correlation,
+  symm = TRUE,
+  main = "Sample Spearman correlation from logCPM"
+)
+
+sample_correlation_for_review <- sample_correlation
+diag(sample_correlation_for_review) <- NA_real_
+
+pca_features <- apply(logcpm_mat, 1, stats::sd) > 0
+stopifnot(any(pca_features))
+pca <- stats::prcomp(
+  t(logcpm_mat[pca_features, , drop = FALSE]),
+  center = TRUE,
+  scale. = TRUE
+)
+
+pca_coordinates <- as.data.frame(pca$x)
+pca_coordinates$sample_id <- rownames(pca_coordinates)
+
+pca_colors <- "grey40"
+if (!is.null(pca_color_column)) {
+  stopifnot(pca_color_column %in% names(dge$samples))
+  pca_colors <- as.integer(as.factor(dge$samples[
+    pca_coordinates$sample_id,
+    pca_color_column
+  ]))
+}
+
+plot(
+  pca$x[, 1],
+  pca$x[, 2],
+  col = pca_colors,
+  pch = 19,
+  xlab = "PC1",
+  ylab = "PC2",
+  main = "PCA of normalized logCPM"
+)
+text(pca$x[, 1], pca$x[, 2], labels = rownames(pca$x), pos = 3, cex = 0.7)
+```
+
+### Clustering and outlier review
+
+```{r clustering-diagnostic}
+sample_hclust <- stats::hclust(
+  stats::dist(t(logcpm_mat)),
+  method = "complete"
+)
+plot(sample_hclust, main = "Sample clustering from normalized logCPM")
+
+pca_distance <- sqrt(rowSums(
+  sweep(pca$x[, seq_len(min(5, ncol(pca$x))), drop = FALSE], 2,
+        colMeans(pca$x[, seq_len(min(5, ncol(pca$x))), drop = FALSE]), "-")^2
+))
+
+outlier_review <- tibble::tibble(
+  sample_id = names(pca_distance),
+  pca_distance = as.numeric(pca_distance),
+  median_spearman = apply(sample_correlation_for_review, 1, stats::median, na.rm = TRUE)
+)
+outlier_review
+```
+
+## Outputs
+
+```{r save-outputs}
+dir.create(output_table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_dge), recursive = TRUE, showWarnings = FALSE)
+
+readr::write_tsv(filter_accounting, file.path(output_table_dir, "gene_filter_accounting.tsv"))
+readr::write_tsv(qc_sample_summary, file.path(output_table_dir, "sample_qc_summary.tsv"))
+readr::write_tsv(outlier_review, file.path(output_table_dir, "outlier_review.tsv"))
+readr::write_tsv(
+  as.data.frame(sample_correlation) |>
+    tibble::rownames_to_column("sample_id"),
+  file.path(output_table_dir, "sample_spearman_correlation.tsv")
+)
+readr::write_tsv(pca_coordinates, file.path(output_table_dir, "sample_pca_coordinates.tsv"))
+readr::write_tsv(
+  as.data.frame(cpm_mat) |>
+    tibble::rownames_to_column("gene_id"),
+  file.path(output_table_dir, "filtered_cpm.tsv")
+)
+readr::write_tsv(
+  as.data.frame(logcpm_mat) |>
+    tibble::rownames_to_column("gene_id"),
+  file.path(output_table_dir, "filtered_logCPM.tsv")
+)
+
+qs2::qs_save(dge, output_dge)
+```
+
+The output DGEList contains filtered raw counts, edgeR library sizes,
+normalization factors, and any non-conflicting sample metadata. The logCPM
+table is a transformed expression representation; it is not a replacement for
+raw-count likelihood modeling in edgeR.
+
+## Method notes
+
+The default `min_cpm = 1` in at least `min_samples = 5` samples is a visible
+baseline, not a universal biological threshold. The source material contains
+both a >1 CPM and a >5 CPM path, depending on the input branch. Thresholds
+depend on library depth, sparsity, study design, and the downstream model.
+
+`edgeR::filterByExpr()` is a useful design-aware alternative, but it is not
+silently substituted here. If it is used, make the design and the change from
+the CPM baseline explicit and check the current edgeR guidance.
+
+`TMMwsp` corrects library-composition differences, especially in sparse data;
+it is not batch correction. Batch and biological covariates belong in the
+downstream design matrix.
+
+I prefer reviewing several sample-level diagnostics together rather than
+removing a sample because it appears unusual in one plot. This is a workflow
+preference supported by the source QC practice, not an automatic outlier rule.
+
+The source notebook also contains MAD-based low-tail thresholds and a
+consensus outlier flag. Those are useful extensions to inspect for a specific
+study, but they are not silently imposed here because the source has more than
+one threshold path and sample exclusion still requires design-aware review.

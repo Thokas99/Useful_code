@@ -1,0 +1,140 @@
+---
+title: "UCell signature scoring"
+format:
+  html:
+    toc: true
+execute:
+  echo: true
+  warning: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Score one or more gene signatures with UCell while retaining signature
+coverage, direction, and score construction in the notebook. The signature
+file must contain signature, gene, and direction columns; direction is UP or
+DOWN.
+
+## Inputs and parameters
+
+```{r}
+library(Seurat)
+library(UCell)
+library(qs2)
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+input_object <- "input/seurat_object.qs2"
+signature_path <- "input/signatures.tsv"
+output_object <- "output/seurat_object_ucell.qs2"
+output_coverage <- "output/signature_coverage.tsv"
+output_plot <- "output/ucell_scores.png"
+
+assay_name <- "RNA"
+min_genes_found <- 1
+use_zscore_composite <- FALSE
+```
+
+## Analysis
+
+```{r}
+object <- qs2::qs_read(input_object)
+DefaultAssay(object) <- assay_name
+signatures <- read_tsv(signature_path, show_col_types = FALSE)
+
+stopifnot(all(c("signature", "gene", "direction") %in% colnames(signatures)))
+signatures <- signatures |>
+  mutate(
+    signature = as.character(signature),
+    gene = as.character(gene),
+    direction = toupper(as.character(direction))
+  ) |>
+  filter(direction %in% c("UP", "DOWN")) |>
+  distinct(signature, gene, direction)
+
+object_genes <- rownames(object[[assay_name]])
+coverage <- signatures |>
+  group_by(signature, direction) |>
+  summarise(
+    genes_requested = n(),
+    genes_found = sum(gene %in% object_genes),
+    fraction_found = genes_found / genes_requested,
+    .groups = "drop"
+  )
+print(coverage)
+stopifnot(all(coverage$genes_found >= min_genes_found))
+
+feature_sets <- list()
+for (signature_name in unique(signatures$signature)) {
+  signature_rows <- signatures[signatures$signature == signature_name, ]
+  for (direction_name in c("UP", "DOWN")) {
+    genes <- signature_rows$gene[signature_rows$direction == direction_name]
+    genes <- intersect(genes, object_genes)
+    if (length(genes) > 0) {
+      feature_sets[[paste(signature_name, direction_name, sep = "_")]] <- genes
+    }
+  }
+}
+
+object <- AddModuleScore_UCell(
+  obj = object,
+  features = feature_sets,
+  name = NULL
+)
+
+for (signature_name in unique(signatures$signature)) {
+  up_column <- paste(signature_name, "UP_UCell", sep = "_")
+  down_column <- paste(signature_name, "DOWN_UCell", sep = "_")
+  raw_score_column <- paste(signature_name, "score_raw", sep = "_")
+  if (all(c(up_column, down_column) %in% colnames(object[[]]))) {
+    up_values <- object[[up_column, drop = TRUE]]
+    down_values <- object[[down_column, drop = TRUE]]
+    object[[raw_score_column]] <- up_values - down_values
+    if (use_zscore_composite) {
+      z_score_column <- paste(signature_name, "score_z", sep = "_")
+      object[[z_score_column]] <- as.numeric(scale(up_values)) -
+        as.numeric(scale(down_values))
+    }
+  }
+}
+```
+
+## Diagnostics
+
+```{r}
+dir.create(dirname(output_plot), recursive = TRUE, showWarnings = FALSE)
+score_columns <- grep("(_UCell|_score_raw|_score_z)$", colnames(object[[]]), value = TRUE)
+print(summary(object[[]][, score_columns, drop = FALSE]))
+if (length(score_columns) > 0) {
+  p <- VlnPlot(object, features = head(score_columns, 4), ncol = 2, pt.size = 0)
+  ggsave(output_plot, p, width = 9, height = 6, dpi = 150)
+}
+```
+
+## Outputs
+
+```{r}
+dir.create(dirname(output_object), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(output_coverage), recursive = TRUE, showWarnings = FALSE)
+write_tsv(coverage, output_coverage)
+qs2::qs_save(object, output_object)
+```
+
+## Method notes
+
+The primary directional score is the raw UP-minus-DOWN difference and the UP
+and DOWN component scores are always retained. Smoothing is excluded because
+it changes the estimand.
+
+::: {.callout-warning}
+## Dataset-relative composite scores
+
+The optional z-scored composite is relative to the cells in this dataset. It
+is useful for within-cohort visualization, but it is not an absolute or
+transferable score across cohorts with different cell compositions.
+:::

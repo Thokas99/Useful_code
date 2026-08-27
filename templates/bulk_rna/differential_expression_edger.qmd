@@ -1,0 +1,114 @@
+---
+title: "Bulk RNA-seq differential expression with edgeR"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  freeze: false
+---
+
+> Status: `draft`
+>
+> Template class: API / TUTORIAL REMINDER
+
+## What it does
+
+This is a compact reminder of the current edgeR quasi-likelihood workflow for
+testing an explicit biological contrast from a filtered, normalized `DGEList`.
+It is intentionally short because no complete reusable bulk differential-
+expression implementation was found in the source repository.
+
+::: {.callout-note}
+## API reminder
+
+No complete reusable bulk edgeR differential-expression workflow was found in
+the source repository when this template was created.
+
+This notebook is intentionally a concise reminder of the current
+quasi-likelihood edgeR workflow. Check the current official edgeR User's Guide
+before applying it to a new study, especially for design matrices, contrasts,
+complex experiments, and filtering.
+:::
+
+## When to use it
+
+Use this after `qc_normalization_edger.qmd` has produced a filtered `DGEList`
+that still contains raw counts and edgeR normalization factors. The GLM uses
+the count model; it does not accept z-scores, arbitrary normalized matrices, or
+logCPM in place of counts.
+
+## Parameters and input
+
+```{r parameters}
+input_dge <- "output/objects/dge_qc_normalized.qs2"
+metadata_path <- "input/sample_metadata.tsv"
+sample_id_column <- "sample_id"
+
+# Edit these to match the actual design and the desired biological comparison.
+design_formula <- stats::as.formula("~ 0 + group")
+contrast_vector <- c(groupcase = 1, groupcontrol = -1)
+
+fdr_cutoff <- 0.05
+lfc_cutoff <- 1
+output_results <- "output/tables/edgeR_qlf_results.tsv"
+```
+
+## Minimal current API
+
+```{r edgeR-quasi-likelihood-workflow}
+dge <- qs2::qs_read(input_dge)
+metadata <- readr::read_tsv(metadata_path, show_col_types = FALSE)
+
+stopifnot(sample_id_column %in% names(metadata))
+metadata <- metadata[match(colnames(dge), metadata[[sample_id_column]]), , drop = FALSE]
+stopifnot(identical(metadata[[sample_id_column]], colnames(dge)))
+rownames(metadata) <- metadata[[sample_id_column]]
+
+design <- stats::model.matrix(design_formula, data = metadata)
+stopifnot(identical(rownames(design), colnames(dge)))
+stopifnot(all(names(contrast_vector) %in% colnames(design)))
+
+dge <- edgeR::estimateDisp(dge, design)
+fit <- edgeR::glmQLFit(dge, design)
+qlf <- edgeR::glmQLFTest(fit, contrast = contrast_vector)
+
+result_tbl <- edgeR::topTags(
+  qlf,
+  n = nrow(dge),
+  sort.by = "PValue"
+)$table |>
+  tibble::rownames_to_column("gene_id")
+
+result_tbl <- result_tbl |>
+  dplyr::mutate(
+    reported = FDR <= fdr_cutoff & abs(logFC) >= lfc_cutoff
+  )
+
+dir.create(dirname(output_results), recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(result_tbl, output_results)
+```
+
+## Main decisions
+
+The design matrix is the scientific model, not boilerplate. Add batch,
+pairing, blocking, or other covariates only when justified by the experimental
+design and supported by the available replication. The contrast vector defines
+the direction of `logFC`; inspect its names and signs before interpreting the
+results.
+
+Biological replication is required for dispersion estimation and inference.
+Technical replicates should be handled according to the experimental design,
+not counted as independent biological samples. `fdr_cutoff` and `lfc_cutoff`
+are reporting choices in this reminder, not universal edgeR definitions.
+
+## Outputs
+
+The main output is a gene-level TSV containing the edgeR quasi-likelihood
+results and an explicit reporting flag. The fitted objects are kept visible in
+the notebook for inspection; persistence of a fitted model is optional and
+should be added only when it is useful for a real analysis.
+
+For GSEA, pass a complete ranked gene-level statistic table to
+`gsea.qmd`. Do not silently reduce the ranking to only genes that passed a
+significance cutoff.

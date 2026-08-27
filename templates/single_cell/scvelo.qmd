@@ -1,0 +1,147 @@
+---
+title: "scVelo RNA velocity"
+format: html
+jupyter: python3
+execute:
+  echo: true
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Compute RNA velocity from an AnnData object containing cell-aligned spliced and
+unspliced layers. The template uses the dynamical model from the source
+workflow and saves the enriched AnnData object plus core metadata.
+
+## Inputs and parameters
+
+The input must have observations as cells, variables as genes, unique
+identifiers, spliced and unspliced layers, and a usable representation.
+
+```{python}
+from pathlib import Path
+
+import anndata as ad
+import matplotlib.pyplot as plt
+import scanpy as sc
+import scvelo as scv
+
+input_path = Path("input/velocity_input.h5ad")
+output_path = Path("output/scvelo_output.h5ad")
+metadata_path = Path("output/scvelo_metadata.tsv")
+figure_path = Path("output/velocity_stream.png")
+
+spliced_layer = "spliced"
+unspliced_layer = "unspliced"
+representation = "X_pca"
+embedding = "umap"
+color_key = "cluster"
+min_shared_counts = 20
+n_top_genes = 2000
+n_pcs = 30
+n_neighbors = 30
+velocity_mode = "dynamical"
+n_jobs = 1
+seed = 1234
+```
+
+## Analysis
+
+```{python}
+adata = ad.read_h5ad(input_path)
+if spliced_layer not in adata.layers or unspliced_layer not in adata.layers:
+    raise ValueError("Input must contain spliced and unspliced AnnData layers.")
+if (adata.layers[spliced_layer].shape != adata.shape or
+        adata.layers[unspliced_layer].shape != adata.shape):
+    raise ValueError("Kinetic layers must have the same cell-by-gene shape as AnnData.")
+if not adata.obs_names.is_unique or not adata.var_names.is_unique:
+    raise ValueError("AnnData observation and variable identifiers must be unique.")
+
+if spliced_layer != "spliced":
+    adata.layers["spliced"] = adata.layers[spliced_layer].copy()
+if unspliced_layer != "unspliced":
+    adata.layers["unspliced"] = adata.layers[unspliced_layer].copy()
+
+scv.settings.set_figure_params(dpi=150, frameon=False)
+scv.pp.filter_and_normalize(
+    adata,
+    min_shared_counts=min_shared_counts,
+    n_top_genes=n_top_genes,
+)
+
+if representation not in adata.obsm:
+    sc.tl.pca(adata, n_comps=n_pcs, random_state=seed)
+    representation = "X_pca"
+
+sc.pp.neighbors(
+    adata,
+    n_neighbors=n_neighbors,
+    n_pcs=n_pcs,
+    use_rep=representation,
+    random_state=seed,
+)
+scv.pp.moments(
+    adata,
+    n_pcs=n_pcs,
+    n_neighbors=n_neighbors,
+)
+
+if velocity_mode == "dynamical":
+    scv.tl.recover_dynamics(adata, n_jobs=n_jobs)
+scv.tl.velocity(adata, mode=velocity_mode)
+scv.tl.velocity_graph(adata, n_jobs=n_jobs)
+scv.tl.velocity_pseudotime(adata)
+scv.tl.recover_latent_time(adata)
+scv.tl.velocity_confidence(adata)
+
+if f"X_{embedding}" not in adata.obsm:
+    sc.tl.umap(adata, random_state=seed)
+```
+
+## Diagnostics
+
+```{python}
+figure_path.parent.mkdir(parents=True, exist_ok=True)
+scv.pl.velocity_embedding_stream(
+    adata,
+    basis=embedding,
+    color=color_key if color_key in adata.obs else None,
+    show=False,
+)
+plt.savefig(figure_path, bbox_inches="tight")
+plt.close()
+print(adata)
+print(adata.obs[["velocity_pseudotime", "latent_time", "velocity_confidence"]].describe())
+```
+
+## Outputs
+
+```{python}
+output_path.parent.mkdir(parents=True, exist_ok=True)
+metadata_path.parent.mkdir(parents=True, exist_ok=True)
+adata.write_h5ad(output_path)
+adata.obs.reset_index(names="cell_id").to_csv(metadata_path, sep="\t", index=False)
+```
+
+## Method notes
+
+The source workflow reconstructs spliced/unspliced layers upstream. This
+canonical input contract assumes those layers already exist and makes the
+representation explicit. The neighborhood graph above is the representation
+choice used by moments. Dynamical
+velocity requires model recovery and is not equivalent to a stochastic or
+deterministic run. Velocity vectors and latent time are directional hypotheses,
+not proof of lineage.
+
+::: {.callout-warning}
+## Kinetic-layer warning
+
+The `spliced` and `unspliced` layers must represent the kinetic quantities
+expected by scVelo. Do not replace them with Harmony-corrected or other
+batch-integrated expression matrices. An integrated representation may be used
+for neighbors or visualization only when that choice is explicit and checked
+against the velocity assumptions.
+:::

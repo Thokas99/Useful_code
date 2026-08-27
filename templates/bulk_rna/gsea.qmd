@@ -1,0 +1,188 @@
+---
+title: "Ranked gene-set enrichment analysis"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  freeze: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Run GO Biological Process and optional KEGG GSEA from a complete ranked
+gene-level statistic table. This notebook consumes differential-expression
+results; it does not rerun differential expression.
+
+::: {.callout-note}
+## Practical note
+
+The ranking statistic is the key GSEA input. Filtering a ranked list to only
+genes that passed an arbitrary significance cutoff discards information and
+changes the question. I prefer to build the ranking from the full available
+gene-level result table, then document the statistic and identifier conversion.
+:::
+
+## Inputs and parameters
+
+The ranking table must contain one gene identifier column and one signed
+numeric statistic column. This template maps `SYMBOL` or `ENSEMBL` identifiers
+to Entrez IDs with `clusterProfiler::bitr()`; an `ENTREZID` input can be used
+directly. The annotation database and organism must match the input species.
+
+```{r setup}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+```
+
+```{r parameters}
+ranking_path <- "input/gene_ranking.tsv"
+gene_id_column <- "gene_id"
+statistic_column <- "rank_statistic"
+input_id_type <- "SYMBOL"  # SYMBOL, ENSEMBL, or ENTREZID
+annotation_db <- org.Hs.eg.db
+organism_code <- "hsa"
+
+run_go <- TRUE
+run_kegg <- TRUE
+ontology <- "BP"
+min_gene_set_size <- 10
+max_gene_set_size <- 500
+pvalue_cutoff <- 0.05
+p_adjust_method <- "BH"
+simplify_go_terms <- TRUE
+simplify_cutoff <- 0.7
+
+output_table_dir <- "output/tables"
+```
+
+## Prepare the ranked list
+
+```{r prepare-ranked-list}
+stopifnot(input_id_type %in% c("SYMBOL", "ENSEMBL", "ENTREZID"))
+
+ranking_tbl <- readr::read_tsv(ranking_path, show_col_types = FALSE)
+stopifnot(all(c(gene_id_column, statistic_column) %in% names(ranking_tbl)))
+
+ranking_tbl <- ranking_tbl |>
+  dplyr::transmute(
+    gene_id = as.character(.data[[gene_id_column]]),
+    rank_statistic = as.numeric(.data[[statistic_column]])
+  ) |>
+  dplyr::filter(
+    !is.na(gene_id),
+    nzchar(gene_id),
+    is.finite(rank_statistic)
+  )
+
+stopifnot(nrow(ranking_tbl) > 0L)
+
+if (input_id_type == "ENTREZID") {
+  mapped_tbl <- ranking_tbl |>
+    dplyr::mutate(ENTREZID = gene_id)
+} else {
+  id_map <- clusterProfiler::bitr(
+    unique(ranking_tbl$gene_id),
+    fromType = input_id_type,
+    toType = "ENTREZID",
+    OrgDb = annotation_db
+  )
+  names(id_map)[names(id_map) == input_id_type] <- "gene_id"
+  mapped_tbl <- ranking_tbl |>
+    dplyr::inner_join(
+      id_map |> dplyr::select(gene_id, ENTREZID),
+      by = "gene_id"
+    )
+}
+
+# Keep one mapped value per Entrez ID, retaining the strongest absolute statistic.
+ranked_entrez <- mapped_tbl |>
+  dplyr::filter(!is.na(ENTREZID), is.finite(rank_statistic)) |>
+  dplyr::group_by(ENTREZID) |>
+  dplyr::slice_max(abs(rank_statistic), n = 1, with_ties = FALSE) |>
+  dplyr::ungroup() |>
+  dplyr::arrange(dplyr::desc(rank_statistic))
+
+gene_list <- ranked_entrez$rank_statistic
+names(gene_list) <- ranked_entrez$ENTREZID
+gene_list <- sort(gene_list, decreasing = TRUE)
+stopifnot(!anyDuplicated(names(gene_list)))
+
+dir.create(output_table_dir, recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(ranked_entrez, file.path(output_table_dir, "gsea_ranked_gene_list.tsv"))
+```
+
+## GO and KEGG GSEA
+
+```{r run-gsea}
+if (run_go) {
+  go_result <- clusterProfiler::gseGO(
+    geneList = gene_list,
+    OrgDb = annotation_db,
+    keyType = "ENTREZID",
+    ont = ontology,
+    minGSSize = min_gene_set_size,
+    maxGSSize = max_gene_set_size,
+    pvalueCutoff = pvalue_cutoff,
+    pAdjustMethod = p_adjust_method,
+    verbose = FALSE
+  )
+
+  go_table <- as.data.frame(go_result)
+  readr::write_tsv(go_table, file.path(output_table_dir, "gsea_go_results.tsv"))
+
+  if (simplify_go_terms && nrow(go_table) > 0L) {
+    go_simplified <- clusterProfiler::simplify(
+      go_result,
+      cutoff = simplify_cutoff,
+      by = "p.adjust",
+      select_fun = min
+    )
+    readr::write_tsv(
+      as.data.frame(go_simplified),
+      file.path(output_table_dir, "gsea_go_simplified_results.tsv")
+    )
+  }
+}
+
+if (run_kegg) {
+  kegg_result <- clusterProfiler::gseKEGG(
+    geneList = gene_list,
+    organism = organism_code,
+    keyType = "ncbi-geneid",
+    minGSSize = min_gene_set_size,
+    maxGSSize = max_gene_set_size,
+    pvalueCutoff = pvalue_cutoff,
+    pAdjustMethod = p_adjust_method,
+    verbose = FALSE
+  )
+  readr::write_tsv(
+    as.data.frame(kegg_result),
+    file.path(output_table_dir, "gsea_kegg_results.tsv")
+  )
+}
+```
+
+## Outputs
+
+The ranked list and enrichment result tables are exported as TSV. GO
+simplification is a redundancy-reduction step for GO terms; it does not change
+the original GSEA question. KEGG results are kept separate because KEGG does
+not use the GO semantic hierarchy.
+
+## Method notes
+
+`logFC`, a signed test statistic, or a source-specific statistic such as
+`sign(logFC) * sqrt(F)` can be appropriate rankings, but they are not
+interchangeable. Select the statistic that matches the upstream model and
+record that choice in the input table or analysis notes.
+
+Missing identifiers are removed before enrichment and duplicate mapped IDs are
+resolved by retaining the largest absolute ranking statistic. This is a
+practical tie-breaking rule, not a biological claim. Change the annotation
+database and KEGG organism code for another species, then consult the current
+clusterProfiler documentation for advanced databases, methods, and parameters.

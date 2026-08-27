@@ -1,0 +1,232 @@
+---
+title: "MOFA2: model diagnostics"
+format: html
+editor: source
+---
+
+> **Status:** `draft`<br>
+> **Template class:** `SOURCE-BACKED WORKFLOW`
+
+## Purpose
+
+Load the fitted native MOFA2 model and check whether its latent structure is
+sensible before assigning biological meaning. This page does not refit the
+model or change its options.
+
+## Inputs and parameters
+
+```{r}
+#| label: parameters
+
+model_path <- "output/mofa/mofa_model.hdf5"
+variance_total_output <- "output/mofa/variance_explained_total.tsv"
+variance_factor_output <- "output/mofa/variance_explained_per_factor.tsv"
+factor_scores_output <- "output/mofa/factor_scores_diagnostics.tsv"
+factor_correlation_output <- "output/mofa/factor_correlation.tsv"
+top_weights_output <- "output/mofa/top_weights_diagnostic.tsv"
+technical_association_output <- "output/mofa/technical_factor_associations.tsv"
+
+# Optional sample metadata. Technical columns should be numeric quality or
+# processing variables; do not turn this section into an outcome screen.
+metadata_path <- NULL
+metadata_sample_column <- "sample_id"
+technical_columns <- character()
+top_features_per_factor <- 10L
+```
+
+::: {.callout-note}
+## Practical note
+
+Before interpreting a latent factor biologically, I first check whether it is
+strongly associated with obvious technical variables or sample-quality effects.
+A technically driven factor is still a real pattern in the data, but it should
+not be relabeled as biology simply because it explains substantial variance.
+:::
+
+::: {.callout-warning}
+## Factor numbers are not biological identities
+
+`Factor1` in one fit is not guaranteed to represent the same pattern as
+`Factor1` in another fit. Factor order and sign can change between models.
+Interpret factors through their scores, weights, variance explained and
+associations rather than by their numeric label alone.
+:::
+
+## Load the native model
+
+```{r}
+#| label: load-model
+
+model <- MOFA2::load_model(model_path, verbose = FALSE)
+```
+
+## Variance explained and factor-level summaries
+
+```{r}
+#| label: variance-explained
+
+variance_explained <- MOFA2::get_variance_explained(
+  model,
+  as.data.frame = TRUE
+)
+readr::write_tsv(variance_explained$r2_total, variance_total_output)
+readr::write_tsv(variance_explained$r2_per_factor, variance_factor_output)
+
+factor_variance <- variance_explained$r2_per_factor
+factor_summary <- aggregate(
+  value ~ factor,
+  data = factor_variance,
+  FUN = sum
+)
+names(factor_summary)[names(factor_summary) == "value"] <-
+  "sum_view_specific_variance_explained"
+print(factor_summary)
+
+variance_plot <- MOFA2::plot_variance_explained(
+  model,
+  plot_total = TRUE
+)
+print(variance_plot)
+```
+
+Variance explained is view- and factor-specific. A factor that matters for one
+view may contribute little to another; low total variance is not proof of
+biological irrelevance, and high variance is not proof of biological importance.
+
+## Factor scores, correlation and weight sanity checks
+
+```{r}
+#| label: factor-and-weight-diagnostics
+
+factor_scores <- MOFA2::get_factors(
+  model,
+  groups = "all",
+  factors = "all",
+  as.data.frame = TRUE
+)
+names(factor_scores)[names(factor_scores) == "sample"] <- "sample_id"
+readr::write_tsv(factor_scores, factor_scores_output)
+
+factor_list <- MOFA2::get_factors(model, groups = "all", factors = "all")
+if (length(factor_list) != 1L) {
+  stop("This compact diagnostic expects one matched sample group.")
+}
+factor_matrix <- factor_list[[1L]]
+factor_correlation <- stats::cor(
+  factor_matrix,
+  method = "spearman",
+  use = "pairwise.complete.obs"
+)
+readr::write_tsv(
+  tibble::as_tibble(factor_correlation, rownames = "factor"),
+  factor_correlation_output
+)
+boxplot(
+  as.data.frame(factor_matrix),
+  las = 2,
+  main = "MOFA factor score distributions",
+  ylab = "Factor score"
+)
+
+weights <- MOFA2::get_weights(
+  model,
+  views = "all",
+  factors = "all",
+  scale = FALSE,
+  as.data.frame = TRUE
+)
+weights$abs_weight <- abs(weights$value)
+weight_groups <- split(
+  seq_len(nrow(weights)),
+  list(weights$view, weights$factor),
+  drop = TRUE
+)
+top_weight_indices <- unlist(lapply(weight_groups, function(indices) {
+  ordered <- indices[order(weights$abs_weight[indices], decreasing = TRUE)]
+  head(ordered, top_features_per_factor)
+}))
+top_weights <- weights[top_weight_indices, , drop = FALSE]
+readr::write_tsv(top_weights, top_weights_output)
+```
+
+The weight check is a compact sanity view of high absolute weights. It keeps
+the sign in the exported `value` column; absolute weight is used only for
+ranking.
+
+## Optional technical associations
+
+```{r}
+#| label: technical-associations
+
+if (!is.null(metadata_path) && length(technical_columns) > 0L) {
+  metadata <- readr::read_tsv(metadata_path, show_col_types = FALSE)
+  if (!metadata_sample_column %in% names(metadata)) {
+    stop("metadata_sample_column is absent from the metadata table.")
+  }
+  if (anyDuplicated(metadata[[metadata_sample_column]])) {
+    stop("Metadata sample IDs must be unique.")
+  }
+  if (any(!rownames(factor_matrix) %in% metadata[[metadata_sample_column]])) {
+    stop("All model samples must be present in the metadata table.")
+  }
+  metadata <- metadata[
+    match(rownames(factor_matrix), metadata[[metadata_sample_column]]),
+    ,
+    drop = FALSE
+  ]
+
+  association_rows <- list()
+  association_index <- 0L
+  for (technical_column in technical_columns) {
+    if (!technical_column %in% names(metadata) ||
+        !is.numeric(metadata[[technical_column]])) {
+      stop("technical_columns must name numeric metadata columns.")
+    }
+    for (factor_name in colnames(factor_matrix)) {
+      keep <- stats::complete.cases(
+        metadata[[technical_column]],
+        factor_matrix[, factor_name]
+      )
+      if (sum(keep) >= 3L &&
+          length(unique(metadata[[technical_column]][keep])) > 1L &&
+          length(unique(factor_matrix[keep, factor_name])) > 1L) {
+        test <- suppressWarnings(stats::cor.test(
+          metadata[[technical_column]][keep],
+          factor_matrix[keep, factor_name],
+          method = "spearman",
+          exact = FALSE
+        ))
+        association_index <- association_index + 1L
+        association_rows[[association_index]] <- data.frame(
+          metadata_column = technical_column,
+          factor = factor_name,
+          n_samples = sum(keep),
+          rho = unname(test$estimate),
+          p_value = test$p.value,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  if (length(association_rows) > 0L) {
+    technical_associations <- do.call(rbind, association_rows)
+    technical_associations$adjusted_p_value <- stats::p.adjust(
+      technical_associations$p_value,
+      method = "BH"
+    )
+    readr::write_tsv(technical_associations, technical_association_output)
+  }
+}
+```
+
+Technical associations are diagnostics, not proof that a factor is technical
+or biological. Multiple factor-variable tests are adjusted together, and one
+sample remains one observation regardless of how many views contributed to the
+model.
+
+## Output contract
+
+This page consumes `mofa_model.hdf5` and exports variance-explained tables,
+factor scores, factor correlations and a compact high-weight diagnostic. It
+does not refit or rewrite the model. Technical association TSV output is created
+only when numeric metadata columns are explicitly supplied.

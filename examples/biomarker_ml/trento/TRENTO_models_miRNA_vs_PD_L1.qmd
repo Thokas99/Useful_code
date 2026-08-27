@@ -1,0 +1,1686 @@
+---
+title: "TRENTO miRNA responder model"
+author: "Thomas Sirchi"
+date: today
+date-format: "DD MMMM YYYY"
+
+format-links:
+  - pdf
+
+format:
+  html:
+    output-file: "TRENTO_miRNA_responder_modeling.html"
+
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+
+    # Navigation and section numbering.
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+
+    # Reader-friendly code display.
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+
+    # Figure and page layout.
+    fig-responsive: true
+    embed-resources: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+
+    link-external-newwindow: true
+
+    title-block-banner: true
+    df-print: paged
+    self-contained-math: true
+    fig-align: center
+    fig-width: 9
+    fig-height: 6
+    fig-format: retina
+    fig-dpi: 300
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    callout-appearance: simple
+    keep-md: false
+    keep-ipynb: false
+
+  pdf:
+    output-file: "TRENTO_miRNA_responder_modeling.pdf"
+
+    pdf-engine: xelatex
+
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 3
+
+    number-sections: true
+    number-depth: 3
+
+    documentclass: article
+    fontsize: 10pt
+    geometry:
+      - margin=1in
+
+    fig-align: center
+    fig-width: 7
+    fig-height: 5
+    fig-format: pdf
+    fig-dpi: 300
+    fig-cap-location: bottom
+
+    tbl-cap-location: top
+
+    colorlinks: true
+
+    keep-tex: false
+    keep-md: false
+    keep-ipynb: false
+
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+
+# Click figures to inspect them at full size.
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
+
+# Sensible defaults for knitr figures and code blocks.
+knitr:
+  opts_chunk:
+    fig.align: center
+    fig.width: 16
+    fig.height: 12
+    dpi: 300
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+
+editor: source
+---
+
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: setup
+#| include: false
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(themis)
+library(tune)
+library(finetune)
+library(filtro)
+library(important)
+library(desirability2)
+library(brglm2)
+library(bundle)
+library(GGally)
+
+tidymodels_prefer()
+
+RANDOM_SEED <- 1234
+set.seed(RANDOM_SEED)
+theme_set(theme_minimal(base_size = 12))
+
+dir.create("output/tables", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/figures", recursive = TRUE, showWarnings = FALSE)
+dir.create("output/models", recursive = TRUE, showWarnings = FALSE)
+
+extract_selected_features <- function(x) {
+
+  selected_predictors <- workflows::extract_mold(x)$predictors |>
+    names() |>
+    intersect(predictor_names)
+
+  tibble::tibble(
+    predictor = selected_predictors
+  )
+}
+
+```
+
+## Overview
+
+This report fits a binary miRNA classifier for TRENTO responder status. It uses the fixed split, the union signature, supervised top-10 selection, and bias-reduced logistic regression. The threshold is tuned by Monte Carlo cross-validation and evaluated on the held-out test set.
+
+It covers the data split, model performance, feature stability, selected-miRNA expression, and sample-level results.
+
+## Data and split
+
+The notebook joins the fixed split labels with filtered miRNA expression and keeps shared samples. Predictor names are made model-safe; original miRNA names are retained for reporting.
+
+The test set is held out from resampling, feature selection, threshold tuning, and fitting.
+
+```{r}
+#| message: false
+#| warning: false
+#| label: load-data
+#| echo: false
+#| include: false
+
+set.seed(RANDOM_SEED)
+
+# --- Load metadata ------------------------------------------------------------
+
+split_tbl <- read_tsv(
+  "input/all_samples_train_test_split_big_test.tsv",
+  show_col_types = FALSE
+)
+
+# --- Load signature -----------------------------------------------------------
+
+signature_mirnas <- read_tsv(
+  "input/mirna_union_signature.tsv",
+  show_col_types = FALSE
+) |>
+  pull(1)
+
+# --- Prepare miRNA expression -------------------------------------------------
+
+mirna_expr <- read_csv(
+  "input/TRENTO_Full_miRNAseq_LogCPM_filtered_ready.csv",
+  show_col_types = FALSE
+) |>
+  rename(miRNA = 1) |>
+  filter(miRNA %in% signature_mirnas) |>
+  pivot_longer(
+    -miRNA,
+    names_to = "sample_id",
+    values_to = "expression"
+  ) |>
+  pivot_wider(
+    names_from = miRNA,
+    values_from = expression
+  )
+
+# Make miRNA names model-safe
+mirna_cols <- setdiff(names(mirna_expr), "sample_id")
+predictor_names <- make.names(mirna_cols, unique = TRUE)
+
+predictor_map <- tibble(
+  original_name = mirna_cols,
+  predictor = predictor_names
+)
+
+names(mirna_expr)[-1] <- predictor_names
+
+# --- Build modelling dataset --------------------------------------------------
+
+model_data <- split_tbl |>
+  transmute(
+    sample_id = sample,
+    outcome = responder_2class,
+    train_test
+  ) |>
+  inner_join(mirna_expr, by = "sample_id") |>
+  drop_na(train_test, outcome) |>
+  mutate(
+    outcome = factor(
+      outcome,
+      levels = c("responder", "non-responder")
+    )
+  )
+
+train_data <- model_data |>
+  filter(train_test == "train") |>
+  select(-train_test)
+
+test_data <- model_data |>
+  filter(train_test == "test") |>
+  select(-train_test)
+
+# --- Class weights ------------------------------------------------------------
+
+weight_alpha <- 0.5
+
+class_weight_tbl <- train_data |>
+  count(outcome) |>
+  mutate(
+    class_weight = (sum(n) / (n_distinct(outcome) * n)) ^ weight_alpha,
+    class_weight = class_weight /
+      weighted.mean(class_weight, n)
+  ) |>
+  select(outcome, class_weight)
+
+train_data <- train_data |>
+  left_join(class_weight_tbl, by = "outcome") |>
+  mutate(
+    class_weight = hardhat::importance_weights(class_weight)
+  )
+
+positive_class <- levels(train_data$outcome)[1]
+
+```
+
+### Class balance
+
+Class counts are shown before modeling. Because the classes are imbalanced, balanced accuracy, sensitivity, specificity, ROC AUC, and PR AUC are more informative than accuracy alone.
+
+```{r}
+#| message: false
+#| warning: false
+#| label: tbl-class-balance
+#| echo: false
+#| tbl-cap: "Class counts and proportions in the training and held-out test sets."
+
+set.seed(RANDOM_SEED)
+
+bind_rows(
+  train_data |> count(outcome, name = "n") |> mutate(set = "train"),
+  test_data |> count(outcome, name = "n") |> mutate(set = "test")
+) |>
+  select(set, outcome, n) |>
+  group_by(set) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup()
+
+class_weight_tbl
+
+```
+
+## Model
+
+The recipe removes zero-variance predictors, selects the top 10 miRNAs with supervised desirability scores, and normalizes them within each resample. All preprocessing is learned from training data.
+
+### Cross-validation
+
+Monte Carlo cross-validation uses 200 stratified resamples, with 70% of the training data in each analysis set. Tuning uses these folds only; the test set remains untouched. The resamples estimate performance variability and feature-selection stability; they do not add patients.
+
+The fitted preprocessing is applied unchanged to validation and test data.
+
+### Class weights
+
+Class weights give the smaller class more influence during training without changing outcome labels. Test metrics use the observed class counts.
+
+```{r}
+#| message: false
+#| warning: false
+#| label: tbl-model-training-balance
+#| echo: false
+#| tbl-cap: "Training-class counts after preprocessing."
+
+set.seed(RANDOM_SEED)
+
+# Desirability function for supervised miRNA filtering.
+# Here we keep predictors that have high univariate ROC AUC and high ANOVA signal.
+filter_goals <- desirability(
+  maximize(roc_auc),
+  maximize(aov_fstat),
+)
+
+# There are 45 miRNA predictors. Keep only the top 10 miRNA predictors inside each CV fold.
+top_n_predictors <- 10
+filter_prop <- top_n_predictors / length(predictor_names)
+
+model_recipe <- recipe(outcome ~ ., data = train_data) |>
+  update_role(sample_id, new_role = "id") |>
+  # Remove predictors with zero variance.
+  step_zv(all_predictors()) |>
+  # Supervised filter. This is estimated separately inside each resampling fold. With filter_prop = 10 / n_predictors, only the top 10 miRNA is retained.
+  step_predictor_desirability(
+    all_predictors(),
+    score = filter_goals,
+    prop_terms = filter_prop
+  ) |>
+  # Normalize predictors after filtering and resampling.
+  step_normalize(all_predictors())
+
+# Check the final training balance after preprocessing.
+training <- model_recipe |>
+  prep() |>
+  bake(new_data = NULL) |>
+  count(outcome, name = "training")
+
+training
+
+# Monte Carlo CV lets you choose a more realistic train/assessment ratio repeatedly.
+cv_folds <- mc_cv(
+  train_data,
+  prop = 0.7,
+  times = 200,
+  strata = outcome
+)
+
+# Metrics used during model tuning.
+# Do not use precision for tuning here because it can become NA when no responders are predicted.
+model_metrics <- metric_set(
+  bal_accuracy,
+  kap,
+  f_meas,
+  roc_auc,
+  accuracy,
+  sens,
+  spec,
+  recall,
+  mcc
+)
+
+```
+
+## Model fit
+
+The final model is a bias-reduced logistic regression using `brglm2::brglm_fit`. Only the probability threshold is tuned; the recipe and model specification stay fixed. Coefficients are saved and plotted.
+
+```{r}
+#| message: false
+#| warning: false
+#| label: glm-fit
+#| echo: false
+#| include: false
+
+set.seed(RANDOM_SEED)
+br_logreg_spec <- logistic_reg() |>
+  set_engine("glm", family = stats::binomial(), method = brglm2::brglm_fit, type = "AS_mean") |>
+  set_mode("classification")
+
+# Tailor postprocessor
+# This tunes the probability cutoff used to convert probabilities into classes
+br_logreg_tailor <- tailor() |>
+  #adjust_probability_calibration(method = "isotonic") |>
+  adjust_probability_threshold(threshold = tune())
+
+br_logreg_workflow <- workflow() |>
+  add_recipe(model_recipe) |>
+  add_model(br_logreg_spec) |>
+  add_tailor(br_logreg_tailor)
+
+# Tune only the probability threshold for the bias-reduced logistic regression model.
+br_logreg_grid <- tibble(
+  threshold = seq(0.45, 0.80, by = 0.05)
+)
+
+br_logreg_tune <- tune_grid(
+  br_logreg_workflow,
+  resamples = cv_folds,
+  grid = br_logreg_grid,
+  metrics = model_metrics,
+  control = control_grid(
+    save_pred = TRUE,
+    extract = extract_selected_features
+  )
+)
+
+best_br_logreg <- select_best(br_logreg_tune, metric = "bal_accuracy")
+
+br_logreg_fit <- finalize_workflow(br_logreg_workflow, best_br_logreg) |>
+  fit(data = train_data)
+
+br_logreg_fit_bundle <- bundle(br_logreg_fit)
+saveRDS(br_logreg_fit_bundle, "output/models/br_logreg_fit_bundle.rds")
+
+```
+
+```{r}
+#| message: false
+#| warning: false
+#| label: fig-glm-coefficients
+#| echo: false
+#| fig-width: 7
+#| fig-height: 5
+#| fig-cap: "Coefficient summaries for the primary bias-reduced logistic-regression model."
+
+set.seed(RANDOM_SEED)
+
+collect_metrics(br_logreg_tune) |>
+  filter(.metric %in% c("roc_auc", "bal_accuracy", "sens", "spec", "f_meas")) |>
+  arrange(.metric, desc(mean))
+
+br_logreg_coefficients <- extract_fit_parsnip(br_logreg_fit)$fit |>
+  broom::tidy() |>
+  filter(term != "(Intercept)", estimate != 0) |>
+  left_join(predictor_map, by = c("term" = "predictor")) |>
+  mutate(term = coalesce(original_name, term)) |>
+  arrange(desc(abs(estimate)))
+
+readr::write_tsv(br_logreg_coefficients, "output/tables/br_logreg_coefficients.tsv")
+
+br_logreg_coef_plot <- br_logreg_coefficients |>
+  slice_max(abs(estimate), n = 20) |>
+  mutate(term = fct_reorder(term, estimate)) |>
+  ggplot(aes(x = estimate, y = term, fill = estimate > 0)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("#D95F02", "#1B9E77")) +
+  labs(
+    title = "Model coefficients",
+    x = "Coefficient",
+    y = NULL
+  )
+
+ggsave("output/figures/br_logreg_coefficients.png", br_logreg_coef_plot, width = 7, height = 5, dpi = 300)
+
+br_logreg_coef_plot
+
+br_logreg_coef_plot2 <- ggcoef(
+  extract_fit_parsnip(br_logreg_fit),
+  exponentiate = TRUE,
+  exclude_intercept = TRUE,
+  conf.int = TRUE,
+  sort = "ascending",
+  color = "darkgreen"
+) +
+  labs(
+    title = "Model coefficients (odds ratios)",
+    subtitle = "OR > 1 = higher odds of response",
+    x = "Odds ratio",
+    y = NULL
+  ) +
+  theme_bw(base_size = 12)
+
+br_logreg_coef_plot2
+
+ggsave(
+  "output/figures/br_logreg_coef_plot2.png",
+  plot = br_logreg_coef_plot2,
+  width = 10,
+  height = 8
+)
+
+```
+
+## Test performance
+
+The finalized model is evaluated on held-out test samples using the tuned threshold. Predictions and threshold-dependent metrics are saved.
+
+ROC AUC summarizes ranking; PR AUC is useful with class imbalance; sensitivity, specificity, and balanced accuracy describe threshold performance.
+
+```{r}
+#| message: false
+#| warning: false
+#| label: glm-test-evaluation
+#| echo: false
+
+set.seed(RANDOM_SEED)
+
+# Predict probabilities and classes on the independent test set.
+# The class prediction uses the threshold selected by tailor.
+br_logreg_test_predictions <- test_data |>
+  select(sample_id, outcome) |>
+  bind_cols(
+    predict(br_logreg_fit, new_data = test_data, type = "prob"),
+    predict(br_logreg_fit, new_data = test_data, type = "class")
+  ) |>
+  mutate(
+    truth = factor(outcome, levels = c("responder", "non-responder")),
+    .pred_class = factor(.pred_class, levels = c("responder", "non-responder"))
+  )
+
+br_logreg_test_predictions |>
+  ggplot(aes(x = .pred_responder, fill = truth)) +
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = best_br_logreg$threshold, linetype = "dashed") +
+  labs(
+    title = "Predicted responder probabilities",
+    x = "Predicted probability of responder",
+    y = "Density"
+  )
+
+# Test-set metrics
+br_logreg_test_metrics <- model_metrics(
+  br_logreg_test_predictions,
+  truth = truth,
+  estimate = .pred_class,
+  .pred_responder,
+  event_level = "first"
+) |>
+  mutate(
+    model = "bias-reduced logistic regression",
+    evaluation = paste0("test set; threshold = ", round(best_br_logreg$threshold, 3))
+  )
+
+# Test-set confusion matrix
+br_logreg_test_conf_mat <- br_logreg_test_predictions |>
+  conf_mat(
+    truth = truth,
+    estimate = .pred_class
+  )
+
+# Save outputs
+readr::write_tsv(
+  br_logreg_test_predictions,
+  "output/tables/br_logreg_test_predictions.tsv"
+)
+
+readr::write_tsv(
+  br_logreg_test_metrics,
+  "output/tables/br_logreg_test_metrics.tsv"
+)
+
+br_logreg_test_metrics
+br_logreg_test_conf_mat
+
+```
+
+
+## Confusion matrix
+
+The confusion matrix shows correct and incorrect test-set calls at the tuned threshold. Counts and the heatmap are saved for the misclassification review.
+
+```{r}
+#| message: false
+#| warning: false
+#| label: fig-glm-test-confusion
+#| echo: false
+#| fig-width: 7
+#| fig-height: 6
+#| fig-cap: "Confusion matrix for the primary model on the independent test set at the tuned classification threshold."
+
+set.seed(RANDOM_SEED)
+
+# Confusion matrix
+br_logreg_conf_mat <- br_logreg_test_predictions |>
+  yardstick::conf_mat(
+    truth = truth,
+    estimate = .pred_class
+  )
+
+br_logreg_conf_mat
+
+# Confusion matrix plot
+br_logreg_conf_mat_plot <- br_logreg_conf_mat |>
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Test-set confusion matrix",
+    subtitle = paste0(
+      "Independent test set; threshold = ",
+      round(best_br_logreg$threshold, 3)
+    ),
+    x = "Predicted class",
+    y = "True class"
+  ) +
+  scale_fill_gradient(low = "white", high = "#3B528B")
+
+ggsave(
+  "output/figures/br_logreg_test_confusion_matrix.png",
+  plot = br_logreg_conf_mat_plot,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+br_logreg_conf_mat_plot
+
+# Save confusion matrix counts
+br_logreg_conf_mat_table <- br_logreg_test_predictions |>
+  count(truth, prediction = .pred_class, name = "n")
+
+readr::write_tsv(
+  br_logreg_conf_mat_table,
+  "output/tables/br_logreg_test_confusion_matrix.tsv"
+)
+```
+
+## Misclassified samples
+
+The TSV lists misclassified held-out samples with predictions and metadata. The compact GT table highlights key clinical and immune fields.
+
+```{r}
+#| message: false
+#| warning: false
+#| label: tbl-glm-misclassified-metadata
+#| echo: false
+#| tbl-cap: "Clinical and immune metadata for misclassified held-out test samples."
+
+br_logreg_metadata <- readr::read_csv(
+  "input/TRENTO_metadata_with_ifng_scores.csv",
+  show_col_types = FALSE
+) |>
+  dplyr::rename(sample_id = sample)
+
+br_logreg_misclassified <- br_logreg_test_predictions |>
+  filter(truth != .pred_class) |>
+  arrange(desc(.pred_responder)) |>
+  left_join(br_logreg_metadata, by = "sample_id") |>
+  select(
+    sample_id,
+    truth,
+    .pred_responder,
+    .pred_class,
+    .pred_non_responder = `.pred_non-responder`,
+    everything()
+  )
+
+readr::write_tsv(
+  br_logreg_misclassified,
+  "output/tables/br_logreg_misclassified.tsv"
+)
+
+br_logreg_misclassified_main <- br_logreg_misclassified |>
+  transmute(
+    sample_id,
+    truth = as.character(truth),
+    predicted_class = as.character(.pred_class),
+    responder_probability = .pred_responder,
+    histology = histology_2class,
+    pdl1 = dplyr::case_when(
+      pdl1_class == "PD-L1 high (≥50%)" ~ "High (>=50%)",
+      pdl1_class == "PD-L1 low/intermediate (1–49%)" ~ "Low/intermediate (1-49%)",
+      pdl1_class == "PD-L1 negative (<1%)" ~ "Negative (<1%)",
+      TRUE ~ pdl1_class
+    ),
+    pdl1_percent,
+    cd274 = cd274_group,
+    ifng = Signature_IFNG_class,
+    age = age_diagnosis,
+    sex,
+    smoking = smoking_2class,
+    treatment = treatment_type
+  )
+
+br_logreg_misclassified_gt <- br_logreg_misclassified_main |>
+  gt::gt(id = "br_logreg_misclassified") |>
+  gtExtras::gt_theme_538() |>
+  gt::tab_header(
+    title = gt::md("**Misclassified test samples**"),
+    subtitle = gt::md(
+      "Clinical and immune metadata"
+    )
+  ) |>
+  gt::cols_label(
+    sample_id = "Sample",
+    truth = "True class",
+    predicted_class = "Predicted class",
+    responder_probability = "P(responder)",
+    histology = "Histology",
+    pdl1 = "PD-L1",
+    pdl1_percent = "PD-L1 (%)",
+    cd274 = "CD274",
+    ifng = "IFNG",
+    age = "Age",
+    sex = "Sex",
+    smoking = "Smoking",
+    treatment = "Treatment"
+  ) |>
+  gt::fmt_number(columns = pdl1_percent, decimals = 1) |>
+  gt::fmt_number(columns = responder_probability, decimals = 3) |>
+  gt::cols_align(align = "center", columns = c(
+    truth, predicted_class, responder_probability, pdl1_percent, age, sex
+  )) |>
+  gt::tab_options(
+    table.font.size = gt::px(10),
+    data_row.padding = gt::px(4),
+    column_labels.font.weight = "bold",
+    heading.title.font.size = gt::px(16),
+    heading.subtitle.font.size = gt::px(11)
+  ) |>
+  gt::tab_source_note(
+    source_note = gt::md(
+      "**Note:** only test-set samples with truth != predicted class are shown."
+    )
+  )
+
+br_logreg_misclassified_gt
+
+if (!knitr::is_latex_output()) {
+  br_logreg_misclassified_gt <- br_logreg_misclassified_gt |>
+    gt::data_color(
+      columns = responder_probability,
+      fn = scales::col_numeric(
+        palette = c("#E8F5E9", "#FFCDD2"),
+        domain = c(0, 1)
+      )
+    ) |>
+    gtExtras::gt_plt_bar(
+      column = responder_probability,
+      keep_column = TRUE,
+      scale_type = "number",
+      width = 60
+    )
+}
+
+if (knitr::is_latex_output()) {
+  br_logreg_misclassified_pdf_gt <- br_logreg_misclassified_gt |>
+    gt::cols_hide(columns = c(
+      pdl1_percent, cd274, ifng, age, sex, smoking, treatment
+    ))
+  knitr::asis_output(gt::as_latex(br_logreg_misclassified_pdf_gt))
+} else {
+  br_logreg_misclassified_gt
+  gt::gtsave(
+    br_logreg_misclassified_gt,
+    "output/tables/br_logreg_misclassified_main_metadata.html"
+  )
+}
+```
+
+### ROC and precision-recall curves
+
+ROC-AUC summarizes ranking discrimination across classification thresholds. PR-AUC summarizes precision versus recall for responders and should be read against the responder-prevalence baseline. Figure @fig-glm-test-curves shows both views for the independent test set.
+
+```{r}
+#| message: false
+#| warning: false
+#| label: fig-glm-test-curves
+#| echo: false
+#| fig-width: 14
+#| fig-height: 6
+#| fig-cap: "ROC and precision-recall curves for the primary bias-reduced logistic-regression model on the independent test set. The dashed line in the precision-recall panel marks responder prevalence."
+
+set.seed(RANDOM_SEED)
+
+# Test-set ROC AUC
+br_logreg_roc_auc_value <- br_logreg_test_predictions |>
+  yardstick::roc_auc(
+    truth = truth,
+    .pred_responder,
+    event_level = "first"
+  ) |>
+  pull(.estimate)
+
+# ROC curve
+br_logreg_roc_plot <- br_logreg_test_predictions |>
+  yardstick::roc_curve(
+    truth = truth,
+    .pred_responder,
+    event_level = "first"
+  ) |>
+  autoplot() +
+  labs(
+    title = "Test-set ROC curve",
+    subtitle = paste0(
+      "AUC = ", sprintf("%.2f", br_logreg_roc_auc_value),
+      "; threshold = ", sprintf("%.2f", best_br_logreg$threshold)
+    ),
+    x = "1 - Specificity",
+    y = "Sensitivity"
+  )
+
+ggsave(
+  "output/figures/br_logreg_test_roc_curve.png",
+  plot = br_logreg_roc_plot,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+# Test-set PR AUC
+br_logreg_pr_auc_value <- br_logreg_test_predictions |>
+  yardstick::pr_auc(
+    truth = truth,
+    .pred_responder,
+    event_level = "first"
+  ) |>
+  pull(.estimate)
+
+# Random PR baseline = responder prevalence in the test set
+br_logreg_random_pr_baseline <- mean(
+  br_logreg_test_predictions$truth == "responder",
+  na.rm = TRUE
+)
+
+# PR curve
+br_logreg_pr_plot <- br_logreg_test_predictions |>
+  yardstick::pr_curve(
+    truth = truth,
+    .pred_responder,
+    event_level = "first"
+  ) |>
+  autoplot() +
+  geom_hline(
+    yintercept = br_logreg_random_pr_baseline,
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  labs(
+    title = "Test-set precision-recall curve",
+    subtitle = paste0(
+      "AUC = ", sprintf("%.2f", br_logreg_pr_auc_value),
+      "; threshold = ", sprintf("%.2f", best_br_logreg$threshold),
+      "; random baseline = ", sprintf("%.2f", br_logreg_random_pr_baseline)
+    ),
+    x = "Recall / Sensitivity",
+    y = "Precision"
+  )
+
+ggsave(
+  "output/figures/br_logreg_test_pr_curve.png",
+  plot = br_logreg_pr_plot,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+br_logreg_test_curves_patchwork <- patchwork::wrap_plots(
+  br_logreg_roc_plot,
+  br_logreg_pr_plot,
+  ncol = 2
+)
+
+ggsave(
+  "output/figures/br_logreg_test_roc_pr_patchwork.png",
+  plot = br_logreg_test_curves_patchwork,
+  width = 14,
+  height = 6,
+  dpi = 300
+)
+
+br_logreg_test_curves_patchwork
+```
+
+## Feature stability
+
+Feature stability is measured across the 200 Monte Carlo resamples. Each resample selects 10 miRNAs with supervised filtering; selection frequency is the proportion of resamples containing each miRNA. Final-model features are matched to these frequencies.
+
+Features selected in at least 70% of resamples are highly stable, 50–70% are stable, and fewer than 50% are unstable. Frequency reflects selection robustness, not effect size or significance.
+
+```{r}
+#| label: fig-br-logreg-feature-stability
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 10
+#| fig-height: 8
+#| fig-cap: "Selection frequency of final-model miRNAs across Monte Carlo cross-validation resamples."
+
+br_logreg_extracts <- collect_extracts(br_logreg_tune)
+
+# Keep one feature-selection result per Monte Carlo resample.
+# All threshold configurations contain the same 10 selected predictors.
+br_logreg_selected_features <- br_logreg_extracts |>
+  dplyr::select(id, .extracts) |>
+  dplyr::distinct(id, .keep_all = TRUE) |>
+  tidyr::unnest(.extracts)
+
+br_logreg_selected_features
+
+n_resamples <- dplyr::n_distinct(br_logreg_selected_features$id)
+
+br_logreg_stability_tbl <- br_logreg_selected_features |>
+  dplyr::group_by(predictor) |>
+  dplyr::summarise(
+    n_selected = dplyr::n_distinct(id),
+    selection_frequency = n_selected / n_resamples,
+    .groups = "drop"
+  ) |>
+  dplyr::left_join(
+    predictor_map,
+    by = "predictor"
+  ) |>
+  dplyr::mutate(
+    miRNA = dplyr::coalesce(original_name, predictor),
+    stability_class = dplyr::case_when(
+      selection_frequency >= 0.70 ~ "Highly stable",
+      selection_frequency >= 0.50 ~ "Stable",
+      TRUE ~ "Unstable"
+    )
+  ) |>
+  dplyr::select(
+    miRNA,
+    predictor,
+    n_selected,
+    selection_frequency,
+    stability_class
+  ) |>
+  dplyr::arrange(
+    dplyr::desc(selection_frequency),
+    miRNA
+  )
+
+br_logreg_stability_tbl
+
+readr::write_tsv(
+  br_logreg_stability_tbl,
+  "output/tables/br_logreg_feature_stability.tsv"
+)
+
+# Extract the miRNAs retained in the final fitted model.
+br_logreg_best_features <- workflows::extract_mold(
+  br_logreg_fit
+)$predictors |>
+  names() |>
+  intersect(predictor_names)
+
+br_logreg_best_features
+
+br_logreg_best_feature_stability <- tibble::tibble(
+  predictor = br_logreg_best_features
+) |>
+  dplyr::left_join(
+    br_logreg_stability_tbl,
+    by = "predictor"
+  ) |>
+  dplyr::arrange(
+    dplyr::desc(selection_frequency)
+  )
+
+br_logreg_best_feature_stability
+
+readr::write_tsv(
+  br_logreg_best_feature_stability,
+  "output/tables/br_logreg_best_model_feature_stability.tsv"
+)
+
+br_logreg_stability_plot <- br_logreg_best_feature_stability |>
+  dplyr::slice_max(
+    order_by = selection_frequency,
+    n = 20,
+    with_ties = FALSE
+  ) |>
+  dplyr::mutate(
+    miRNA = forcats::fct_reorder(miRNA, selection_frequency)
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = selection_frequency,
+      y = miRNA,
+      fill = stability_class
+    )
+  ) +
+  ggsci::scale_fill_npg() +
+  ggplot2::geom_col(width = 0.7) +
+  ggplot2::geom_vline(
+    xintercept = 0.50,
+    linetype = "dashed"
+  ) +
+  ggplot2::scale_x_continuous(
+    limits = c(0, 1),
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  ggplot2::labs(
+    title = "Feature stability",
+    subtitle = paste0(
+      "Selection frequency across ",
+      n_resamples,
+      " Monte Carlo CV resamples | dashed line at 50% selection"
+    ),
+    x = "Selection frequency",
+    y = NULL,
+    fill = "Selection frequency"
+  ) +
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(
+    panel.grid.major.y = ggplot2::element_blank()
+  )
+
+br_logreg_stability_plot
+
+ggplot2::ggsave(
+  "output/figures/br_logreg_feature_stability.png",
+  plot = br_logreg_stability_plot,
+  width = 9,
+  height = 7,
+  dpi = 300
+)
+
+```
+
+## Selected miRNA expression
+
+This raincloud plot shows expression of the 10 final-model miRNAs by responder class.
+
+```{r}
+#| label: fig-br-logreg-model-mirna-expression-raincloud
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 11
+#| fig-height: 9
+#| fig-cap: "Expression of the final-model miRNAs by responder class across all modeled samples."
+
+br_logreg_raincloud_features <- workflows::extract_mold(
+  br_logreg_fit
+)$predictors |>
+  names() |>
+  intersect(predictor_names)
+
+stopifnot(length(br_logreg_raincloud_features) == top_n_predictors)
+
+br_logreg_model_expression_long <- model_data |>
+  dplyr::select(
+    sample_id,
+    outcome,
+    dplyr::all_of(br_logreg_raincloud_features)
+  ) |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(br_logreg_raincloud_features),
+    names_to = "predictor",
+    values_to = "expression"
+  ) |>
+  dplyr::left_join(predictor_map, by = "predictor") |>
+  dplyr::mutate(
+    miRNA = factor(
+      original_name,
+      levels = predictor_map$original_name[
+        match(br_logreg_raincloud_features, predictor_map$predictor)
+      ]
+    ),
+    outcome = factor(
+      outcome,
+      levels = c("responder", "non-responder")
+    )
+  )
+
+stopifnot(
+  dplyr::n_distinct(br_logreg_model_expression_long$miRNA) == top_n_predictors,
+  !anyNA(br_logreg_model_expression_long$expression)
+)
+
+br_logreg_model_mirna_expression_raincloud <- ggplot2::ggplot(
+  br_logreg_model_expression_long,
+  ggplot2::aes(
+    x = outcome,
+    y = expression,
+    fill = outcome,
+    color = outcome
+  )
+) +
+  ggrain::geom_rain(
+    rain.side = "r",
+    alpha = 0.6
+  ) +
+  ggplot2::facet_wrap(
+    ~ miRNA,
+    scales = "free_y",
+    ncol = 2
+  ) +
+  ggsci::scale_fill_npg() +
+  ggsci::scale_color_npg() +
+  ggplot2::labs(
+    title = "Expression of final-model miRNAs",
+    x = NULL,
+    y = "Expression (logCPM)",
+    fill = NULL,
+    color = NULL
+  ) +
+  ggpubr::stat_compare_means(label.x.npc = "center", label.y.npc = "bottom", size = 3) +
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(
+    legend.position = "top"
+  )
+
+ggplot2::ggsave(
+  "output/figures/br_logreg_model_miRNA_expression_raincloud.png",
+  plot = br_logreg_model_mirna_expression_raincloud,
+  width = 16,
+  height = 12,
+  dpi = 300
+)
+
+br_logreg_model_mirna_expression_raincloud
+```
+
+## Final sample summary
+
+This summary applies the final model to all samples in `model_data`. It records split, truth, predictions, probabilities, threshold, metadata, and final-model miRNA expression. Complete and compact TSVs are saved.
+
+```{r}
+#| label: br-logreg-train-test-summary-data
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+
+br_logreg_prediction_input <- model_data |>
+  dplyr::select(sample_id, dplyr::all_of(predictor_names))
+
+br_logreg_train_test_model_data <- model_data |>
+  dplyr::select(sample_id, outcome, train_test) |>
+  dplyr::bind_cols(
+    predict(
+      br_logreg_fit,
+      new_data = br_logreg_prediction_input,
+      type = "prob"
+    ),
+    predict(
+      br_logreg_fit,
+      new_data = br_logreg_prediction_input,
+      type = "class"
+    )
+  ) |>
+  dplyr::transmute(
+    sample_id,
+    train_test,
+    split = dplyr::if_else(train_test == "test", "Test", "Train"),
+    model = "bias-reduced logistic regression",
+    true_class = as.character(outcome),
+    predicted_class = as.character(.pred_class),
+    responder_probability = .pred_responder,
+    non_responder_probability = `.pred_non-responder`,
+    model_threshold = best_br_logreg$threshold
+  ) |>
+  dplyr::arrange(
+    factor(train_test, levels = c("test", "train")),
+    sample_id
+  )
+
+br_logreg_model_mirnas <- mirna_expr |>
+  dplyr::select(sample_id, dplyr::all_of(br_logreg_best_features)) |>
+  dplyr::rename_with(
+    ~ paste0(
+      "miRNA_",
+      predictor_map$original_name[
+        match(.x, predictor_map$predictor)
+      ]
+    ),
+    dplyr::all_of(br_logreg_best_features)
+  )
+
+br_logreg_model_mirna_cols <- setdiff(
+  names(br_logreg_model_mirnas),
+  "sample_id"
+)
+
+stopifnot(
+  length(br_logreg_model_mirna_cols) == length(br_logreg_best_features),
+  !anyNA(br_logreg_model_mirna_cols),
+  !anyDuplicated(br_logreg_model_mirna_cols)
+)
+
+br_logreg_summary_metadata <- br_logreg_metadata |>
+  dplyr::select(sample_id, dplyr::everything())
+
+br_logreg_train_test_complete <- br_logreg_train_test_model_data |>
+  dplyr::left_join(br_logreg_summary_metadata, by = "sample_id") |>
+  dplyr::left_join(br_logreg_model_mirnas, by = "sample_id")
+
+essential_metadata_cols <- c(
+  "histology_2class",
+  "pdl1_class",
+  "pdl1_percent",
+  "cd274_group",
+  "Signature_IFNG_class",
+  "age_diagnosis",
+  "sex",
+  "smoking_2class",
+  "treatment_type",
+  "ecog_group"
+)
+
+br_logreg_train_test_essential <- br_logreg_train_test_model_data |>
+  dplyr::left_join(
+    br_logreg_summary_metadata |>
+      dplyr::select(
+        sample_id,
+        dplyr::any_of(essential_metadata_cols)
+      ),
+    by = "sample_id"
+  ) |>
+  dplyr::left_join(br_logreg_model_mirnas, by = "sample_id")
+
+stopifnot(
+  nrow(br_logreg_train_test_complete) == nrow(br_logreg_train_test_model_data),
+  nrow(br_logreg_train_test_essential) == nrow(br_logreg_train_test_model_data),
+  identical(
+    names(br_logreg_train_test_complete)[
+      (ncol(br_logreg_train_test_complete) - length(br_logreg_model_mirna_cols) + 1):
+        ncol(br_logreg_train_test_complete)
+    ],
+    br_logreg_model_mirna_cols
+  ),
+  identical(
+    names(br_logreg_train_test_essential)[
+      (ncol(br_logreg_train_test_essential) - length(br_logreg_model_mirna_cols) + 1):
+        ncol(br_logreg_train_test_essential)
+    ],
+    br_logreg_model_mirna_cols
+  )
+)
+
+readr::write_tsv(
+  br_logreg_train_test_complete,
+  "output/tables/br_logreg_train_test_complete.tsv"
+)
+
+readr::write_tsv(
+  br_logreg_train_test_essential,
+  "output/tables/br_logreg_train_test_essential.tsv"
+)
+```
+
+The GT table groups train and test samples. Training calls are in-sample; test calls are held out. The PDF uses a compact view, while the TSV and HTML retain the full values.
+
+```{r}
+#| label: tbl-br-logreg-train-test-summary
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Final-model predictions, selected-miRNA expression, and essential metadata by split."
+
+br_logreg_model_gt_cols <- c(
+  "train_test",
+  "model",
+  "true_class",
+  "predicted_class",
+  "responder_probability",
+  "non_responder_probability",
+  "model_threshold"
+)
+
+br_logreg_metadata_gt_cols <- intersect(
+  essential_metadata_cols,
+  names(br_logreg_train_test_essential)
+)
+
+br_logreg_train_test_gt <- br_logreg_train_test_essential |>
+  gt::gt(
+    groupname_col = "split",
+    id = "br_logreg_train_test_summary"
+  ) |>
+  gtExtras::gt_theme_538() |>
+  gt::tab_header(
+    title = gt::md("**Final sample summary**"),
+    subtitle = gt::md(
+      "Predictions and selected-miRNA expression"
+    )
+  ) |>
+  gt::cols_label(
+    sample_id = "Sample",
+    train_test = "Split",
+    model = "Model",
+    true_class = "True class",
+    predicted_class = "Predicted class",
+    responder_probability = "P(responder)",
+    non_responder_probability = "P(non-responder)",
+    model_threshold = "Threshold",
+    histology_2class = "Histology",
+    pdl1_class = "PD-L1",
+    pdl1_percent = "PD-L1 (%)",
+    cd274_group = "CD274",
+    Signature_IFNG_class = "IFNG",
+    age_diagnosis = "Age",
+    sex = "Sex",
+    smoking_2class = "Smoking",
+    treatment_type = "Treatment",
+    ecog_group = "ECOG"
+  ) |>
+  gt::tab_spanner(
+    label = "Model data",
+    columns = dplyr::all_of(br_logreg_model_gt_cols)
+  ) |>
+  gt::tab_spanner(
+    label = "Essential metadata",
+    columns = dplyr::all_of(br_logreg_metadata_gt_cols)
+  ) |>
+  gt::tab_spanner(
+    label = "Final-model miRNA expression",
+    columns = dplyr::all_of(br_logreg_model_mirna_cols)
+  ) |>
+  gt::fmt_number(
+    columns = dplyr::all_of(c(
+      "responder_probability",
+      "non_responder_probability",
+      "model_threshold",
+      "pdl1_percent",
+      br_logreg_model_mirna_cols
+    )),
+    decimals = 3
+  ) |>
+  gt::cols_align(
+    align = "center",
+    columns = dplyr::all_of(c(
+      "train_test",
+      "true_class",
+      "predicted_class",
+      "responder_probability",
+      "non_responder_probability",
+      "model_threshold",
+      br_logreg_model_mirna_cols
+    ))
+  ) |>
+  gt::tab_style(
+    style = list(
+      gt::cell_fill(color = "#E8F1FB"),
+      gt::cell_text(weight = "bold")
+    ),
+    locations = gt::cells_row_groups(groups = "Test")
+  ) |>
+  gt::tab_style(
+    style = list(
+      gt::cell_fill(color = "#EAF5EA"),
+      gt::cell_text(weight = "bold")
+    ),
+    locations = gt::cells_row_groups(groups = "Train")
+  ) |>
+  gt::tab_options(
+    table.font.size = gt::px(9),
+    data_row.padding = gt::px(3),
+    column_labels.font.weight = "bold",
+    row_group.font.weight = "bold",
+    heading.title.font.size = gt::px(16),
+    heading.subtitle.font.size = gt::px(11)
+  )
+
+br_logreg_train_test_gt
+
+if (knitr::is_latex_output()) {
+  br_logreg_train_test_pdf_gt <- br_logreg_train_test_gt |>
+    gt::cols_hide(
+      columns = dplyr::all_of(c(
+        "model",
+        "non_responder_probability",
+        "model_threshold",
+        br_logreg_metadata_gt_cols,
+        br_logreg_model_mirna_cols
+      ))
+    ) |>
+    gt::tab_header(
+      title = gt::md("**Final sample summary**"),
+      subtitle = gt::md(
+        "Compact PDF view; full values are in the TSV and HTML table"
+      )
+    )
+  knitr::asis_output(gt::as_latex(br_logreg_train_test_pdf_gt))
+} else {
+  br_logreg_train_test_gt <- br_logreg_train_test_gt |>
+    gt::tab_source_note(
+      source_note = gt::md(
+        "**Note:** train rows are in-sample evaluations; test rows are independent held-out evaluations."
+      )
+    )
+  br_logreg_train_test_gt
+  gt::gtsave(
+    br_logreg_train_test_gt,
+    "output/tables/br_logreg_train_test_summary.html"
+  )
+}
+
+
+```
+
+## Top 4 stable miRNA model
+
+This secondary analysis retains only the four miRNAs with the highest selection frequency in the training-derived stability table. The primary 10-miRNA model above is unchanged. The reduced model uses the same class weights, Monte Carlo resamples, bias-reduced logistic-regression specification, threshold grid, and held-out test set.
+
+```{r}
+#| label: top4-stable-mirna-model
+#| echo: false
+#| message: false
+#| warning: false
+
+top4_stable_mirnas <- br_logreg_stability_tbl |>
+  dplyr::filter(stability_class != "Unstable") |>
+  dplyr::arrange(dplyr::desc(selection_frequency), miRNA) |>
+  dplyr::slice_head(n = 4)
+
+stopifnot(nrow(top4_stable_mirnas) == 4L)
+
+top4_predictors <- top4_stable_mirnas$predictor
+
+top4_stable_mirnas
+
+readr::write_tsv(
+  top4_stable_mirnas,
+  "output/tables/br_logreg_top4_stable_mirnas.tsv"
+)
+
+top4_recipe <- recipe(outcome ~ ., data = train_data) |>
+  update_role(sample_id, new_role = "id") |>
+  step_rm(dplyr::all_of(setdiff(predictor_names, top4_predictors))) |>
+  step_zv(all_predictors()) |>
+  step_normalize(all_predictors())
+
+top4_workflow <- workflow() |>
+  add_recipe(top4_recipe) |>
+  add_model(br_logreg_spec) |>
+  add_tailor(br_logreg_tailor)
+
+top4_tune <- tune_grid(
+  top4_workflow,
+  resamples = cv_folds,
+  grid = br_logreg_grid,
+  metrics = model_metrics,
+  control = control_grid(save_pred = TRUE)
+)
+
+top4_best <- select_best(top4_tune, metric = "bal_accuracy")
+
+top4_fit <- finalize_workflow(top4_workflow, top4_best) |>
+  fit(data = train_data)
+
+top4_fit_bundle <- bundle(top4_fit)
+saveRDS(
+  top4_fit_bundle,
+  "output/models/br_logreg_top4_fit_bundle.rds"
+)
+
+top4_test_predictions <- test_data |>
+  select(sample_id, outcome) |>
+  bind_cols(
+    predict(top4_fit, new_data = test_data, type = "prob"),
+    predict(top4_fit, new_data = test_data, type = "class")
+  ) |>
+  mutate(
+    truth = factor(outcome, levels = c("responder", "non-responder")),
+    .pred_class = factor(.pred_class, levels = c("responder", "non-responder"))
+  )
+
+top4_test_metrics <- bind_rows(
+  model_metrics(
+    top4_test_predictions,
+    truth = truth,
+    estimate = .pred_class,
+    .pred_responder,
+    event_level = "first"
+  ),
+  yardstick::precision(
+    top4_test_predictions,
+    truth = truth,
+    estimate = .pred_class,
+    event_level = "first"
+  ),
+  yardstick::npv(
+    top4_test_predictions,
+    truth = truth,
+    estimate = .pred_class,
+    event_level = "first"
+  ),
+  yardstick::j_index(
+    top4_test_predictions,
+    truth = truth,
+    estimate = .pred_class,
+    event_level = "first"
+  ),
+  yardstick::pr_auc(
+    top4_test_predictions,
+    truth = truth,
+    .pred_responder,
+    event_level = "first"
+  )
+) |>
+  mutate(
+    model = "top 4 stable-miRNA bias-reduced logistic regression",
+    evaluation = paste0("test set; threshold = ", round(top4_best$threshold, 3))
+  )
+
+readr::write_tsv(
+  top4_test_predictions,
+  "output/tables/br_logreg_top4_test_predictions.tsv"
+)
+
+readr::write_tsv(
+  top4_test_metrics,
+  "output/tables/br_logreg_top4_test_metrics.tsv"
+)
+
+top4_test_metrics |>
+  select(.metric, .estimate, model, evaluation)
+```
+
+### Top 4 test ROC and precision–recall curves
+
+Figure @fig-top4-test-curves provides a brief held-out performance view for the reduced model. The ROC and precision–recall calculations use the unchanged test samples and responder probability predictions from `top4_fit`.
+
+```{r}
+#| label: fig-top4-test-curves
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 14
+#| fig-height: 6
+#| fig-cap: "ROC and precision-recall curves for the top-4 stable-miRNA model on the independent test set. The dashed line in the precision-recall panel marks responder prevalence."
+
+top4_roc_auc_value <- top4_test_metrics |>
+  filter(.metric == "roc_auc") |>
+  pull(.estimate)
+
+top4_roc_plot <- top4_test_predictions |>
+  yardstick::roc_curve(
+    truth = truth,
+    .pred_responder,
+    event_level = "first"
+  ) |>
+  autoplot() +
+  labs(
+    title = "Test ROC",
+    subtitle = paste0("AUC = ", sprintf("%.2f", top4_roc_auc_value)),
+    x = "1 - Specificity",
+    y = "Sensitivity"
+  )
+
+ggsave(
+  "output/figures/br_logreg_top4_test_roc_curve.png",
+  plot = top4_roc_plot,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+top4_pr_auc_value <- top4_test_metrics |>
+  filter(.metric == "pr_auc") |>
+  pull(.estimate)
+
+top4_random_pr_baseline <- mean(
+  top4_test_predictions$truth == "responder",
+  na.rm = TRUE
+)
+
+top4_pr_plot <- top4_test_predictions |>
+  yardstick::pr_curve(
+    truth = truth,
+    .pred_responder,
+    event_level = "first"
+  ) |>
+  autoplot() +
+  geom_hline(
+    yintercept = top4_random_pr_baseline,
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  labs(
+    title = "Test precision-recall",
+    subtitle = paste0(
+      "AUC = ", sprintf("%.2f", top4_pr_auc_value),
+      "; random baseline = ", sprintf("%.2f", top4_random_pr_baseline)
+    ),
+    x = "Recall / Sensitivity",
+    y = "Precision"
+  )
+
+ggsave(
+  "output/figures/br_logreg_top4_test_pr_curve.png",
+  plot = top4_pr_plot,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+top4_test_curves_patchwork <- patchwork::wrap_plots(
+  top4_roc_plot,
+  top4_pr_plot,
+  ncol = 2
+)
+
+ggsave(
+  "output/figures/br_logreg_top4_test_roc_pr_patchwork.png",
+  plot = top4_test_curves_patchwork,
+  width = 14,
+  height = 6,
+  dpi = 300
+)
+
+top4_test_curves_patchwork
+```
+
+The corresponding ROC-AUC and PR-AUC values are listed below.
+
+```{r}
+#| label: tbl-top4-test-curves
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "ROC-AUC and PR-AUC for the top-4 stable-miRNA model on the independent test set."
+
+top4_test_metrics |>
+  filter(.metric %in% c("roc_auc", "pr_auc")) |>
+  select(.metric, .estimate)
+```
+
+### Top 4 test confusion matrix
+
+The confusion matrix reports the held-out test-set counts at the threshold selected by balanced accuracy during training resampling.
+
+```{r}
+#| label: fig-top4-test-confusion
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 7
+#| fig-height: 6
+#| fig-cap: "Confusion matrix for the top-4 stable-miRNA model on the independent test set."
+
+top4_test_conf_mat <- top4_test_predictions |>
+  yardstick::conf_mat(
+    truth = truth,
+    estimate = .pred_class
+  )
+
+top4_test_conf_mat_plot <- top4_test_conf_mat |>
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Top 4 stable-miRNA model: test confusion matrix",
+    subtitle = paste0(
+      "Independent test set; threshold = ",
+      round(top4_best$threshold, 3)
+    ),
+    x = "Predicted class",
+    y = "True class"
+  ) +
+  scale_fill_gradient(low = "white", high = "#3B528B")
+
+ggsave(
+  "output/figures/br_logreg_top4_test_confusion_matrix.png",
+  plot = top4_test_conf_mat_plot,
+  width = 7,
+  height = 6,
+  dpi = 300
+)
+
+top4_test_conf_mat_table <- top4_test_predictions |>
+  count(truth, prediction = .pred_class, name = "n")
+
+readr::write_tsv(
+  top4_test_conf_mat_table,
+  "output/tables/br_logreg_top4_test_confusion_matrix.tsv"
+)
+
+top4_test_conf_mat
+top4_test_conf_mat_plot
+```
+
+
+## Query and print information about the current R session
+```{r}
+
+sessioninfo::session_info()
+
+```
