@@ -15,17 +15,12 @@ Notebooks are not executed or rendered into this site.
 [View repository](https://github.com/Thokas99/Useful_code){: .btn}
 
 <div class="catalog-grid">
-  {% for key in "single_cell,bulk_rna,scatac,multiome,mofa,biomarker_ml" | split: "," %}
-    {% case key %}
-      {% when "single_cell" %}{% assign family = site.data.methods.single_cell %}
-      {% when "bulk_rna" %}{% assign family = site.data.methods.bulk_rna %}
-      {% when "scatac" %}{% assign family = site.data.methods.scatac %}
-      {% when "multiome" %}{% assign family = site.data.methods.multiome %}
-      {% when "mofa" %}{% assign family = site.data.methods.mofa %}
-      {% when "biomarker_ml" %}{% assign family = site.data.methods.biomarker_ml %}
-    {% endcase %}
-    {% include family-card.html family=family %}
-  {% endfor %}
+  {% assign family = site.data.methods.single_cell %}{% include family-card.html family=family %}
+  {% assign family = site.data.methods.bulk_rna %}{% include family-card.html family=family %}
+  {% assign family = site.data.methods.scatac %}{% include family-card.html family=family %}
+  {% assign family = site.data.methods.multiome %}{% include family-card.html family=family %}
+  {% assign family = site.data.methods.mofa %}{% include family-card.html family=family %}
+  {% assign family = site.data.methods.biomarker_ml %}{% include family-card.html family=family %}
 </div>
 
 ## Other resources
