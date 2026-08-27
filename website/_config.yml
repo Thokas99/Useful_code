@@ -2,6 +2,7 @@ title: Useful code
 description: A curated personal bioinformatics cookbook of reusable workflows
 url: https://thokas99.github.io
 baseurl: /Useful_code
+permalink: pretty
 
 theme: just-the-docs
 repository: Thokas99/Useful_code
