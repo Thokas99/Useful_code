@@ -29,9 +29,13 @@ The active, generalized templates are under [`templates/`](templates/README.md).
 templates/   active canonical workflows
 examples/    real project analyses and provenance
 cheatsheets/ compact reference material
+miscellaneous/ reusable scientific documentation and reporting resources
 docs/        architecture and refactor documentation
 archive/     superseded scaffolds and historical archives
 ```
+
+General documentation and reporting resources are collected under
+[`miscellaneous/`](miscellaneous/README.md).
 
 ## Template philosophy
 

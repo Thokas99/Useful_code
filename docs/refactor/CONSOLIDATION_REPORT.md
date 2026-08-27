@@ -154,6 +154,18 @@ reports are grouped under `docs/`, and the root README points to the canonical
 library. This mission did not create website files, Quarto website
 configuration, or deployment workflows.
 
+## Miscellaneous resources
+
+Two reusable non-analytical resources were incorporated after the main
+consolidation:
+
+- a scientific Methods documentation prompt;
+- a Quarto scientific-report template.
+
+They were placed under `/miscellaneous` rather than `/templates` because they
+support documentation and reporting workflows rather than defining analytical
+methods.
+
 ## Remaining uncertainty
 
 The private-path `alevin_fry` infrastructure and several pre-existing
