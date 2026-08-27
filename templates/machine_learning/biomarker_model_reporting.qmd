@@ -1,0 +1,293 @@
+---
+title: "Biomarker model reporting"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  freeze: false
+---
+
+> Status: `draft`
+>
+> Template class: SOURCE-BACKED WORKFLOW
+
+## Purpose
+
+Read frozen model outputs and produce compact audit/presentation tables, a
+probability plot, and a feature-expression heatmap. This notebook does not
+refit a model, select features, tune thresholds, or re-evaluate performance.
+
+::: {.callout-note}
+## Source-backed reporting workflow
+
+The reporting layout preserves the useful `gt`/`gtExtras` companion workflow
+from the source analysis while replacing fixed clinical and biomarker names
+with dynamic columns from the model-output contract.
+:::
+
+## Inputs and parameters
+
+The complete and essential TSVs are written by
+`biomarker_binary_classification_brglm2.qmd`. The essential table contains
+the sample, split, truth, prediction, probability, threshold, and selected
+feature columns. The complete table may additionally contain metadata.
+
+```{r}
+# Input contract
+complete_input <- "input/biomarker_train_test_complete.tsv"
+essential_input <- "input/biomarker_train_test_essential.tsv"
+output_table_dir <- "output/tables"
+output_figure_dir <- "output/figures"
+
+sample_id_column <- "sample_id"
+split_column <- "split"
+truth_column <- "truth"
+predicted_column <- "predicted_class"
+probability_column <- "probability_positive"
+threshold_column <- "threshold"
+feature_prefix <- "feature_"
+
+dir.create(output_table_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(output_figure_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+## Frozen-output checks
+
+```{r}
+library(tidyverse)
+library(gt)
+library(gtExtras)
+library(ComplexHeatmap)
+library(circlize)
+
+complete_tbl <- readr::read_tsv(complete_input, show_col_types = FALSE)
+essential_tbl <- readr::read_tsv(essential_input, show_col_types = FALSE)
+
+required_columns <- c(
+  sample_id_column,
+  split_column,
+  truth_column,
+  predicted_column,
+  probability_column,
+  threshold_column
+)
+stopifnot(
+  all(required_columns %in% names(essential_tbl)),
+  !anyDuplicated(essential_tbl[[sample_id_column]]),
+  all(essential_tbl[[sample_id_column]] %in% complete_tbl[[sample_id_column]])
+)
+
+feature_columns <- names(essential_tbl)[startsWith(names(essential_tbl), feature_prefix)]
+stopifnot(
+  length(feature_columns) > 0L,
+  all(feature_columns %in% names(complete_tbl))
+)
+
+model_columns <- c(
+  split_column,
+  truth_column,
+  predicted_column,
+  probability_column,
+  threshold_column
+)
+
+label_map <- c(
+  setNames("Sample", sample_id_column),
+  setNames("Set", split_column),
+  setNames("True class", truth_column),
+  setNames("Predicted class", predicted_column),
+  setNames("Positive probability", probability_column),
+  setNames("Threshold", threshold_column)
+)
+feature_labels <- stats::setNames(
+  sub(paste0("^", feature_prefix), "", feature_columns),
+  feature_columns
+)
+```
+
+## Complete audit table
+
+The complete table keeps all available metadata and selected-feature values.
+It is an HTML presentation artifact; the frozen numerical source remains the
+TSV produced by the modeling notebook.
+
+```{r}
+complete_gt <- complete_tbl |>
+  gt::gt(id = "complete_biomarker_model_summary") |>
+  gtExtras::gt_theme_538() |>
+  gt::tab_header(
+    title = gt::md("**Complete biomarker model summary**"),
+    subtitle = gt::md(
+      "Frozen predictions, observed classes, thresholds, metadata, and selected features"
+    )
+  ) |>
+  gt::cols_label(!!!as.list(c(label_map, feature_labels))) |>
+  gt::tab_spanner(
+    label = "Model output",
+    columns = dplyr::all_of(model_columns)
+  ) |>
+  gt::tab_spanner(
+    label = "Selected features",
+    columns = dplyr::all_of(feature_columns)
+  ) |>
+  gt::fmt_number(
+    columns = dplyr::all_of(c(probability_column, threshold_column)),
+    decimals = 3
+  ) |>
+  gt::data_color(
+    columns = dplyr::all_of(probability_column),
+    fn = scales::col_numeric(c("#E8F5E9", "#FFCDD2"), domain = c(0, 1))
+  )
+
+complete_gt
+gt::gtsave(
+  complete_gt,
+  file.path(output_table_dir, "biomarker_complete_model_summary.html")
+)
+```
+
+## Essential presentation table
+
+The essential table is intentionally narrower but retains the split and
+selected-feature columns needed to interpret the displayed predictions.
+
+```{r}
+essential_gt <- essential_tbl |>
+  gt::gt(id = "essential_biomarker_model_summary") |>
+  gtExtras::gt_theme_538() |>
+  gt::tab_header(
+    title = gt::md("**Essential biomarker model summary**"),
+    subtitle = gt::md("Train/test annotations and frozen model predictions")
+  ) |>
+  gt::cols_label(!!!as.list(c(label_map, feature_labels))) |>
+  gt::tab_spanner(
+    label = "Model output",
+    columns = dplyr::all_of(model_columns)
+  ) |>
+  gt::tab_spanner(
+    label = "Selected features",
+    columns = dplyr::all_of(feature_columns)
+  ) |>
+  gt::fmt_number(
+    columns = dplyr::all_of(c(probability_column, threshold_column)),
+    decimals = 3
+  ) |>
+  gt::data_color(
+    columns = dplyr::all_of(probability_column),
+    fn = scales::col_numeric(c("#E8F5E9", "#FFCDD2"), domain = c(0, 1))
+  ) |>
+  gtExtras::gt_plt_bar(
+    column = probability_column,
+    keep_column = TRUE,
+    scale_type = "number",
+    width = 60
+  )
+
+essential_gt
+gt::gtsave(
+  essential_gt,
+  file.path(output_table_dir, "biomarker_essential_model_summary.html")
+)
+```
+
+## Model probability plot
+
+```{r}
+probability_plot <- complete_tbl |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data[[probability_column]],
+      fill = .data[[split_column]],
+      colour = .data[[truth_column]]
+    )
+  ) +
+  ggplot2::geom_density(alpha = 0.25) +
+  ggplot2::geom_vline(
+    ggplot2::aes(xintercept = .data[[threshold_column]]),
+    linetype = "dashed",
+    colour = "grey30"
+  ) +
+  ggplot2::scale_x_continuous(limits = c(0, 1)) +
+  ggplot2::labs(
+    title = "Frozen model probabilities",
+    x = "Positive-class probability",
+    y = "Density",
+    fill = "Set",
+    colour = "True class"
+  ) +
+  ggplot2::theme_bw()
+
+probability_plot
+ggplot2::ggsave(
+  file.path(output_figure_dir, "model_probability_plot.png"),
+  probability_plot,
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+```
+
+## Selected-feature heatmap
+
+The heatmap standardizes each selected feature across the rows present in the
+frozen essential table. Zero-variance features are excluded because their
+standard deviation is undefined. This is a visualization transform, not a
+modeling or re-normalization step.
+
+```{r}
+feature_matrix <- essential_tbl |>
+  dplyr::select(dplyr::all_of(feature_columns)) |>
+  as.matrix()
+rownames(feature_matrix) <- essential_tbl[[sample_id_column]]
+
+feature_sd <- apply(feature_matrix, 2, stats::sd, na.rm = TRUE)
+keep_features <- is.finite(feature_sd) & feature_sd > 0
+stopifnot(any(keep_features))
+
+feature_z <- scale(feature_matrix[, keep_features, drop = FALSE])
+feature_z <- t(feature_z)
+
+split_values <- as.character(essential_tbl[[split_column]])
+truth_values <- as.character(essential_tbl[[truth_column]])
+split_levels <- unique(split_values)
+truth_levels <- unique(truth_values)
+split_colours <- stats::setNames(scales::hue_pal()(length(split_levels)), split_levels)
+truth_colours <- stats::setNames(scales::hue_pal()(length(truth_levels)), truth_levels)
+
+annotation <- ComplexHeatmap::HeatmapAnnotation(
+  Set = split_values,
+  Truth = truth_values,
+  col = list(Set = split_colours, Truth = truth_colours),
+  annotation_name_side = "left"
+)
+
+heatmap <- ComplexHeatmap::Heatmap(
+  feature_z,
+  name = "Feature z-score",
+  top_annotation = annotation,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  show_column_names = FALSE,
+  column_title = "Samples",
+  row_title = "Selected features",
+  col = circlize::colorRamp2(c(-2, 0, 2), c("#2166AC", "white", "#B2182B"))
+)
+
+heatmap
+png(file.path(output_figure_dir, "selected_feature_heatmap.png"), width = 1800, height = 1100, res = 200)
+ComplexHeatmap::draw(heatmap)
+dev.off()
+```
+
+## Method notes
+
+- The companion notebook consumes frozen outputs and does not refit or tune.
+- Train/test membership, truth, predicted class, probability, and threshold
+  remain visible in both table contracts.
+- Complete metadata are displayed when present, but metadata are not assumed
+  to be model predictors.
+- The heatmap z-scores are dataset-relative visualization values and should not
+  be interpreted as model coefficients or transferable measurements.
+- Consult current `gt`, `gtExtras`, `ComplexHeatmap`, and `circlize`
+  documentation for advanced table styling and annotation options.
