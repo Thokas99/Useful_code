@@ -3,12 +3,23 @@
 A curated personal bioinformatics cookbook of 37 reusable R, Python, and
 Quarto workflows derived from real analytical projects.
 
+> One repository. One canonical notebook library. One lightweight catalog.
+
 **Browse the catalog:** [open the website](https://thokas99.github.io/Useful_code/)
 · [browse the templates](templates/README.md) · [view the repository on GitHub](https://github.com/Thokas99/Useful_code)
 
 The website is an index, not a second copy of the science: each catalog entry
 links to the canonical notebook in this repository, where the code, parameters,
 provenance, and current status remain the source of truth.
+
+## At a glance
+
+| Resource | What it provides |
+|---|---|
+| [Website catalog](https://thokas99.github.io/Useful_code/) | Six method families, notebook summaries, full-text notebook search, and source/download links |
+| [`templates/`](templates/README.md) | 37 canonical reusable notebooks |
+| [`examples/`](examples/README.md) | Project-specific analyses and provenance |
+| [`miscellaneous/`](miscellaneous/README.md) | Reporting resources, prompts, and reusable documentation material |
 
 ## What this repository contains
 
@@ -52,6 +63,10 @@ General documentation and reporting resources are collected under
    adapting it.
 3. Recheck package behavior and assumptions against the relevant upstream
    documentation and your own data.
+
+The website search covers the catalog and the full source text of the canonical
+notebooks. Search results lead back to the relevant family page; the exact QMD
+file remains on GitHub.
 
 The notebooks are intentionally readable starting points. They are not
 guarantees of validation for every dataset or analysis design.

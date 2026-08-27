@@ -7,8 +7,19 @@ permalink: pretty
 theme: just-the-docs
 repository: Thokas99/Useful_code
 
+color_scheme: dark
 search_enabled: true
 heading_anchors: true
+search:
+  heading_level: 2
+  previews: 3
+  preview_words_before: 6
+  preview_words_after: 12
+  tokenizer_separator: /[\s\-/]+/
+
+exclude:
+  - scripts/
+  - _data/notebook_search.json
 
 aux_links:
   GitHub repository: https://github.com/Thokas99/Useful_code

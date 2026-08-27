@@ -1,0 +1,5 @@
+{%- assign notebook_content = "" -%}
+{%- if include.page.search_family -%}
+  {%- assign notebook_content = site.data.notebook_search[include.page.search_family] | default: "" -%}
+{%- endif -%}
+"notebook_content": {{ notebook_content | jsonify }},

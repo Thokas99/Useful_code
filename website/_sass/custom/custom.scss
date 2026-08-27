@@ -1,4 +1,74 @@
 /* Small catalog layer; the Just the Docs layout remains in charge. */
+.hero-panel {
+  margin: 1rem 0 1.5rem;
+  padding: clamp(1.5rem, 4vw, 3rem);
+  border: 1px solid var(--border-color, #d9dce1);
+  border-radius: 0.75rem;
+  background: linear-gradient(135deg, var(--sidebar-color, #f6f6f6), var(--body-background-color, #fff));
+}
+
+.hero-panel h2 {
+  max-width: 36rem;
+  margin: 0.35rem 0 0.75rem;
+  font-size: clamp(1.75rem, 4vw, 2.65rem);
+}
+
+.hero-panel p {
+  max-width: 42rem;
+}
+
+.hero-kicker {
+  margin: 0;
+  color: var(--link-color, #7253ed);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1.25rem;
+}
+
+.cta-row .btn {
+  margin: 0;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0 0 2rem;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.9rem 1rem;
+  border-left: 3px solid var(--link-color, #7253ed);
+  background: var(--sidebar-color, #f6f6f6);
+}
+
+.stat-value {
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.stat span {
+  color: var(--body-text-color, #27262b);
+  font-size: 0.8rem;
+}
+
+.search-note {
+  margin: 1.25rem 0 2rem;
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--link-color, #7253ed);
+  background: var(--sidebar-color, #f6f6f6);
+}
+
 .catalog-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
@@ -45,6 +115,10 @@
   gap: 1rem;
 }
 
+.notebook-card {
+  box-shadow: 0 0.2rem 0.8rem rgba(0, 0, 0, 0.08);
+}
+
 .catalog-badge {
   display: inline-block;
   margin: 0 0.35rem 0.5rem 0;
@@ -70,6 +144,10 @@
 }
 
 @media (max-width: 40rem) {
+  .stat-grid {
+    grid-template-columns: 1fr;
+  }
+
   .catalog-actions .btn {
     width: 100%;
     text-align: center;

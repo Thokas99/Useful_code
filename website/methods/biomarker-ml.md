@@ -3,6 +3,7 @@ layout: default
 title: Biomarker ML
 parent: Methods
 nav_order: 6
+search_family: biomarker_ml
 ---
 
 {% assign family = site.data.methods.biomarker_ml %}

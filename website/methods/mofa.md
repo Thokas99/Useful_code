@@ -3,6 +3,7 @@ layout: default
 title: Multi-omics / MOFA
 parent: Methods
 nav_order: 5
+search_family: mofa
 ---
 
 {% assign family = site.data.methods.mofa %}

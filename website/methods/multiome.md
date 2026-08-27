@@ -3,6 +3,7 @@ layout: default
 title: Multiome
 parent: Methods
 nav_order: 4
+search_family: multiome
 ---
 
 {% assign family = site.data.methods.multiome %}

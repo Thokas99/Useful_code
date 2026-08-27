@@ -3,6 +3,7 @@ layout: default
 title: Single-cell
 parent: Methods
 nav_order: 1
+search_family: single_cell
 ---
 
 {% assign family = site.data.methods.single_cell %}

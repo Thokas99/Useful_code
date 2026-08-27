@@ -3,6 +3,7 @@ layout: default
 title: Bulk RNA
 parent: Methods
 nav_order: 2
+search_family: bulk_rna
 ---
 
 {% assign family = site.data.methods.bulk_rna %}

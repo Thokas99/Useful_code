@@ -10,3 +10,4 @@ vendor/
 __pycache__/
 .ipynb_checkpoints/
 **/*.quarto_ipynb
+website/_data/notebook_search.json

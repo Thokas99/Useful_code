@@ -3,6 +3,7 @@ layout: default
 title: scATAC
 parent: Methods
 nav_order: 3
+search_family: scatac
 ---
 
 {% assign family = site.data.methods.scatac %}

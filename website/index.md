@@ -5,14 +5,29 @@ nav_order: 1
 has_toc: false
 ---
 
-Reusable bioinformatics workflows derived from real analytical projects.
+<section class="hero-panel">
+  <p class="hero-kicker">BIOINFORMATICS · R · PYTHON · QUARTO</p>
+  <h2>Readable workflows for real analytical work.</h2>
+  <p>Explore reusable methods, inspect their assumptions, and open the canonical notebook when you are ready to adapt it.</p>
+  <div class="cta-row">
+    <a class="btn btn-primary" href="{{ site.baseurl }}/methods/">Browse methods</a>
+    <a class="btn" href="https://github.com/Thokas99/Useful_code">View repository</a>
+  </div>
+</section>
 
-This site is a small catalog. The executable source of truth remains in the
-canonical notebooks on [GitHub](https://github.com/Thokas99/Useful_code/tree/main/templates).
-Notebooks are not executed or rendered into this site.
+<div class="stat-grid" aria-label="Catalog summary">
+  <div class="stat"><strong class="stat-value">37</strong><span>canonical notebooks</span></div>
+  <div class="stat"><strong class="stat-value">6</strong><span>method families</span></div>
+  <div class="stat"><strong class="stat-value">1</strong><span>GitHub source of truth</span></div>
+</div>
 
-[Browse methods]({{ site.baseurl }}/methods/){: .btn .btn-primary }
-[View repository](https://github.com/Thokas99/Useful_code){: .btn}
+The site is a small catalog. The canonical notebooks on
+[GitHub](https://github.com/Thokas99/Useful_code/tree/main/templates) remain the
+source of truth; notebooks are not executed or rendered into this site.
+
+<p class="search-note"><strong>Search inside the notebooks.</strong> The site search also indexes the full source text of every canonical QMD, while results still lead to the family catalog and the original GitHub file.</p>
+
+## Browse the library
 
 <div class="catalog-grid">
   {% assign family = site.data.methods.single_cell %}{% include family-card.html family=family %}

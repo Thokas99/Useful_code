@@ -33,6 +33,9 @@ jobs:
           cache-version: 0
           working-directory: "${{ github.workspace }}/website"
 
+      - name: Index notebook sources for site search
+        run: ruby scripts/build_notebook_search.rb
+
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v6
