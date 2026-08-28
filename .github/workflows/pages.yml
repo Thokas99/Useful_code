@@ -36,6 +36,9 @@ jobs:
       - name: Index notebook sources for site search
         run: ruby scripts/build_notebook_search.rb
 
+      - name: Build notebook downloads and section archives
+        run: ruby scripts/build_downloads.rb
+
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v6

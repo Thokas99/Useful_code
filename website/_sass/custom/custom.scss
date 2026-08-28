@@ -274,6 +274,10 @@ button:focus-visible,
   margin-top: 1rem;
 }
 
+.section-download {
+  margin: 0 0 1.25rem;
+}
+
 .side-bar {
   border-right: 1px solid $border-color;
   background: $sidebar-color;
@@ -407,7 +411,8 @@ td {
   }
 
   .cta-row .btn,
-  .catalog-actions .btn {
+  .catalog-actions .btn,
+  .section-download .btn {
     width: 100%;
     text-align: center;
   }
