@@ -4,8 +4,7 @@ title: Cheatsheets
 nav_order: 4
 ---
 
-Short conceptual and reference material complements the canonical workflows;
-it does not replace package documentation.
+Short references for things I tend to look up again.
 
 ## Quarto scientific-report guide
 

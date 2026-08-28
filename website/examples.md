@@ -4,9 +4,9 @@ title: Examples
 nav_order: 3
 ---
 
-Examples are project-specific analyses retained for provenance and practical
-context. They may contain project paths, identifiers, labels, assumptions, or
-external inputs; they are not canonical reusable templates.
+These are notebooks from specific projects. I keep them because they contain
+useful context and worked examples, but they may still refer to project-specific
+files, labels, or inputs.
 
 | Project group | Contents |
 |---|---|

@@ -6,10 +6,8 @@ has_children: true
 has_toc: false
 ---
 
-This is the catalog of the active reusable library. Canonical templates live
-in the repository under `templates/`; this site only describes and links to
-them. It does not execute QMD files, install scientific environments, or build
-rendered notebook copies.
+Browse the notebooks by analysis type. Each entry has a short description and
+links to view or download the QMD file.
 
 <div class="catalog-grid">
   {% assign family = site.data.methods.single_cell %}{% include family-card.html family=family %}

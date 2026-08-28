@@ -8,7 +8,7 @@ search_family: multiome
 
 {% assign family = site.data.methods.multiome %}
 <p class="page-intro">{{ family.description }}</p>
-<p class="catalog-meta">{{ family.notebooks.size }} canonical notebooks · source links below</p>
+<p class="catalog-meta">{{ family.notebooks.size }} notebooks · view or download the QMD files below</p>
 
 <div class="notebook-grid">
 {% for notebook in family.notebooks %}

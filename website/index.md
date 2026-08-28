@@ -8,7 +8,7 @@ has_toc: false
 <section class="hero-panel">
   <p class="hero-kicker">PERSONAL RESEARCH COOKBOOK</p>
   <h2>Readable workflows for real analytical work.</h2>
-  <p>Explore reusable R, Python, and Quarto methods, inspect their assumptions, and open the canonical notebook when you are ready to adapt it.</p>
+  <p>A personal collection of R, Python, and Quarto notebooks for common bioinformatics analyses. Browse by topic, then open a notebook on GitHub when you want the code.</p>
   <div class="cta-row">
     <a class="btn btn-primary" href="{{ site.baseurl }}/methods/">Browse methods</a>
     <a class="btn" href="https://github.com/Thokas99/Useful_code">View repository</a>
@@ -22,18 +22,13 @@ has_toc: false
   | plus: site.data.methods.mofa.notebooks.size
   | plus: site.data.methods.biomarker_ml.notebooks.size %}
 <div class="stat-grid" aria-label="Catalog summary">
-  <div class="stat"><strong class="stat-value">{{ canonical_notebook_count }}</strong><span>canonical notebooks</span></div>
-  <div class="stat"><strong class="stat-value">6</strong><span>method families</span></div>
-  <div class="stat"><strong class="stat-value">1</strong><span>GitHub source of truth</span></div>
+  <div class="stat"><strong class="stat-value">{{ canonical_notebook_count }}</strong><span>notebooks</span></div>
+  <div class="stat"><strong class="stat-value">6</strong><span>method areas</span></div>
 </div>
 
-<p class="site-caution"><strong>Personal research scripts.</strong> Review assumptions and validate independently before reuse. <a href="{{ site.baseurl }}/about/">Read the full disclaimer.</a></p>
+<p class="site-caution"><strong>Personal research scripts.</strong> These are not drop-in pipelines. Check the assumptions and validate them on your own data before reuse. <a href="{{ site.baseurl }}/about/">Read the full disclaimer.</a></p>
 
-The site is a small catalog. The canonical notebooks on
-[GitHub](https://github.com/Thokas99/Useful_code/tree/main/templates) remain the
-source of truth; notebooks are not executed or rendered into this site.
-
-<p class="search-note"><strong>Search inside the notebooks.</strong> The site search also indexes the full source text of every canonical QMD, while results still lead to the family catalog and the original GitHub file.</p>
+<p class="search-note">Search also looks inside the notebook text.</p>
 
 ## Browse the library
 
@@ -48,4 +43,4 @@ source of truth; notebooks are not executed or rendered into this site.
 
 ## Other resources
 
-Browse [Examples]({{ site.baseurl }}/examples/), [Cheatsheets]({{ site.baseurl }}/cheatsheets/), and [Miscellaneous]({{ site.baseurl }}/miscellaneous/) for project provenance and reusable reporting material.
+Browse [Examples]({{ site.baseurl }}/examples/), [Cheatsheets]({{ site.baseurl }}/cheatsheets/), and [Miscellaneous]({{ site.baseurl }}/miscellaneous/) for project notebooks, quick references, and reporting material.

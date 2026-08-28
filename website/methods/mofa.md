@@ -8,7 +8,7 @@ search_family: mofa
 
 {% assign family = site.data.methods.mofa %}
 <p class="page-intro">{{ family.description }}</p>
-<p class="catalog-meta">{{ family.notebooks.size }} canonical notebooks · source links below</p>
+<p class="catalog-meta">{{ family.notebooks.size }} notebooks · view or download the QMD files below</p>
 
 <div class="notebook-grid">
 {% for notebook in family.notebooks %}

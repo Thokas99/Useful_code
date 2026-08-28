@@ -1,13 +1,17 @@
 {% assign repo_url = "https://github.com/Thokas99/Useful_code" %}
 {% assign source_url = repo_url | append: "/blob/main/" | append: include.notebook.path %}
 {% assign raw_url = "https://raw.githubusercontent.com/Thokas99/Useful_code/main/" | append: include.notebook.path %}
+{% assign template_label = include.notebook.template_class %}
+{% if template_label == "SOURCE-BACKED WORKFLOW" %}{% assign template_label = "Source-backed" %}{% endif %}
+{% if template_label == "API / TUTORIAL REMINDER" %}{% assign template_label = "API reminder" %}{% endif %}
+{% assign status_label = include.notebook.status | capitalize %}
 <article class="notebook-card">
   <div class="notebook-card-heading">
     <h3>{{ include.notebook.title }}</h3>
   </div>
   <p class="catalog-meta">
-    <span class="catalog-badge">{{ include.notebook.template_class }}</span>
-    <span class="catalog-badge">{{ include.notebook.status }}</span>
+    <span class="catalog-badge">{{ template_label }}</span>
+    <span class="catalog-badge">{{ status_label }}</span>
   </p>
   <p>{{ include.notebook.description }}</p>
   <div class="catalog-actions">

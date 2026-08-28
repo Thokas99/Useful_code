@@ -1,7 +1,8 @@
 # Useful code
 
-A personal bioinformatics cookbook of reusable R, Python, and Quarto workflows
-distilled from real analytical projects.
+A personal collection of bioinformatics notebooks in R, Python, and Quarto.
+Most started in real projects and were later cleaned up so I could find and
+reuse the useful parts.
 
 [![Bioinformatics](https://img.shields.io/badge/domain-bioinformatics-1f6feb)](https://github.com/Thokas99/Useful_code)
 [![R](https://img.shields.io/badge/R-276DC3?logo=r&logoColor=white)](https://www.r-project.org/)
@@ -23,7 +24,7 @@ distilled from real analytical projects.
 > diagnostic, or other high-stakes decision-making.
 
 [Browse the website](https://thokas99.github.io/Useful_code/) ·
-[Browse canonical templates](templates/README.md) ·
+[Browse templates](templates/README.md) ·
 [Examples](examples/README.md) ·
 [Cheatsheets](cheatsheets/README.md) ·
 [Miscellaneous](miscellaneous/README.md)
@@ -31,9 +32,8 @@ distilled from real analytical projects.
 ## What is here
 
 Useful code keeps readable analytical workflows together with the parameters,
-diagnostics, implementation details, and provenance that make them useful when
-reopened later. The website is a catalog, not a second copy of the science:
-the notebooks in this repository remain the source of truth.
+diagnostics, and implementation details that make them useful when reopened.
+The website groups the notebooks by analysis area and links back to the files.
 
 ## Browse the methods
 
@@ -46,7 +46,7 @@ the notebooks in this repository remain the source of truth.
 | Multi-omics / MOFA | MOFA2 view preparation, fitting, diagnostics, and interpretation | 4 | [Open family](https://thokas99.github.io/Useful_code/methods/mofa/) |
 | Biomarker machine learning | Sample-level biomarker classification and frozen reporting | 2 | [Open family](https://thokas99.github.io/Useful_code/methods/biomarker-ml/) |
 
-The current catalog contains **37 canonical notebooks**: **34 source-backed
+The collection currently contains **37 notebooks**: **34 source-backed
 workflows** and **3 API / tutorial reminders**.
 
 ## How to use these scripts safely
@@ -62,8 +62,8 @@ Before reusing a notebook:
 
 ## Repository structure
 
-    templates/       canonical reusable workflows
-    examples/        project-specific analyses and provenance
+    templates/       reusable notebooks
+    examples/        project-specific analyses and context
     cheatsheets/     compact references
     miscellaneous/   reporting prompts and reusable documentation material
     website/         Jekyll catalog website
@@ -93,10 +93,10 @@ what was established for the source project.
 ## Examples and additional resources
 
 - [Examples](examples/README.md) retain concrete project workflows and
-  provenance; generalized versions belong under `templates/`.
+  context; generalized versions belong under `templates/`.
 - [Cheatsheets](cheatsheets/README.md) collect compact reference material.
-- [Miscellaneous](miscellaneous/README.md) collects reusable reporting and
-  documentation resources.
+- [Miscellaneous](miscellaneous/README.md) collects reporting and documentation
+  resources.
 
 ## License
 
