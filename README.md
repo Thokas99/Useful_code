@@ -34,6 +34,8 @@ reuse the useful parts.
 Useful code keeps readable analytical workflows together with the parameters,
 diagnostics, and implementation details that make them useful when reopened.
 The website groups the notebooks by analysis area and links back to the files.
+The generated registry in `CODE_MAP/method_registry.tsv` makes the active
+notebook collection searchable by script.
 
 ## Browse the methods
 
@@ -60,12 +62,31 @@ Before reusing a notebook:
 4. Adapt paths and other dataset-specific assumptions.
 5. Validate the outputs on your own data and study design.
 
+## Repository checks and registry
+
+GitHub Actions runs lightweight checks on pushes and pull requests: YAML and
+Quarto front matter, Markdown links, Python and R syntax, reusable-template
+paths, large files, registry consistency, and the website build. It does not
+run the bioinformatics analyses.
+
+Regenerate the notebook registry after changing the active catalog with:
+
+```bash
+python3 scripts/build_method_registry.py
+```
+
+Use `--check` in CI or before committing to confirm that the tracked TSV is
+current.
+
 ## Repository structure
 
+    functions/        small reusable R and Python implementation primitives
     templates/       reusable notebooks
     examples/        project-specific analyses and context
     cheatsheets/     compact references
     miscellaneous/   reporting prompts and reusable documentation material
+    scripts/          repository maintenance and registry checks
+    CODE_MAP/         searchable repository metadata
     website/         Jekyll catalog website
     docs/            architecture and refactor documentation
     archive/         superseded historical material

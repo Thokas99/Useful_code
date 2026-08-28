@@ -1,0 +1,54 @@
+name: Repository quality control
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  structural-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Ruby and website dependencies
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: website
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+
+      - name: Check Python, paths, files, links, and registry
+        run: |
+          python scripts/check_repository.py
+          python scripts/build_method_registry.py --check
+
+      - name: Check YAML and Quarto front matter
+        run: ruby scripts/check_quarto_yaml.rb
+
+      - name: Check R syntax
+        run: Rscript scripts/check_r_syntax.R
+
+      - name: Build the website
+        working-directory: website
+        run: |
+          bundle exec ruby scripts/build_notebook_search.rb
+          bundle exec ruby scripts/build_downloads.rb
+          bundle exec jekyll build --baseurl "/Useful_code"
+
+      - name: Check generated website links
+        run: python scripts/check_repository.py --site website/_site
