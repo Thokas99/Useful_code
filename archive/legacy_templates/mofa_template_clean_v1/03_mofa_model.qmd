@@ -7,7 +7,7 @@ format:
     theme:
       light: cosmo
       dark: darkly
-    respect-user-color-scheme: true
+    respect-user-color-scheme: false
     toc: true
     toc-title: "Contents"
     toc-depth: 4
