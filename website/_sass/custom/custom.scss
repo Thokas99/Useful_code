@@ -1,72 +1,171 @@
-/* Small catalog layer; the Just the Docs layout remains in charge. */
+/* Presentation layer only; colors come from the active Just-the-Docs scheme. */
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: -0.01em;
+}
+
+a {
+  text-underline-offset: 0.16em;
+}
+
+a:focus-visible,
+button:focus-visible,
+.family-card:focus-visible {
+  outline: 3px solid $link-color;
+  outline-offset: 3px;
+}
+
+.main-header {
+  gap: 0.75rem;
+  border-bottom: 1px solid $border-color;
+  background: $body-background-color;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2.35rem;
+  margin: 0 0.5rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid $border-color;
+  border-radius: 999px;
+  background: $base-button-color;
+  color: $body-text-color;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.theme-toggle:hover {
+  border-color: $link-color;
+  color: $link-color;
+}
+
+.theme-toggle-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
 .hero-panel {
-  margin: 1rem 0 1.5rem;
+  margin: 1.5rem 0 1.75rem;
   padding: clamp(1.5rem, 4vw, 3rem);
-  border: 1px solid var(--border-color, #d9dce1);
-  border-radius: 0.75rem;
-  background: linear-gradient(135deg, var(--sidebar-color, #f6f6f6), var(--body-background-color, #fff));
+  border: 1px solid $border-color;
+  border-radius: 0.85rem;
+  background: $sidebar-color;
+  box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.14);
 }
 
 .hero-panel h2 {
-  max-width: 36rem;
+  max-width: 38rem;
   margin: 0.35rem 0 0.75rem;
-  font-size: clamp(1.75rem, 4vw, 2.65rem);
+  color: $body-heading-color;
+  font-size: clamp(1.85rem, 4vw, 2.75rem);
+  line-height: 1.15;
 }
 
 .hero-panel p {
-  max-width: 42rem;
+  max-width: 44rem;
 }
 
 .hero-kicker {
   margin: 0;
-  color: var(--link-color, #7253ed);
-  font-size: 0.75rem;
+  color: $link-color;
+  font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.1em;
 }
 
-.cta-row {
+.cta-row,
+.catalog-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.65rem;
-  margin-top: 1.25rem;
 }
 
-.cta-row .btn {
+.cta-row {
+  margin-top: 1.35rem;
+}
+
+.cta-row .btn,
+.catalog-actions .btn {
   margin: 0;
+  border-radius: 0.55rem;
+  font-weight: 650;
+}
+
+.cta-row .btn-primary,
+.catalog-actions .btn-primary {
+  border-color: $btn-primary-color;
+  background: $btn-primary-color;
+  color: $body-background-color;
+}
+
+.cta-row .btn-primary:hover,
+.catalog-actions .btn-primary:hover {
+  border-color: $link-color;
+  background: $link-color;
+  color: $body-background-color;
+}
+
+.cta-row .btn:not(.btn-primary),
+.catalog-actions .btn:not(.btn-primary) {
+  border: 1px solid $border-color;
+  background: $base-button-color;
+  color: $body-heading-color;
+}
+
+.cta-row .btn:not(.btn-primary):hover,
+.catalog-actions .btn:not(.btn-primary):hover {
+  border-color: $link-color;
+  color: $link-color;
 }
 
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
-  margin: 0 0 2rem;
+  gap: 0.85rem;
+  margin: 0 0 1.25rem;
 }
 
 .stat {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.9rem 1rem;
-  border-left: 3px solid var(--link-color, #7253ed);
-  background: var(--sidebar-color, #f6f6f6);
+  gap: 0.2rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid $border-color;
+  border-radius: 0.7rem;
+  background: $sidebar-color;
+  box-shadow: 0 0.35rem 1rem rgba(0, 0, 0, 0.08);
 }
 
 .stat-value {
-  font-size: 1.45rem;
+  color: $body-heading-color;
+  font-size: 1.55rem;
   line-height: 1;
 }
 
 .stat span {
-  color: var(--body-text-color, #27262b);
-  font-size: 0.8rem;
+  color: $body-text-color;
+  font-size: 0.85rem;
 }
 
+.site-caution,
 .search-note {
   margin: 1.25rem 0 2rem;
-  padding: 0.85rem 1rem;
-  border-left: 3px solid var(--link-color, #7253ed);
-  background: var(--sidebar-color, #f6f6f6);
+  padding: 0.9rem 1rem;
+  border: 1px solid $border-color;
+  border-left: 3px solid $link-color;
+  border-radius: 0.55rem;
+  background: $feedback-color;
 }
 
 .catalog-grid {
@@ -78,36 +177,57 @@
 
 .family-card,
 .notebook-card {
-  border: 1px solid var(--border-color, #d9dce1);
-  border-radius: 0.5rem;
-  padding: 1rem 1.1rem;
-  background: var(--body-background-color, #fff);
+  border: 1px solid $border-color;
+  border-radius: 0.8rem;
+  background: $sidebar-color;
+  color: $body-text-color;
 }
 
 .family-card {
-  display: block;
-  color: inherit;
+  display: flex;
+  flex-direction: column;
+  min-height: 12rem;
+  padding: 1.15rem 1.2rem;
   text-decoration: none;
+  transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
 }
 
 .family-card:hover,
 .family-card:focus {
-  border-color: var(--link-color, #7253ed);
+  border-color: $link-color;
+  color: $body-text-color;
   text-decoration: none;
+  transform: translateY(-2px);
+  box-shadow: 0 0.6rem 1.4rem rgba(0, 0, 0, 0.12);
 }
 
-.family-card h3,
+.card-title,
 .notebook-card h3 {
   margin-top: 0;
+  color: $body-heading-color;
+  font-size: 1.25rem;
+  font-weight: 650;
+  line-height: 1.3;
 }
 
 .card-count,
 .catalog-meta {
-  color: var(--link-color, #5c5962);
-  font-size: 0.85rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  color: $body-text-color;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.card-includes {
+  margin-top: auto;
+  font-size: 0.9rem;
+}
+
+.card-link {
+  margin-top: 0.5rem;
+  color: $link-color;
+  font-weight: 650;
 }
 
 .notebook-grid {
@@ -116,16 +236,27 @@
 }
 
 .notebook-card {
-  box-shadow: 0 0.2rem 0.8rem rgba(0, 0, 0, 0.08);
+  padding: 1.15rem 1.2rem;
+  box-shadow: 0 0.35rem 1rem rgba(0, 0, 0, 0.1);
+}
+
+.notebook-card-heading h3 {
+  margin-bottom: 0.75rem;
+}
+
+.catalog-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
 }
 
 .catalog-badge {
   display: inline-block;
-  margin: 0 0.35rem 0.5rem 0;
-  padding: 0.2rem 0.45rem;
-  border-radius: 0.25rem;
-  background: var(--code-background-color, #f5f6fa);
-  color: var(--body-text-color, #27262b);
+  padding: 0.22rem 0.5rem;
+  border: 1px solid $border-color;
+  border-radius: 999px;
+  background: $base-button-color;
+  color: $body-text-color;
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -133,21 +264,117 @@
 }
 
 .catalog-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
   margin-top: 1rem;
 }
 
-.catalog-actions .btn {
-  margin: 0;
+.side-bar {
+  border-right: 1px solid $border-color;
+  background: $sidebar-color;
 }
 
-@media (max-width: 40rem) {
+.nav-list .nav-list-item .nav-list-link {
+  border-radius: 0.45rem;
+  color: $body-text-color;
+}
+
+.nav-list .nav-list-item .nav-list-link:hover {
+  background: $base-button-color;
+  color: $body-heading-color;
+}
+
+.nav-list .nav-list-item .nav-list-link.active {
+  background: $base-button-color;
+  box-shadow: inset 3px 0 $link-color;
+  color: $link-color;
+  font-weight: 650;
+}
+
+.search-input,
+#search-input {
+  border: 1px solid $border-color;
+  border-radius: 0.55rem;
+  background: $search-background-color;
+  color: $body-text-color;
+}
+
+.search-input::placeholder,
+#search-input::placeholder {
+  color: $search-result-preview-color;
+  opacity: 1;
+}
+
+.search-input:focus,
+#search-input:focus {
+  border-color: $link-color;
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.22);
+  outline: none;
+}
+
+.search-results,
+.search-results-list,
+.search-result {
+  border-color: $border-color;
+  background: $body-background-color;
+  color: $body-text-color;
+}
+
+code,
+pre,
+.highlight {
+  border-color: $border-color;
+  background: $code-background-color;
+  color: $body-text-color;
+}
+
+code {
+  border: 1px solid $border-color;
+  border-radius: 0.3rem;
+}
+
+pre {
+  border: 1px solid $border-color;
+  border-radius: 0.65rem;
+}
+
+pre code {
+  border: 0;
+  background: transparent;
+}
+
+table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-color: $border-color;
+  background: $table-background-color;
+  color: $body-text-color;
+}
+
+th {
+  background: $base-button-color;
+  color: $body-heading-color;
+}
+
+th,
+td {
+  border-bottom: 1px solid $border-color;
+}
+
+.site-footer {
+  border-top: 1px solid $border-color;
+  color: $body-text-color;
+}
+
+@media (max-width: 50rem) {
   .stat-grid {
     grid-template-columns: 1fr;
   }
 
+  .theme-toggle {
+    margin: 0.55rem 0;
+  }
+
+  .cta-row .btn,
   .catalog-actions .btn {
     width: 100%;
     text-align: center;

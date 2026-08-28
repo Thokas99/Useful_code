@@ -1,7 +1,7 @@
 <a class="family-card" href="{{ site.baseurl }}/methods/{{ include.family.slug }}/">
-  <h3>{{ include.family.title }}</h3>
+  <p class="card-title">{{ include.family.title }}</p>
   <p class="card-count">{{ include.family.notebooks.size }} canonical notebooks</p>
   <p>{{ include.family.description }}</p>
-  <p><strong>Includes:</strong> {{ include.family.representative }}</p>
-  <span>Browse &rarr;</span>
+  <p class="card-includes"><strong>Includes:</strong> {{ include.family.representative }}</p>
+  <span class="card-link">Browse family <span aria-hidden="true">&rarr;</span></span>
 </a>

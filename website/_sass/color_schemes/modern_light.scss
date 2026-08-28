@@ -1,0 +1,20 @@
+@import "./color_schemes/light";
+
+$color-scheme: modern_light;
+$body-background-color: #ffffff;
+$body-heading-color: #0d1117;
+$body-text-color: #1f2328;
+$link-color: #0969da;
+$nav-child-link-color: #57606a;
+$sidebar-color: #f6f8fa;
+$base-button-color: #f6f8fa;
+$btn-primary-color: #0969da;
+$code-background-color: #f6f8fa;
+$code-linenumber-color: #57606a;
+$feedback-color: #f6f8fa;
+$table-background-color: #ffffff;
+$search-background-color: #ffffff;
+$search-result-preview-color: #57606a;
+$border-color: #d0d7de;
+
+@import "./vendor/accessible-pygments/github-light";

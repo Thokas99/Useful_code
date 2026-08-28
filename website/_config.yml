@@ -7,7 +7,7 @@ permalink: pretty
 theme: just-the-docs
 repository: Thokas99/Useful_code
 
-color_scheme: dark
+color_scheme: modern_dark
 search_enabled: true
 heading_anchors: true
 search:
@@ -26,7 +26,7 @@ aux_links:
 aux_links_new_tab: true
 
 gh_edit_link: true
-gh_edit_link_text: Edit this page on GitHub
+gh_edit_link_text: View this page on GitHub
 gh_edit_repository: https://github.com/Thokas99/Useful_code
 gh_edit_branch: main
 gh_edit_source: website

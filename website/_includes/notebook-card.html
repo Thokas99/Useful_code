@@ -2,7 +2,9 @@
 {% assign source_url = repo_url | append: "/blob/main/" | append: include.notebook.path %}
 {% assign raw_url = "https://raw.githubusercontent.com/Thokas99/Useful_code/main/" | append: include.notebook.path %}
 <article class="notebook-card">
-  <h3>{{ include.notebook.title }}</h3>
+  <div class="notebook-card-heading">
+    <h3>{{ include.notebook.title }}</h3>
+  </div>
   <p class="catalog-meta">
     <span class="catalog-badge">{{ include.notebook.template_class }}</span>
     <span class="catalog-badge">{{ include.notebook.status }}</span>
