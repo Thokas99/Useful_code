@@ -93,7 +93,7 @@ The current source material supports the following decisions:
 - the source contains both >1 CPM and >5 CPM filtering paths, so the canonical
   QC template exposes the threshold rather than claiming one project rule is
   universal;
-- `rnaseq_normalization_cheatsheet.md` distinguishes raw counts, CPM, TMM/TMMwsp,
+- The former RNA-seq normalization reference distinguishes raw counts, CPM, TMM/TMMwsp,
   and logCPM, and explicitly warns that TMMwsp is composition normalization,
   not batch correction;
 - `GSEA_of_DEGs.qmd` prepares a signed `sign(logFC) * sqrt(F)` ranking, maps
@@ -113,7 +113,7 @@ The current source material supports the following decisions:
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
 **Canonical source:** `examples/bulk_rna/mgi_organoids/simple_QC_MGI_organoids.qmd`
-**Merge sources:** `cheatsheets/rnaseq_normalization_cheatsheet.md` and current
+**Merge sources:** the former RNA-seq normalization reference and current
 tximport/edgeR object documentation.
 
 **SOURCE-DERIVED blocks**
@@ -181,7 +181,7 @@ or by a declared aggregation policy.
 **Template class:** SOURCE-BACKED WORKFLOW
 **Status:** draft
 **Canonical source:** `examples/bulk_rna/mgi_organoids/simple_QC_MGI_organoids.qmd`
-**Merge sources:** `cheatsheets/rnaseq_normalization_cheatsheet.md` and source
+**Merge sources:** the former RNA-seq normalization reference and source
 QC/object-flow notes in the project-example README under
 `examples/single_cell/map/README.md`.
 

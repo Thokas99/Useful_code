@@ -43,4 +43,4 @@ has_toc: false
 
 ## Other resources
 
-Browse [Examples]({{ site.baseurl }}/examples/), [Cheatsheets]({{ site.baseurl }}/cheatsheets/), and [Miscellaneous]({{ site.baseurl }}/miscellaneous/) for project notebooks, quick references, and reporting material.
+Browse [Examples]({{ site.baseurl }}/examples/) and [Miscellaneous]({{ site.baseurl }}/miscellaneous/) for project notebooks and reporting material.

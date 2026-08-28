@@ -26,7 +26,6 @@ reuse the useful parts.
 [Browse the website](https://thokas99.github.io/Useful_code/) ·
 [Browse templates](templates/README.md) ·
 [Examples](examples/README.md) ·
-[Cheatsheets](cheatsheets/README.md) ·
 [Miscellaneous](miscellaneous/README.md)
 
 ## What is here
@@ -83,7 +82,6 @@ current.
     functions/        small reusable R and Python implementation primitives
     templates/       reusable notebooks
     examples/        project-specific analyses and context
-    cheatsheets/     compact references
     miscellaneous/   reporting prompts and reusable documentation material
     scripts/          repository maintenance and registry checks
     CODE_MAP/         searchable repository metadata
@@ -115,7 +113,6 @@ what was established for the source project.
 
 - [Examples](examples/README.md) retain concrete project workflows and
   context; generalized versions belong under `templates/`.
-- [Cheatsheets](cheatsheets/README.md) collect compact reference material.
 - [Miscellaneous](miscellaneous/README.md) collects reporting and documentation
   resources.
 

@@ -4,18 +4,6 @@ title: Cheatsheets
 nav_order: 4
 ---
 
-Short references for things I tend to look up again.
+Compact bioinformatics reference sheets will be added here in the future.
 
-## Quarto scientific-report guide
-
-Quarto report conventions and executable examples.
-
-[View on GitHub](https://github.com/Thokas99/Useful_code/blob/main/cheatsheets/quarto_guide.md){: .btn .btn-primary }
-[Download](https://raw.githubusercontent.com/Thokas99/Useful_code/main/cheatsheets/quarto_guide.md){: .btn }
-
-## RNA-seq normalization cheat sheet
-
-Count filtering, normalization, transformed expression, and bulk RNA modeling distinctions.
-
-[View on GitHub](https://github.com/Thokas99/Useful_code/blob/main/cheatsheets/rnaseq_normalization_cheatsheet.md){: .btn .btn-primary }
-[Download](https://raw.githubusercontent.com/Thokas99/Useful_code/main/cheatsheets/rnaseq_normalization_cheatsheet.md){: .btn }
+This section is currently under development.

@@ -6,7 +6,6 @@ areas:
 ```text
 templates/   active reusable analytical templates
 examples/    real project workflows and provenance
-cheatsheets/ compact conceptual and reference material
 miscellaneous/ reusable scientific-workflow resources that are not analytical method templates
 docs/        architecture and refactor documentation
 archive/     superseded scaffolds and historical material
@@ -30,8 +29,8 @@ biology, labels, paths, and study conclusions remain in `examples/` or
 `archive/`.
 
 `miscellaneous/` contains reusable prompts and reporting resources that support
-scientific workflows but do not define analytical methods. It is distinct from
-`cheatsheets/`, which contains compact method and reference notes.
+scientific workflows but do not define analytical methods. A separate
+cheatsheet collection is not currently maintained.
 
 The structure is suitable for later documentation, but no website or Quarto
 website configuration is part of this repository state.

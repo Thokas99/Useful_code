@@ -5,7 +5,7 @@
 The repository combined an almost empty root landing page, active canonical
 templates, project notebooks under `CODE_MAP/code_MAP/`, MOFA sources and an
 intermediate clean scaffold under `CODE_MAP/code_MOFA/`, old notebook
-scaffolds, development reports, cheatsheets, archives, and local context
+scaffolds, development reports, archives, and local context
 files. The canonical families were already established, but their navigation
 and provenance boundaries were not.
 
@@ -28,7 +28,6 @@ Useful_code/
 │   ├── bulk_rna/
 │   ├── biomarker_ml/
 │   └── multiomics/
-├── cheatsheets/
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   └── refactor/
@@ -57,7 +56,7 @@ depends on it.
 | `CODE_MAP/code_MAP/notebook_templates/` | `archive/legacy_templates/notebook_templates_v1/` | LEGACY TEMPLATE / SUPERSEDED | Retain the old scaffold without presenting it as active. |
 | `CODE_MAP/code_MOFA/MOFA_TEMPLATE_CLEAN/` | `archive/legacy_templates/mofa_template_clean_v1/` | LEGACY TEMPLATE / SUPERSEDED | Retain the project-shaped MOFA scaffold beside the split canonical family. |
 | `CODE_MAP/code_MAP/Archive.zip`, interview ZIP | `archive/raw_archives/` | ARCHIVE | Preserve historical archives without unpacking or duplication. |
-| `CODE_MAP/rnaseq_normalization_cheatsheet.md` | `cheatsheets/` | CHEATSHEET / REFERENCE | Centralize compact bulk-RNA reference material. |
+| Former compact reference material | Retired | REFERENCE | No active cheatsheet collection is maintained. |
 
 The implementation reports record current example/archive paths and retain
 former source names where needed for historical interpretation.
@@ -117,7 +116,7 @@ added.
 | `CODE_MAP/README.md`, `CODE_MAP/code_MAP/README.md`, `CODE_MAP/code_MOFA/README.md` | Leave untouched | Pre-existing untracked source-map documents; not needed after new canonical navigation. |
 | `CODE_MAP/alevin_fry/README.md` | Leave untouched | Documents private-path infrastructure; moving it would promote private local assumptions. |
 | untracked old family READMEs under `CODE_MAP/code_MAP/notebook_templates/` | Leave untouched | Local context files adjacent to archived tracked scaffolds; not required by active navigation. |
-| `CODE_MAP/quarto_config_tmplate.md` and duplicate Quarto template documents | Leave local / superseded | Overlapping untracked reference material; the tracked `cheatsheets/quarto_guide.md` remains canonical. |
+| `CODE_MAP/quarto_config_tmplate.md` and duplicate Quarto template documents | Leave local / superseded | Overlapping untracked reference material; current Quarto report guidance is maintained under `miscellaneous/quarto/`. |
 | `.DS_Store` files | Leave untouched | Existing tracked metadata was not part of this non-destructive consolidation. |
 
 ## Deletions

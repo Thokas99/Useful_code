@@ -47,7 +47,7 @@ The repository contains approximately 75 non-Git files:
 
 - CODE_MAP: 63 files, approximately 15.7 MB; this is the main scientific collection.
 - .claude: six GitNexus instruction files.
-- cheatsheets: one Quarto guide.
+- former compact references: retained only as historical audit context.
 - root: README, license, agent instructions, Claude instructions, and a macOS metadata file.
 
 The indexed GitNexus snapshot reports 64 files, 171 symbols, and zero execution flows, while the recursive filesystem inventory contains approximately 75 files. The index is therefore incomplete or stale for process-level auditing. Static source inspection was used for the conclusions below; notebooks were not rendered or executed.
@@ -62,11 +62,9 @@ Current tree, excluding ordinary Git internals:
       code_MAP/
       code_MOFA/
       quarto_config_tmplate.md
-      rnaseq_normalization_cheatsheet.md
       Task for 2nd interview.zip
       TRENTO_gtExtras_tables.qmd
       TRENTO_models_miRNA_vs_PD_L1.qmd
-    cheatsheets/quarto_guide.md
     LICENSE
     README.md
 
@@ -124,13 +122,13 @@ Status labels mean:
 | .DS_Store | macOS Finder metadata; no scientific or governance value. | DELETE_CANDIDATE |
 | CODE_MAP/.DS_Store | macOS Finder metadata; no scientific or governance value. | DELETE_CANDIDATE |
 
-### 3.2 Documentation and cheatsheets
+### 3.2 Documentation and reference material
 
 | Source | Purpose, language, modality/task, reuse, and overlap | Eventual status |
 |---|---|---|
-| cheatsheets/quarto_guide.md | Markdown guide for Quarto HTML report structure, captions, cross-references, metrics, and handoff. | CHEATSHEET |
-| CODE_MAP/quarto_config_tmplate.md | Markdown copy-ready Quarto YAML/report guidance. It substantially overlaps cheatsheets/quarto_guide.md; the filename contains a typo. | CHEATSHEET or ARCHIVE after comparison |
-| CODE_MAP/rnaseq_normalization_cheatsheet.md | Markdown scientific guidance on raw counts, filtering, edgeR TMM, log2CPM, limma-voom, and DESeq2 distinctions. | CHEATSHEET |
+| Former Quarto reference | Markdown guidance for Quarto HTML report structure, captions, cross-references, metrics, and handoff; no longer kept in an active cheatsheet directory. | RETIRED |
+| CODE_MAP/quarto_config_tmplate.md | Markdown copy-ready Quarto YAML/report guidance. It overlapped the former Quarto reference; the filename contains a typo. | RETIRED / compare with `miscellaneous/quarto/` |
+| Former RNA-seq normalization reference | Markdown scientific guidance on raw counts, filtering, edgeR TMM, log2CPM, limma-voom, and DESeq2 distinctions; no longer kept in an active cheatsheet directory. | RETIRED |
 | CODE_MAP/notebook_templates/README.md | Markdown instructions for copying 18 Quarto templates, user input blocks, qs2/h5ad persistence, and TSV outputs. | ARCHIVE or replace with library README |
 | CODE_MAP/notebook_templates/NOTEBOOK_INVENTORY.md | Markdown map of source notebooks to 18 templates. It omits bulk RNA and TRENTO despite those files being present, and describes some source/template relationships too generously. | ARCHIVE or replace |
 | CODE_MAP/notebook_templates/PONYTAIL_AUDIT.md | Markdown audit limited to notebook_templates. It correctly identifies repetitive wrappers but is not a repository-wide audit and treats several stubs/importers as complete methods. | ARCHIVE |
@@ -220,7 +218,7 @@ The interview archive contains at least CORUM_data.txt, proteomics_data.txt, DDL
 
 | Family | Implementations found | Scientific alternatives or gaps | Recommended library treatment |
 |---|---|---|---|
-| Bulk RNA-seq import/QC | simple_QC_MGI_organoids.qmd, rnaseq_normalization_cheatsheet.md | tximport/DGEListFromTximport, raw count cleanup, TMMwsp, CPM/logCPM, MAD/PCA/correlation; project paths and filter thresholds | One visible bulk QC/normalization template; retain threshold choices in notebook |
+| Bulk RNA-seq import/QC | simple_QC_MGI_organoids.qmd and the former RNA-seq reference | tximport/DGEListFromTximport, raw count cleanup, TMMwsp, CPM/logCPM, MAD/PCA/correlation; project paths and filter thresholds | One visible bulk QC/normalization template; retain threshold choices in notebook |
 | Bulk differential expression | No complete active implementation | GSEA notebook consumes DEGs; edgeR methods appear in other projects but not a general bulk DE stage | Do not invent a template yet; add only when an actual DE analysis is generalized |
 | Bulk pathway/GSEA | GSEA_of_DEGs.qmd | Ranked GO/KEGG GSEA differs from per-sample Hallmark scoring | Separate GSEA template and signature-scoring example |
 | Bulk signature scoring | HALLMARK_50.qmd, 00_CPTAC_LUAD_scoring | singscore, GSVA, and project-specific score methods are not interchangeable | Preserve methods as separate examples or explicitly named alternatives |
@@ -245,7 +243,7 @@ The interview archive contains at least CORUM_data.txt, proteomics_data.txt, DDL
 | RNA/ATAC linkage | multiome LinkPeaks template | Distance, expression/peak assay and genome assumptions | Genuine standalone template candidate |
 | MOFA/multiomics | live TCGA notebooks and clean MOFA directory | View matching, feature filtering, missingness, factor number, training, and interpretation are separate | Split input matching, model fit, and optional interpretation |
 | Statistics | general statistics template and project statistics | Wilcoxon/chi-square are minimal tests; effect sizes, covariates, repeated measures, and survival are absent | Keep minimal group-association stage; add methods only when justified |
-| Visualization/reporting | Quarto guides, gtExtras, plotting code throughout notebooks | Report formatting is not an analytical template | Keep as cheatsheet/examples; generic plot saving may be a helper |
+| Visualization/reporting | Quarto guides, gtExtras, plotting code throughout notebooks | Report formatting is not an analytical template | Keep as compact references/examples; generic plot saving may be a helper |
 | Machine learning | TRENTO notebook | Fixed train/test split, supervised feature selection, bias-reduced logistic regression, repeated Monte Carlo CV | Example now; future template only after a clear generic contract |
 | Data import/export | qs/qs2, saveRDS, h5ad, TSV/CSV, GDC/TCGAbiolinks, tximport | Persistence formats and naming are inconsistent | Document a small supported contract; generic wrappers only if repetition justifies them |
 | Object persistence | qs2 in templates; qs, qsave/qread, saveRDS, h5ad in projects | Format choice is partly ecosystem-specific; no version/session records found | Keep format visible in templates; optional small I/O helpers |
@@ -323,7 +321,7 @@ Keep the zip intact until provenance is checked. After that, one preserved histo
 
 ### 5.4 Documentation duplication
 
-cheatsheets/quarto_guide.md and CODE_MAP/quarto_config_tmplate.md have approximately 0.76 sequence similarity and describe overlapping Quarto report conventions. Select one canonical guide after checking the unique sections. The other should be archived or deleted conservatively.
+The former Quarto reference and `CODE_MAP/quarto_config_tmplate.md` had approximately 0.76 sequence similarity and described overlapping Quarto report conventions. The former reference material is now retired; current guidance is maintained under `miscellaneous/quarto/`.
 
 ### 5.5 C1 scoring evolution
 
@@ -378,7 +376,7 @@ These are static findings requiring review before promotion. They are not fixed 
 | multiome/04_regulatory_programs.qmd | Scores RNA programs only. | rna_program_scoring.qmd |
 | code_MOFA/MOFA_TEMPLATE_CLEAN | “Clean” suggests generality that fixed TCGA/C1 assumptions do not support. | split into multiomics stages after cleanup |
 | code_MAP/01_MAP_c1_scoring.qmd and 02_MAP_c1_scoring.qmd | Same title/number family for different implementations. | names based on scoring method and provenance |
-| CODE_MAP/quarto_config_tmplate.md | Typo and placement make it easy to miss the duplicate guide. | cheatsheets/quarto_report_guide.md |
+| CODE_MAP/quarto_config_tmplate.md | Typo and placement made it easy to miss the duplicate guide. | Retired; see `miscellaneous/quarto/` for current guidance. |
 | notebook_templates | Contains importers, summaries, and method stubs presented alongside real stages. | templates after method-specific renaming |
 
 ## 8. Candidate canonical templates
@@ -389,7 +387,7 @@ The following is a proposed shortlist, not a decision to create files now.
 
 | Future template | Source basis | Why it is a good candidate | Required caveat |
 |---|---|---|---|
-| templates/bulk_rna/qc_normalization.qmd | simple_QC_MGI_organoids.qmd plus rnaseq_normalization_cheatsheet.md | Only substantial bulk RNA QC/normalization implementation; uses tximport and edgeR visibly. | Resolve >1 versus >5 CPM and define count/input contract |
+| templates/bulk_rna/qc_normalization.qmd | simple_QC_MGI_organoids.qmd plus the former RNA-seq reference | Only substantial bulk RNA QC/normalization implementation; uses tximport and edgeR visibly. | Resolve >1 versus >5 CPM and define count/input contract |
 | templates/single_cell/create_seurat_object.qmd | notebook_templates/scRNA/01 | Minimal, readable, meaningful stage. | Define matrix orientation and cell-ID metadata contract |
 | templates/single_cell/quality_control.qmd | notebook_templates/scRNA/02 | Simple explicit thresholds and QC export. | Save filtered object and expose threshold policy |
 | templates/single_cell/normalization_reduction_clustering.qmd | notebook_templates/scRNA/03 | Readable basic Seurat workflow. | Remove “integration” from name; keep normalization choice explicit |
@@ -487,12 +485,12 @@ Examples should demonstrate real scientific choices and complete project context
 - TRENTO_models_miRNA_vs_PD_L1.qmd and TRENTO_gtExtras_tables.qmd: model and report examples.
 - Task for 2nd interview.zip: proteomics/PPI/network example only after data separation and review.
 
-## 11. Candidate cheatsheets
+## 11. Candidate reference material
 
-Retain a small cheatsheet layer:
+The audit proposed a small reference layer, but no active cheatsheet collection is retained:
 
-- one canonical Quarto report guide, selected from cheatsheets/quarto_guide.md and CODE_MAP/quarto_config_tmplate.md;
-- rnaseq_normalization_cheatsheet.md as the starting normalization reference, reconciled with the final bulk template;
+- one canonical Quarto report guide, selected from the former reference material and `CODE_MAP/quarto_config_tmplate.md`;
+- the former RNA-seq normalization reference as a starting normalization reference, reconciled with the final bulk template;
 - a future short “method choice” guide covering TMM/logCPM versus SCTransform, Harmony versus RPCA, WNN versus batch integration, GSEA versus per-cell scoring, and UCell/AddModuleScore/singscore/GSVA/decoupler distinctions;
 - a future input/output contract guide covering cell IDs, metadata alignment, assay names, matrix orientation, qs2/h5ad, TSV, and provenance records.
 
@@ -591,7 +589,6 @@ The user's proposed top-level tree is broadly appropriate, but it needs method-s
       multiome/
       multiomics/
       proteomics_network/
-    cheatsheets/
     archive/
       legacy_map/
       legacy_mofa/
@@ -601,7 +598,7 @@ The user's proposed top-level tree is broadly appropriate, but it needs method-s
 Two adjustments are important:
 
 1. spatial should not be created as an active category without source code.
-2. visualization is better represented by cheatsheets and example report outputs than by an analysis-template directory, unless reusable plotting code later accumulates.
+2. visualization is better represented by compact references and example report outputs than by an analysis-template directory, unless reusable plotting code later accumulates.
 
 ## 15. Source-file to proposed-destination mapping
 
@@ -612,9 +609,9 @@ This mapping is intentionally a plan. It does not authorize the moves.
 | README.md | README.md, rewritten later to describe the curated library | REVIEW |
 | LICENSE | LICENSE | PRESERVE |
 | AGENTS.md, CLAUDE.md, .claude/skills/gitnexus/*.md | remain as project metadata | PRESERVE |
-| cheatsheets/quarto_guide.md | cheatsheets/quarto_report_guide.md, subject to comparison | CHEATSHEET |
+| Former Quarto reference | Retired; current report guidance is under `miscellaneous/quarto/` | REFERENCE |
 | CODE_MAP/quarto_config_tmplate.md | merge unique guidance into the canonical Quarto guide, then archive/delete candidate | REVIEW |
-| CODE_MAP/rnaseq_normalization_cheatsheet.md | cheatsheets/rnaseq_normalization.md | CHEATSHEET |
+| Former RNA-seq normalization reference | Retired | REFERENCE |
 | code_MAP/notebook_templates/README.md | archive/legacy_templates/README.md or replace with new library README | ARCHIVE |
 | code_MAP/notebook_templates/NOTEBOOK_INVENTORY.md | archive/legacy_templates/NOTEBOOK_INVENTORY.md | ARCHIVE |
 | code_MAP/notebook_templates/PONYTAIL_AUDIT.md | archive/legacy_templates/PONYTAIL_AUDIT.md | ARCHIVE |
@@ -707,7 +704,7 @@ This mapping is intentionally a plan. It does not authorize the moves.
 ## 18. Questions where the available code does not justify choosing one method
 
 1. Should bulk RNA-seq normalization use the active >5 CPM filter in simple_QC_MGI_organoids.qmd, the other >1 CPM path, or a user-configured rule? The repository does not establish a universal threshold.
-2. Is TMMwsp the intended canonical bulk method, or should the library retain separate edgeR/limma-voom and DESeq2 guidance? The cheatsheet describes distinctions but no complete DE template chooses one.
+2. Is TMMwsp the intended canonical bulk method, or should the library retain separate edgeR/limma-voom and DESeq2 guidance? The former reference describes distinctions but no complete DE template chooses one.
 3. Should the single-cell baseline use Seurat log normalization or SCTransform? Both are used for different project reasons.
 4. Should batch integration have separate Harmony and RPCA templates, or only one supported method with the other retained as an example?
 5. Is annotation expected to be reference-based with Azimuth/SingleR, anchor-based label transfer, or intentionally outside the first library release?
