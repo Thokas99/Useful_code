@@ -1,16 +1,87 @@
 ---
 title: "scRNA Marker Identification and Export"
-format: html
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
 execute:
+  echo: true
   warning: false
   message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
 ## Purpose
 
 Identify markers between groups or clusters and export reusable marker tables.
 
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
 ## Packages
+
+Load the packages needed for this notebook.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-packages
@@ -26,7 +97,9 @@ suppressPackageStartupMessages({
 })
 ```
 
-## User Config
+## Parameters
+
+Set the parameters that control the analysis and output locations.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-user-config
@@ -51,7 +124,9 @@ n_threads <- 4
 compress_level <- 6
 ```
 
-## Input Loading
+## Inputs
+
+Load the input object or tables used by the workflow.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-input-loading
@@ -68,6 +143,8 @@ DefaultAssay(object) <- assay_name
 
 ## Validation
 
+Check the required inputs before running the analysis.
+
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-validation
 #| echo: true
@@ -80,8 +157,11 @@ stopifnot(all(c(sample_column, group_column, ident_column) %in% colnames(object[
 
 ## Input Summary
 
+Record a compact summary of the inputs for later review.
+
 ```{r}
-#| label: tpl-scrna-05-marker-identification-and-export-input-summary
+#| label: tbl-scrna-marker-group-counts
+#| tbl-cap: "Cell-group counts used for marker comparisons."
 #| echo: true
 #| warning: false
 #| message: false
@@ -91,7 +171,9 @@ readr::write_tsv(group_counts, file.path(results_dir, "marker_group_counts.tsv")
 group_counts
 ```
 
-## Main Analysis
+## Analysis
+
+Run the main analysis with the parameters defined above.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-main-analysis
@@ -109,7 +191,9 @@ markers <- FindMarkers(
 ) |> tibble::rownames_to_column("feature")
 ```
 
-## QC Checks
+## Diagnostics
+
+Inspect the checks that help assess the analysis output.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-qc-checks
@@ -122,6 +206,8 @@ readr::write_tsv(marker_summary, file.path(results_dir, "marker_summary.tsv"))
 ```
 
 ## Visualization
+
+Save the main diagnostic or result figures to the output directory.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-visualization
@@ -137,7 +223,9 @@ if (length(top_features) > 0) {
 }
 ```
 
-## Object Result Storage
+## Object metadata
+
+Store the derived metadata alongside the analysis object.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-object-result-storage
@@ -148,7 +236,9 @@ if (length(top_features) > 0) {
 object@misc$marker_identification <- list(group_column = group_column, condition_1 = condition_1, condition_2 = condition_2, n_markers = nrow(markers))
 ```
 
-## Result Export
+## File outputs
+
+Write the tabular outputs produced by this workflow.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-result-export
@@ -159,7 +249,9 @@ object@misc$marker_identification <- list(group_column = group_column, condition
 readr::write_tsv(markers, file.path(results_dir, "markers_condition_1_vs_condition_2.tsv"))
 ```
 
-## Final Save
+## Save
+
+Save the resulting object in the format used by this notebook.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-final-save
@@ -170,7 +262,9 @@ readr::write_tsv(markers, file.path(results_dir, "markers_condition_1_vs_conditi
 qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
 ```
 
-## Output Summary
+## Output summary
+
+Summarize the files and objects written by the workflow.
 
 ```{r}
 #| label: tpl-scrna-05-marker-identification-and-export-output-summary
@@ -179,4 +273,15 @@ qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level 
 #| message: false
 # Print a compact summary of generated outputs.
 tibble::tibble(output_object = output_object, marker_rows = nrow(markers))
+```
+
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
 ```

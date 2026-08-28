@@ -1,16 +1,87 @@
 ---
 title: "scATAC Motif Enrichment"
-format: html
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
 execute:
+  echo: true
   warning: false
   message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
 ## Purpose
 
 Run motif enrichment and chromVAR-style motif activity storage in a Signac object.
 
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
 ## Packages
+
+Load the packages needed for this notebook.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-packages
@@ -27,7 +98,9 @@ suppressPackageStartupMessages({
 })
 ```
 
-## User Config
+## Parameters
+
+Set the parameters that control the analysis and output locations.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-user-config
@@ -51,7 +124,9 @@ n_threads <- 4
 compress_level <- 6
 ```
 
-## Input Loading
+## Inputs
+
+Load the input object or tables used by the workflow.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-input-loading
@@ -69,6 +144,8 @@ DefaultAssay(object) <- assay_name
 
 ## Validation
 
+Check the required inputs before running the analysis.
+
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-validation
 #| echo: true
@@ -81,6 +158,8 @@ stopifnot(all(c(sample_column, group_column, ident_column) %in% colnames(object[
 
 ## Input Summary
 
+Record a compact summary of the inputs for later review.
+
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-input-summary
 #| echo: true
@@ -90,7 +169,9 @@ stopifnot(all(c(sample_column, group_column, ident_column) %in% colnames(object[
 readr::write_tsv(tibble::tibble(cells = ncol(object), peaks = nrow(object)), file.path(results_dir, "motif_input_summary.tsv"))
 ```
 
-## Main Analysis
+## Analysis
+
+Run the main analysis with the parameters defined above.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-main-analysis
@@ -104,7 +185,9 @@ markers <- FindMarkers(object, ident.1 = condition_1, ident.2 = condition_2, onl
 motif_enrichment <- FindMotifs(object, features = rownames(markers))
 ```
 
-## QC Checks
+## Diagnostics
+
+Inspect the checks that help assess the analysis output.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-qc-checks
@@ -117,6 +200,8 @@ readr::write_tsv(tibble::tibble(marker_peaks = nrow(markers), enriched_motifs = 
 
 ## Visualization
 
+Save the main diagnostic or result figures to the output directory.
+
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-visualization
 #| echo: true
@@ -128,7 +213,9 @@ print(RegionStats(object))
 dev.off()
 ```
 
-## Object Result Storage
+## Object metadata
+
+Store the derived metadata alongside the analysis object.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-object-result-storage
@@ -139,7 +226,9 @@ dev.off()
 object@misc$motif_enrichment <- list(condition_1 = condition_1, condition_2 = condition_2, n_motifs = nrow(motif_enrichment))
 ```
 
-## Result Export
+## File outputs
+
+Write the tabular outputs produced by this workflow.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-result-export
@@ -150,7 +239,9 @@ object@misc$motif_enrichment <- list(condition_1 = condition_1, condition_2 = co
 readr::write_tsv(tibble::as_tibble(motif_enrichment), file.path(results_dir, "motif_enrichment.tsv"))
 ```
 
-## Final Save
+## Save
+
+Save the resulting object in the format used by this notebook.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-final-save
@@ -161,7 +252,9 @@ readr::write_tsv(tibble::as_tibble(motif_enrichment), file.path(results_dir, "mo
 qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
 ```
 
-## Output Summary
+## Output summary
+
+Summarize the files and objects written by the workflow.
 
 ```{r}
 #| label: tpl-scatac-03-motif-enrichment-output-summary
@@ -170,4 +263,15 @@ qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level 
 #| message: false
 # Print a compact summary of generated outputs.
 tibble::tibble(output_object = output_object, enriched_motifs = nrow(motif_enrichment))
+```
+
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
 ```

@@ -1,16 +1,91 @@
 ---
 title: "MOFA Template: Multi-Omics Input Preparation"
-format: html
 editor: source
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
-# Overview
+## Purpose
 
 This notebook prepares the matched matrices consumed by the scoring and MOFA notebooks.
 
-# Setup
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
+## Inputs and setup
+
+Set the project identifiers and input table locations before matching samples.
 
 ```{r}
+#| label: mofa-input-setup
 library(dplyr)
 library(readr)
 library(tibble)
@@ -34,9 +109,12 @@ input_files <- list(
 )
 ```
 
-# Normalize Sample IDs
+## Normalize sample IDs
+
+Normalize sample columns before comparing the available sample sets.
 
 ```{r}
+#| label: mofa-normalize-sample-ids
 normalize_sample_cols <- function(df, feature_col) {
   sample_cols <- setdiff(colnames(df), feature_col)
   renamed <- stats::setNames(sample_cols, tcga_sample_barcode(sample_cols))
@@ -45,9 +123,12 @@ normalize_sample_cols <- function(df, feature_col) {
 }
 ```
 
-# Build Matched Tables
+## Build matched tables
+
+Read each modality, align its sample identifiers, and write the matched-input manifest.
 
 ```{r}
+#| label: mofa-build-matched-tables
 # Replace these example reads with the concrete assay exports for a new project.
 rna <- readr::read_tsv(input_files$rna, show_col_types = FALSE)
 mirna <- readr::read_tsv(input_files$mirna, show_col_types = FALSE)
@@ -86,9 +167,12 @@ write_output_manifest <- function() {
 write_output_manifest()
 ```
 
-# Save Matched Inputs
+## Outputs
+
+Save one matched table per modality for the downstream scoring and MOFA steps.
 
 ```{r}
+#| label: mofa-save-matched-inputs
 matched_tables <- list(
   rna = rna[, c(1, match(matched_samples, colnames(rna))), drop = FALSE],
   mirna = mirna[, c(1, match(matched_samples, colnames(mirna))), drop = FALSE],
@@ -102,7 +186,18 @@ purrr::iwalk(matched_tables, function(tbl, nm) {
 })
 ```
 
-# Notes
+## Notes
 
 - Keep project-specific download code, GDC query logic, and collapse rules visible here.
 - Do not hide assay-specific cleanup decisions in helpers.
+
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
+```

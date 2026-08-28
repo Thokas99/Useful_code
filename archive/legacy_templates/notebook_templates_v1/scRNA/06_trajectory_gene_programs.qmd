@@ -1,16 +1,87 @@
 ---
 title: "scRNA Trajectory and Gene Programs"
-format: html
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
 execute:
+  echo: true
   warning: false
   message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
 ## Purpose
 
 Fit trajectory-aware gene programs and store pseudotime summaries in a Seurat object.
 
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
 ## Packages
+
+Load the packages needed for this notebook.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-packages
@@ -26,7 +97,9 @@ suppressPackageStartupMessages({
 })
 ```
 
-## User Config
+## Parameters
+
+Set the parameters that control the analysis and output locations.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-user-config
@@ -50,7 +123,9 @@ n_threads <- 4
 compress_level <- 6
 ```
 
-## Input Loading
+## Inputs
+
+Load the input object or tables used by the workflow.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-input-loading
@@ -67,6 +142,8 @@ DefaultAssay(object) <- assay_name
 
 ## Validation
 
+Check the required inputs before running the analysis.
+
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-validation
 #| echo: true
@@ -81,8 +158,11 @@ features_of_interest <- intersect(features_of_interest, rownames(object))
 
 ## Input Summary
 
+Record a compact summary of the inputs for later review.
+
 ```{r}
-#| label: tpl-scrna-06-trajectory-gene-programs-input-summary
+#| label: tbl-scrna-trajectory-input-summary
+#| tbl-cap: "Summary of the trajectory input object."
 #| echo: true
 #| warning: false
 #| message: false
@@ -92,7 +172,9 @@ readr::write_tsv(input_summary, file.path(results_dir, "trajectory_input_summary
 input_summary
 ```
 
-## Main Analysis
+## Analysis
+
+Run the main analysis with the parameters defined above.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-main-analysis
@@ -107,7 +189,9 @@ program_tbl <- expr |>
   summarise(across(all_of(features_of_interest), mean, na.rm = TRUE), .groups = "drop")
 ```
 
-## QC Checks
+## Diagnostics
+
+Inspect the checks that help assess the analysis output.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-qc-checks
@@ -121,6 +205,8 @@ readr::write_tsv(bin_counts, file.path(results_dir, "pseudotime_bin_counts.tsv")
 
 ## Visualization
 
+Save the main diagnostic or result figures to the output directory.
+
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-visualization
 #| echo: true
@@ -132,7 +218,9 @@ if (length(features_of_interest) > 0) print(FeaturePlot(object, features = featu
 dev.off()
 ```
 
-## Object Result Storage
+## Object metadata
+
+Store the derived metadata alongside the analysis object.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-object-result-storage
@@ -143,7 +231,9 @@ dev.off()
 object@misc$trajectory_gene_programs <- list(features = features_of_interest, pseudotime_column = pseudotime_column, n_bins = n_bins)
 ```
 
-## Result Export
+## File outputs
+
+Write the tabular outputs produced by this workflow.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-result-export
@@ -154,7 +244,9 @@ object@misc$trajectory_gene_programs <- list(features = features_of_interest, ps
 readr::write_tsv(program_tbl, file.path(results_dir, "trajectory_gene_programs.tsv"))
 ```
 
-## Final Save
+## Save
+
+Save the resulting object in the format used by this notebook.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-final-save
@@ -165,7 +257,9 @@ readr::write_tsv(program_tbl, file.path(results_dir, "trajectory_gene_programs.t
 qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
 ```
 
-## Output Summary
+## Output summary
+
+Summarize the files and objects written by the workflow.
 
 ```{r}
 #| label: tpl-scrna-06-trajectory-gene-programs-output-summary
@@ -174,4 +268,15 @@ qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level 
 #| message: false
 # Print a compact summary of generated outputs.
 tibble::tibble(output_object = output_object, features_used = length(features_of_interest))
+```
+
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
 ```

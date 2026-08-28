@@ -1,16 +1,87 @@
 ---
 title: "Metabolic Activity"
-format: html
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
 execute:
+  echo: true
   warning: false
   message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
 ## Purpose
 
 Import or compute metabolic activity scores in AnnData and save the updated `.h5ad`.
 
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
 ## Packages
+
+Load the packages needed for this notebook.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-packages
@@ -23,7 +94,9 @@ import pandas as pd
 import scanpy as sc
 ```
 
-## User Config
+## Parameters
+
+Set the parameters that control the analysis and output locations.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-user-config
@@ -43,7 +116,9 @@ features_of_interest = ["pathway_1", "pathway_2"]
 seed = 1
 ```
 
-## Input Loading
+## Inputs
+
+Load the input object or tables used by the workflow.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-input-loading
@@ -58,6 +133,8 @@ activity = pd.read_table(activity_file)
 ```
 
 ## Validation
+
+Check the required inputs before running the analysis.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-validation
@@ -75,6 +152,8 @@ activity = activity.set_index(cell_column).reindex(adata.obs_names)
 
 ## Input Summary
 
+Record a compact summary of the inputs for later review.
+
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-input-summary
 #| echo: true
@@ -84,7 +163,9 @@ activity = activity.set_index(cell_column).reindex(adata.obs_names)
 pd.DataFrame({"n_cells": [adata.n_obs], "n_activity_features": [activity.shape[1]]}).to_csv(f"{results_dir}/metabolic_input_summary.tsv", sep="\t", index=False)
 ```
 
-## Main Analysis
+## Analysis
+
+Run the main analysis with the parameters defined above.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-main-analysis
@@ -97,7 +178,9 @@ for column in activity.columns:
 adata.uns["metabolic_activity_features"] = list(activity.columns)
 ```
 
-## QC Checks
+## Diagnostics
+
+Inspect the checks that help assess the analysis output.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-qc-checks
@@ -110,6 +193,8 @@ activity.describe().T.to_csv(f"{results_dir}/metabolic_activity_summary.tsv", se
 
 ## Visualization
 
+Save the main diagnostic or result figures to the output directory.
+
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-visualization
 #| echo: true
@@ -120,7 +205,9 @@ for feature in [x for x in features_of_interest if x in adata.obs.columns]:
     sc.pl.umap(adata, color=feature, save=f"_{feature}.png", show=False)
 ```
 
-## Object Result Storage
+## Object metadata
+
+Store the derived metadata alongside the analysis object.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-object-result-storage
@@ -131,7 +218,9 @@ for feature in [x for x in features_of_interest if x in adata.obs.columns]:
 adata.uns["template"] = {"step": "metabolic_activity", "activity_file": activity_file}
 ```
 
-## Result Export
+## File outputs
+
+Write the tabular outputs produced by this workflow.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-result-export
@@ -142,7 +231,9 @@ adata.uns["template"] = {"step": "metabolic_activity", "activity_file": activity
 adata.obs[[sample_column, group_column] + list(activity.columns)].to_csv(f"{results_dir}/metabolic_activity_by_cell.tsv", sep="\t")
 ```
 
-## Final Save
+## Save
+
+Save the resulting object in the format used by this notebook.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-final-save
@@ -153,7 +244,9 @@ adata.obs[[sample_column, group_column] + list(activity.columns)].to_csv(f"{resu
 adata.write_h5ad(output_object)
 ```
 
-## Output Summary
+## Output summary
+
+Summarize the files and objects written by the workflow.
 
 ```{python}
 #| label: tpl-scrna-10-metabolic-activity-output-summary

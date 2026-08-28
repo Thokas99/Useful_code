@@ -3,6 +3,8 @@
 Archive content is retained intentionally and is not part of the active
 template library.
 
+Archived QMD files have been presentation-normalized to the repository's Quarto report conventions without changing their historical analytical logic.
+
 - [`legacy_templates/`](legacy_templates/) contains superseded intermediate
   template systems.
 - [`raw_archives/`](raw_archives/) contains historical ZIP archives preserved

@@ -1,10 +1,75 @@
 ---
 title: "MOFA Template: Multi-Omics Model"
-format: html
 editor: source
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
-# Overview
+## Purpose
 
 This notebook builds the aligned MOFA input list, trains the model, and keeps the central downstream analysis in one place:
 
@@ -13,9 +78,19 @@ This notebook builds the aligned MOFA input list, trains the model, and keeps th
 3. top-feature heatmaps within each view
 4. group-wise median and mutation-frequency differences for the leading factor
 
-# Setup
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
+## Inputs and setup
+
+Set the model dimensions, focus variables, and output locations used below.
 
 ```{r}
+#| label: mofa-model-setup
 library(dplyr)
 library(readr)
 library(qs2)
@@ -52,9 +127,12 @@ metadata_scored <- readr::read_tsv(
 )
 ```
 
-# Helper Functions
+## Helper functions
+
+These helpers load view matrices, extract MOFA results, and prepare summaries.
 
 ```{r}
+#| label: mofa-model-helpers
 load_view_matrix <- function(path) {
   tbl <- readr::read_tsv(path, show_col_types = FALSE)
   feature_col <- colnames(tbl)[1]
@@ -173,9 +251,12 @@ extract_mutation_weights_with_group_frequency <- function(weight_tbl, mutation_m
 }
 ```
 
-# Load Views
+## Inputs
+
+Load the modality-specific matrices that will become the MOFA views.
 
 ```{r}
+#| label: mofa-load-views
 views <- list(
   RNA = compute_logcpm(load_view_matrix("input/tables/RNA_MATCHED.tsv")),
   miRNA = compute_logcpm(load_view_matrix("input/tables/MIRNA_MATCHED.tsv")),
@@ -185,9 +266,12 @@ views <- list(
 )
 ```
 
-# Build MOFA Input
+## Analysis
+
+Select the configured features, align samples, and prepare the MOFA input object.
 
 ```{r}
+#| label: mofa-build-input
 view_mats <- lapply(views, function(mat) {
   keep_most_variable_dt(mat, top_n = top_features_per_view)
 })
@@ -213,9 +297,12 @@ mofa_obj <- MOFA2::prepare_mofa(
 )
 ```
 
-# Train and Export
+## Outputs
+
+Fit the model and write the factor scores used by the later summaries.
 
 ```{r}
+#| label: mofa-train-export
 outfile <- file.path(OBJECT_DIR, paste0(project_id, "_mofa_model.hdf5"))
 mofa_fit <- MOFA2::run_mofa(mofa_obj, outfile = outfile)
 
@@ -223,9 +310,13 @@ factor_tbl <- factor_tbl_from_fit(mofa_fit)
 readr::write_tsv(factor_tbl, file.path(TABLE_DIR, paste0(project_id, "_mofa_factors.tsv")))
 ```
 
-# Factor Association Summary
+## Factor associations
+
+Compare factor scores with the configured metadata score using Spearman correlation.
 
 ```{r}
+#| label: tbl-mofa-factor-associations
+#| tbl-cap: "Associations between MOFA factor scores and the configured metadata score."
 factor_wide <- factor_tbl |>
   tidyr::pivot_wider(names_from = factor, values_from = value) |>
   dplyr::left_join(metadata_scored, by = "sample_id")
@@ -257,9 +348,14 @@ readr::write_tsv(
 association_tbl
 ```
 
-# Sample-Level Factor Heatmap
+## Factor heatmap
+
+Display factor values by sample after ordering samples by the focus score.
 
 ```{r}
+#| label: fig-mofa-factor-heatmap
+#| fig-cap: "Selected MOFA factor values across samples ordered by the configured focus score."
+#| fig-alt: "Heatmap of selected MOFA factor values across samples."
 heatmap_cols <- intersect(
   c(paste0("Factor", heatmap_factors), focus_score_column, focus_group_column),
   colnames(factor_wide)
@@ -272,9 +368,14 @@ factor_heatmap_input <- factor_wide |>
 plot_factor_heatmap(factor_heatmap_input, annotation_cols = c(focus_score_column, focus_group_column))
 ```
 
-# Factor Distributions by Group
+## Factor distributions
+
+Compare the factor distributions across the configured groups.
 
 ```{r}
+#| label: fig-mofa-factor-distributions
+#| fig-cap: "MOFA factor distributions across the configured groups."
+#| fig-alt: "Violin plots of MOFA factor values across the configured groups."
 factor_violin_tbl <- factor_wide |>
   tidyr::pivot_longer(
     cols = dplyr::starts_with("Factor"),
@@ -292,9 +393,14 @@ ggplot2::ggplot(
   ggplot2::theme_bw(11)
 ```
 
-# View Weight Heatmaps
+## View weight heatmaps
+
+Plot the highest-weight features for the leading factors in each modality.
 
 ```{r}
+#| label: fig-mofa-view-weight-heatmaps
+#| fig-cap: "Top feature weights for selected MOFA factors across modality views."
+#| fig-alt: "Heatmaps of top MOFA feature weights for each modality and selected factor."
 lead_factors <- association_tbl |>
   dplyr::slice_head(n = min(length(heatmap_factors), nrow(association_tbl))) |>
   dplyr::pull(factor)
@@ -326,9 +432,12 @@ purrr::walk(names(weight_tbls), function(view_name) {
 })
 ```
 
-# Group Median and Frequency Differences
+## Group differences
+
+Write group-wise continuous summaries and mutation-frequency differences for the leading factor.
 
 ```{r}
+#| label: mofa-group-differences
 target_factor <- as.integer(gsub("Factor", "", lead_factors[[1]]))
 
 continuous_views <- c("RNA", "miRNA", "methylation", "RPPA")
@@ -379,9 +488,12 @@ readr::write_tsv(
 )
 ```
 
-# Quick Checks
+## Diagnostics
+
+Check variance explained and preview the leading group-difference tables.
 
 ```{r}
+#| label: mofa-model-diagnostics
 variance_explained <- MOFA2::calculate_variance_explained(mofa_fit)
 print(variance_explained)
 
@@ -704,8 +816,12 @@ plot_mofa_view_heatmap <- function(
 
 ### miRNA Heatmaps
 
+Show historical heatmaps for the selected miRNA view and factors.
+
 ```{r}
-#| label: plot-mirna-mofa-heatmaps
+#| label: fig-mofa-mirna-heatmaps
+#| fig-cap: "Top MOFA feature weights for the selected miRNA view and factors."
+#| fig-alt: "Heatmaps of top MOFA feature weights for the selected miRNA view and factors."
 #| echo: false
 #| warning: false
 #| message: false
@@ -737,8 +853,12 @@ plot_mofa_view_heatmap(
 
 ### RNA Heatmaps
 
+Show historical heatmaps for the selected RNA view and factors.
+
 ```{r}
-#| label: plot-rna-mofa-heatmaps
+#| label: fig-mofa-rna-heatmaps
+#| fig-cap: "Top MOFA feature weights for the selected RNA view and factors."
+#| fig-alt: "Heatmaps of top MOFA feature weights for the selected RNA view and factors."
 #| echo: false
 #| warning: false
 #| message: false
@@ -769,8 +889,12 @@ plot_mofa_view_heatmap(
 
 ### mutation Heatmaps
 
+Show historical heatmaps for the selected mutation view and factors.
+
 ```{r}
-#| label: plot-mutation-mofa-heatmaps
+#| label: fig-mofa-mutation-heatmaps
+#| fig-cap: "Top MOFA feature weights for the selected mutation view and factors."
+#| fig-alt: "Heatmaps of top MOFA feature weights for the selected mutation view and factors."
 #| echo: false
 #| warning: false
 #| message: false
@@ -800,8 +924,12 @@ plot_mofa_view_heatmap(
 
 ### RPPA Heatmaps
 
+Show historical heatmaps for the selected RPPA view and factors.
+
 ```{r}
-#| label: plot-RPPA-mofa-heatmaps
+#| label: fig-mofa-rppa-heatmaps
+#| fig-cap: "Top MOFA feature weights for the selected RPPA view and factors."
+#| fig-alt: "Heatmaps of top MOFA feature weights for the selected RPPA view and factors."
 #| echo: false
 #| warning: false
 #| message: false
@@ -830,11 +958,12 @@ plot_mofa_view_heatmap(
 
 ```
 
-# Expansion Space
+## Additional helper code
 
-The following section anchors are intentionally empty and can be expanded later without disturbing the core MOFA workflow.
+These helper and export blocks are retained as historical extensions to the main workflow. They are not required for the core model step.
 
 ```{r}
+#| label: mofa-expansion-helpers
 
 library(MOFA2)
 library(dplyr)
@@ -1079,7 +1208,10 @@ extract_mofa_mutation_weights_with_group_frequency <- function(
 
 ```
 
+The next block writes historical group-difference tables for several views.
+
 ```{r}
+#| label: mofa-expansion-exports
 
 TABLE_DIR <- "output/tables"
 dir.create(TABLE_DIR, recursive = TRUE, showWarnings = FALSE)
@@ -1145,7 +1277,11 @@ readr::write_tsv(
 
 ```
 
+This final preview returns a compact subset of one historical result table.
+
 ```{r}
+#| label: tbl-mofa-expansion-preview
+#| tbl-cap: "Preview of historical MOFA feature-weight differences."
 
 rna_factor1_weights_medians |>
   dplyr::filter(agreement == "Concordant") |>
@@ -1154,8 +1290,19 @@ rna_factor1_weights_medians |>
 
 ```
 
-# Notes
+## Notes
 
 - Keep the factor heatmaps and group-difference exports in this notebook; they are central, not optional add-ons.
 - Change `focus_score_column`, `focus_group_column`, and the group labels at the top when the project is not a C1-style analysis.
 - Promote additional per-factor or per-view interpretation only after the core heatmap and difference summaries are stable.
+
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
+```

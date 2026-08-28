@@ -1,16 +1,87 @@
 ---
 title: "Multiome QC, Integration, and WNN"
-format: html
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
 execute:
+  echo: true
   warning: false
   message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
 ## Purpose
 
 Run RNA and ATAC reductions, construct WNN neighbors, cluster, and save integrated multiome results.
 
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
 ## Packages
+
+Load the packages needed for this notebook.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-packages
@@ -27,7 +98,9 @@ suppressPackageStartupMessages({
 })
 ```
 
-## User Config
+## Parameters
+
+Set the parameters that control the analysis and output locations.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-user-config
@@ -51,7 +124,9 @@ n_threads <- 4
 compress_level <- 6
 ```
 
-## Input Loading
+## Inputs
+
+Load the input object or tables used by the workflow.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-input-loading
@@ -67,6 +142,8 @@ object <- qs2::qs_read(file = input_object, nthreads = n_threads)
 
 ## Validation
 
+Check the required inputs before running the analysis.
+
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-validation
 #| echo: true
@@ -80,6 +157,8 @@ stopifnot(all(c(sample_column, group_column) %in% colnames(object[[]])))
 
 ## Input Summary
 
+Record a compact summary of the inputs for later review.
+
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-input-summary
 #| echo: true
@@ -89,7 +168,9 @@ stopifnot(all(c(sample_column, group_column) %in% colnames(object[[]])))
 readr::write_tsv(tibble::tibble(cells = ncol(object), assays = paste(Assays(object), collapse = ",")), file.path(results_dir, "multiome_wnn_input_summary.tsv"))
 ```
 
-## Main Analysis
+## Analysis
+
+Run the main analysis with the parameters defined above.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-main-analysis
@@ -111,7 +192,9 @@ object <- RunUMAP(object, nn.name = "weighted.nn", reduction.name = "wnn.umap")
 object <- FindClusters(object, graph.name = "wsnn", resolution = cluster_resolution)
 ```
 
-## QC Checks
+## Diagnostics
+
+Inspect the checks that help assess the analysis output.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-qc-checks
@@ -125,6 +208,8 @@ readr::write_tsv(cluster_counts, file.path(results_dir, "wnn_cluster_counts.tsv"
 
 ## Visualization
 
+Save the main diagnostic or result figures to the output directory.
+
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-visualization
 #| echo: true
@@ -136,7 +221,9 @@ print(DimPlot(object, reduction = "wnn.umap", group.by = "seurat_clusters", labe
 dev.off()
 ```
 
-## Object Result Storage
+## Object metadata
+
+Store the derived metadata alongside the analysis object.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-object-result-storage
@@ -147,7 +234,9 @@ dev.off()
 object@misc$template <- list(step = "multiome_qc_integration_wnn", n_pcs = n_pcs, n_lsi_dims = n_lsi_dims)
 ```
 
-## Result Export
+## File outputs
+
+Write the tabular outputs produced by this workflow.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-result-export
@@ -158,7 +247,9 @@ object@misc$template <- list(step = "multiome_qc_integration_wnn", n_pcs = n_pcs
 readr::write_tsv(object[[]] |> tibble::rownames_to_column("cell_id"), file.path(results_dir, "wnn_metadata.tsv"))
 ```
 
-## Final Save
+## Save
+
+Save the resulting object in the format used by this notebook.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-final-save
@@ -169,7 +260,9 @@ readr::write_tsv(object[[]] |> tibble::rownames_to_column("cell_id"), file.path(
 qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
 ```
 
-## Output Summary
+## Output summary
+
+Summarize the files and objects written by the workflow.
 
 ```{r}
 #| label: tpl-multiome-02-qc-integration-wnn-output-summary
@@ -178,4 +271,15 @@ qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level 
 #| message: false
 # Print a compact summary of generated outputs.
 tibble::tibble(output_object = output_object, cells = ncol(object), clusters = length(levels(Idents(object))))
+```
+
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
 ```

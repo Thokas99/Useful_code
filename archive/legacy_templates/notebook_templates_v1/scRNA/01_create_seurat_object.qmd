@@ -1,16 +1,87 @@
 ---
 title: "Create Seurat Object"
-format: html
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
 execute:
+  echo: true
   warning: false
   message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
 ## Purpose
 
 Create a Seurat object from a count matrix and sample metadata, then save the reusable object.
 
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
 ## Packages
+
+Load the packages needed for this notebook.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-packages
@@ -26,7 +97,9 @@ suppressPackageStartupMessages({
 })
 ```
 
-## User Config
+## Parameters
+
+Set the parameters that control the analysis and output locations.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-user-config
@@ -49,7 +122,9 @@ n_threads <- 4
 compress_level <- 6
 ```
 
-## Input Loading
+## Inputs
+
+Load the input object or tables used by the workflow.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-input-loading
@@ -66,6 +141,8 @@ metadata <- readr::read_tsv(metadata_file, show_col_types = FALSE)
 
 ## Validation
 
+Check the required inputs before running the analysis.
+
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-validation
 #| echo: true
@@ -79,8 +156,11 @@ stopifnot(all(colnames(counts) %in% metadata[[1]]))
 
 ## Input Summary
 
+Record a compact summary of the inputs for later review.
+
 ```{r}
-#| label: tpl-scrna-01-create-seurat-object-input-summary
+#| label: tbl-scrna-create-object-input-summary
+#| tbl-cap: "Dimensions of the configured count matrix."
 #| echo: true
 #| warning: false
 #| message: false
@@ -90,7 +170,9 @@ readr::write_tsv(summary_tbl, file.path(results_dir, "input_summary.tsv"))
 summary_tbl
 ```
 
-## Main Analysis
+## Analysis
+
+Run the main analysis with the parameters defined above.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-main-analysis
@@ -109,7 +191,9 @@ object <- CreateSeuratObject(
 object[[paste0(assay_name, "_percent_mito")]] <- PercentageFeatureSet(object, pattern = "^MT-", assay = assay_name)
 ```
 
-## QC Checks
+## Diagnostics
+
+Inspect the checks that help assess the analysis output.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-qc-checks
@@ -123,6 +207,8 @@ readr::write_tsv(qc_tbl, file.path(results_dir, "cell_qc_metrics.tsv"))
 
 ## Visualization
 
+Save the main diagnostic or result figures to the output directory.
+
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-visualization
 #| echo: true
@@ -134,7 +220,9 @@ print(VlnPlot(object, features = c("nFeature_RNA", "nCount_RNA"), group.by = sam
 dev.off()
 ```
 
-## Object Result Storage
+## Object metadata
+
+Store the derived metadata alongside the analysis object.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-object-result-storage
@@ -145,7 +233,9 @@ dev.off()
 object@misc$template <- list(step = "create_seurat_object", input_object = input_object)
 ```
 
-## Result Export
+## File outputs
+
+Write the tabular outputs produced by this workflow.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-result-export
@@ -156,7 +246,9 @@ object@misc$template <- list(step = "create_seurat_object", input_object = input
 readr::write_tsv(tibble::as_tibble(object[[]], rownames = "cell_id"), file.path(results_dir, "created_object_metadata.tsv"))
 ```
 
-## Final Save
+## Save
+
+Save the resulting object in the format used by this notebook.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-final-save
@@ -167,7 +259,9 @@ readr::write_tsv(tibble::as_tibble(object[[]], rownames = "cell_id"), file.path(
 qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
 ```
 
-## Output Summary
+## Output summary
+
+Summarize the files and objects written by the workflow.
 
 ```{r}
 #| label: tpl-scrna-01-create-seurat-object-output-summary
@@ -178,3 +272,13 @@ qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level 
 tibble::tibble(output_object = output_object, cells = ncol(object), features = nrow(object))
 ```
 
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
+```

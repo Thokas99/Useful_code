@@ -1,10 +1,75 @@
 ---
 title: "MOFA Template: Project Setup"
-format: html
 editor: source
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
-# Overview
+## Purpose
 
 This notebook defines the shared contract for the distilled MOFA workflow:
 
@@ -13,9 +78,19 @@ This notebook defines the shared contract for the distilled MOFA workflow:
 3. Fit or inspect the MOFA model under `output/objects/`.
 4. Keep project-specific feature choices and biological interpretation inline.
 
-# Setup
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
+## Inputs and setup
+
+Set the project-level paths and identifiers used by the later MOFA notebooks.
 
 ```{r}
+#| label: mofa-project-setup
 set.seed(1234)
 
 Sys.setenv(
@@ -48,9 +123,12 @@ project <- list(
 )
 ```
 
-# Notebook Order
+## Workflow order
+
+This short list records the intended order of the four legacy notebooks.
 
 ```{r}
+#| label: mofa-workflow-order
 workflow_order <- c(
   "00_project_setup.qmd",
   "01_multiomics_input_prep.qmd",
@@ -60,9 +138,13 @@ workflow_order <- c(
 workflow_order
 ```
 
-# Object Contract
+## Outputs
+
+The object contract below names the files passed between the notebook steps.
 
 ```{r}
+#| label: tbl-mofa-output-contract
+#| tbl-cap: "Shared outputs for the MOFA workflow."
 object_contract <- list(
   matched_inputs = file.path(paths$input_tables, paste0(project$project_id, "_matched_multiomics_manifest.tsv")),
   scored_metadata = file.path(paths$output_tables, paste0(project$project_id, "_scored_metadata.tsv")),
@@ -77,8 +159,19 @@ knitr::kable(
 )
 ```
 
-# Notes
+## Notes
 
 - Keep assay-specific file names and download queries visible in the prep notebook.
 - Keep score thresholds and subtype labels visible in the scoring notebook.
 - Keep model dimensions, view selection, and factor interpretation visible in the MOFA notebook.
+
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
+```

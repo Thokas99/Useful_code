@@ -1,16 +1,91 @@
 ---
 title: "MOFA Template: Signature Scoring and Metadata"
-format: html
 editor: source
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
-# Overview
+## Purpose
 
 This notebook computes the phenotype or signature scores that will later be tested against MOFA factors.
 
-# Setup
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
+## Inputs and setup
+
+Load the matched RNA table, metadata, and signature definition used for scoring.
 
 ```{r}
+#| label: mofa-signature-setup
 library(dplyr)
 library(readr)
 library(tibble)
@@ -31,9 +106,12 @@ metadata <- readr::read_tsv("input/tables/sample_metadata.tsv", show_col_types =
 signature_tbl <- readr::read_csv("input/tables/signature_genes.csv", show_col_types = FALSE)
 ```
 
-# Score Construction
+## Score construction
+
+Calculate the signature score, derive its class labels, and save the scored metadata.
 
 ```{r}
+#| label: mofa-score-construction
 feature_col <- colnames(rna)[1]
 sample_ids <- setdiff(colnames(rna), feature_col)
 count_mat <- as.matrix(rna[, sample_ids, drop = FALSE])
@@ -58,16 +136,30 @@ readr::write_tsv(
 )
 ```
 
-# Quick Checks
+## Diagnostics
+
+Inspect the score distribution across the configured class labels.
 
 ```{r}
+#| label: mofa-score-diagnostics
 ggplot(metadata_scored, aes(x = .data[[class_column]], y = .data[[score_column]], fill = .data[[class_column]])) +
   geom_violin(alpha = 0.5) +
   geom_jitter(width = 0.15, alpha = 0.2, size = 0.4) +
   theme_bw(11)
 ```
 
-# Notes
+## Notes
 
 - Keep alternate score definitions, deconvolution summaries, and purity correlations inline here when needed.
 - Do not hide threshold choices; the class cutoffs should stay visible.
+
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
+```

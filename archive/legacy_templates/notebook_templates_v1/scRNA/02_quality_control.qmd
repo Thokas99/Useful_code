@@ -1,16 +1,87 @@
 ---
 title: "scRNA Quality Control"
-format: html
+lang: en
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    respect-user-color-scheme: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 4
+    toc-location: right
+    toc-expand: 2
+    number-sections: true
+    number-depth: 3
+    smooth-scroll: true
+    anchor-sections: true
+    code-fold: true
+    code-summary: "Show analysis code"
+    code-copy: true
+    code-overflow: wrap
+    code-line-numbers: false
+    fig-width: 16
+    fig-height: 12
+    fig-dpi: 300
+    fig-format: png
+    fig-align: center
+    fig-responsive: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+    df-print: paged
+    crossrefs-hover: true
+    footnotes-hover: true
+    citations-hover: true
+    embed-resources: true
+    self-contained-math: true
+    page-layout: article
+    grid:
+      sidebar-width: 250px
+      body-width: 1050px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    link-external-newwindow: true
+    link-external-icon: true
+lightbox:
+  match: auto
+  effect: fade
+  desc-position: bottom
+  loop: false
 execute:
+  echo: true
   warning: false
   message: false
+  error: false
+knitr:
+  opts_chunk:
+    fig.align: center
+    out.width: "100%"
+    collapse: true
+    comment: "#>"
+crossref:
+  fig-title: "Figure"
+  tbl-title: "Table"
+  sec-prefix: "Section"
+  fig-prefix: "Figure"
+  tbl-prefix: "Table"
+  ref-hyperlink: true
 ---
 
 ## Purpose
 
 Filter low-quality cells, flag QC metrics, and save the filtered Seurat object.
 
+::: {.callout-note}
+## Archive status
+
+This is a legacy notebook kept for reference. For current reusable workflows,
+see the active templates in the repository.
+:::
+
 ## Packages
+
+Load the packages needed for this notebook.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-packages
@@ -26,7 +97,9 @@ suppressPackageStartupMessages({
 })
 ```
 
-## User Config
+## Parameters
+
+Set the parameters that control the analysis and output locations.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-user-config
@@ -49,7 +122,9 @@ n_threads <- 4
 compress_level <- 6
 ```
 
-## Input Loading
+## Inputs
+
+Load the input object or tables used by the workflow.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-input-loading
@@ -66,6 +141,8 @@ DefaultAssay(object) <- assay_name
 
 ## Validation
 
+Check the required inputs before running the analysis.
+
 ```{r}
 #| label: tpl-scrna-02-quality-control-validation
 #| echo: true
@@ -79,8 +156,11 @@ if (!"percent_mito" %in% colnames(object[[]])) object[["percent_mito"]] <- Perce
 
 ## Input Summary
 
+Record a compact summary of the inputs for later review.
+
 ```{r}
-#| label: tpl-scrna-02-quality-control-input-summary
+#| label: tbl-scrna-qc-input-summary
+#| tbl-cap: "Cell counts and feature dimensions before quality-control filtering."
 #| echo: true
 #| warning: false
 #| message: false
@@ -90,7 +170,9 @@ readr::write_tsv(before_tbl, file.path(results_dir, "qc_input_summary.tsv"))
 before_tbl
 ```
 
-## Main Analysis
+## Analysis
+
+Run the main analysis with the parameters defined above.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-main-analysis
@@ -104,7 +186,9 @@ object$qc_pass <- object$nFeature_RNA >= min_features &
 filtered <- subset(object, subset = qc_pass)
 ```
 
-## QC Checks
+## Diagnostics
+
+Inspect the checks that help assess the analysis output.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-qc-checks
@@ -119,6 +203,8 @@ readr::write_tsv(filtered[[]] |> tibble::rownames_to_column("cell_id"), file.pat
 
 ## Visualization
 
+Save the main diagnostic or result figures to the output directory.
+
 ```{r}
 #| label: tpl-scrna-02-quality-control-visualization
 #| echo: true
@@ -130,7 +216,9 @@ print(VlnPlot(object, features = c("nFeature_RNA", "nCount_RNA", "percent_mito")
 dev.off()
 ```
 
-## Object Result Storage
+## Object metadata
+
+Store the derived metadata alongside the analysis object.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-object-result-storage
@@ -141,7 +229,9 @@ dev.off()
 filtered@misc$template <- list(step = "scrna_quality_control", thresholds = list(min_features = min_features, max_features = max_features, max_percent_mito = max_percent_mito))
 ```
 
-## Result Export
+## File outputs
+
+Write the tabular outputs produced by this workflow.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-result-export
@@ -152,7 +242,9 @@ filtered@misc$template <- list(step = "scrna_quality_control", thresholds = list
 readr::write_tsv(tibble::tibble(cells_after = ncol(filtered), cells_removed = ncol(object) - ncol(filtered)), file.path(results_dir, "qc_summary.tsv"))
 ```
 
-## Final Save
+## Save
+
+Save the resulting object in the format used by this notebook.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-final-save
@@ -164,7 +256,9 @@ object <- filtered
 qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level = compress_level)
 ```
 
-## Output Summary
+## Output summary
+
+Summarize the files and objects written by the workflow.
 
 ```{r}
 #| label: tpl-scrna-02-quality-control-output-summary
@@ -175,3 +269,13 @@ qs2::qs_save(object, file = output_object, nthreads = n_threads, compress_level 
 tibble::tibble(output_object = output_object, cells = ncol(object), features = nrow(object))
 ```
 
+## Reproducibility {.appendix}
+
+This final chunk records the R session used when the notebook is rendered.
+
+```{r}
+#| label: session-information
+#| echo: false
+#| results: markup
+sessionInfo()
+```
