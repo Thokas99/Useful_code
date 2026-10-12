@@ -1,0 +1,160 @@
+---
+title: "Single-cell RNA-seq in Python with AnnData"
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: python3
+execute:
+  warning: false
+  message: false
+---
+
+> Status: draft. Check package versions, input layers, and state choices before use.
+
+Input: an `.h5ad` with unique cell and gene IDs, `spliced` and `unspliced`
+layers, a cluster label, and sample metadata. The cells estimate RNA velocity,
+transition-based fate probabilities, and network activity; scCellFie is optional.
+
+## 1. Load and check the input
+
+```{python}
+from pathlib import Path
+
+import anndata as ad
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import scvelo as scv
+
+adata = ad.read_h5ad("input/processed_single_cell.h5ad")
+assert adata.obs_names.is_unique and adata.var_names.is_unique
+assert {"spliced", "unspliced"}.issubset(adata.layers)
+assert "sample_id" in adata.obs and "cluster" in adata.obs
+assert adata.layers["spliced"].shape == adata.shape
+assert adata.layers["unspliced"].shape == adata.shape
+print(adata)
+```
+
+The velocity layers must contain the kinetic counts for the same cells and
+genes as `adata`. An integrated expression matrix does not replace them.
+
+## 2. Estimate RNA velocity
+
+```{python}
+scv.settings.set_figure_params(dpi=120, frameon=False)
+scv.pp.filter_and_normalize(adata, min_shared_counts=20, n_top_genes=2000)
+sc.tl.pca(adata, n_comps=30, random_state=1234)
+sc.pp.neighbors(adata, n_neighbors=30, n_pcs=30, random_state=1234)
+sc.tl.umap(adata, random_state=1234)
+scv.pp.moments(adata, n_pcs=30, n_neighbors=30)
+scv.tl.recover_dynamics(adata, n_jobs=1)
+scv.tl.velocity(adata, mode="dynamical")
+scv.tl.velocity_graph(adata, n_jobs=1)
+scv.tl.velocity_pseudotime(adata)
+scv.tl.recover_latent_time(adata)
+scv.tl.velocity_confidence(adata)
+scv.pl.velocity_embedding_stream(adata, basis="umap", color="cluster")
+```
+
+Inspect the kinetic fit and velocity confidence. Pseudotime and latent time
+are model-derived ordering measures.
+
+## 3. Infer coarse states and fate probabilities
+
+CellRank combines the scVelo transition information with a cell-connectivity
+kernel. These probabilities depend on the fitted model and state choices; they
+are not observed lineage outcomes.
+
+```{python}
+from cellrank.estimators import GPCCA
+from cellrank.kernels import ConnectivityKernel, VelocityKernel
+
+velocity_kernel = VelocityKernel(adata).compute_transition_matrix()
+connectivity_kernel = ConnectivityKernel(adata).compute_transition_matrix()
+# Example blend; check whether conclusions change with other weights.
+kernel = 0.7 * velocity_kernel + 0.3 * connectivity_kernel
+
+estimator = GPCCA(kernel)
+estimator.compute_schur(method="krylov")
+estimator.compute_macrostates(n_states=3, cluster_key="cluster")
+estimator.predict_initial_states(allow_overlap=True)
+estimator.predict_terminal_states(allow_overlap=True)
+estimator.compute_fate_probabilities(solver="gmres", n_jobs=1)
+fate = estimator.fate_probabilities.to_df()
+fate.index.name = "cell_id"
+drivers = estimator.compute_lineage_drivers(seed=1234)
+
+estimator.plot_macrostates(basis="X_umap", which="terminal")
+estimator.plot_fate_probabilities(basis="X_umap", same_plot=False)
+print(fate.describe())
+print(drivers.head())
+```
+
+## 4. Infer pathway or regulator activity
+
+The network TSV has `source`, `target`, and `weight` columns. The network and
+the expression layer must use the same gene identifiers.
+
+```{python}
+import decoupler as dc
+
+network = pd.read_csv("input/regulatory_network.tsv", sep="\t")
+assert {"source", "target", "weight"}.issubset(network.columns)
+dc.mt.ulm(data=adata, net=network, layer=None, tmin=5)
+activity = dc.pp.get_obsm(adata=adata, key="score_ulm")
+activity.index.name = "cell_id"
+print(activity.describe().T.head())
+```
+
+ULM activity is inferred from a prior-knowledge network. It is not direct
+measurement of transcription-factor binding or pathway flux.
+
+## 5. Estimate metabolic-task activity (optional)
+
+scCellFie needs a Scanpy neighbor graph and the named metadata columns below.
+Enable the cell after checking the current package API and organism resource.
+
+```{python}
+#| eval: false
+
+import sccellfie
+
+adata = sccellfie.run_sccellfie_pipeline(
+    adata,
+    organism="human",
+    n_counts_col="n_counts",
+    process_by_group=False,
+    neighbors_key="neighbors",
+    n_neighbors=10,
+    batch_key="sample_id",
+    threshold_key="sccellfie_threshold",
+    smooth_cells=True,
+    alpha=0.33,
+    chunk_size=5000,
+    save_folder=None,
+    save_filename=None,
+)["adata"]
+
+report = sccellfie.reports.generate_report_from_adata(
+    adata.metabolic_tasks,
+    group_by="cluster",
+    tissue_col="sample_id",
+    feature_name="metabolic_task",
+)
+```
+
+These are metabolic-task activity estimates, not direct measurements of
+metabolic flux.
+
+## 6. Save the object and tables
+
+```{python}
+output = Path("output")
+output.mkdir(parents=True, exist_ok=True)
+adata.write_h5ad(output / "single_cell_analysis.h5ad")
+fate.reset_index().to_csv(output / "cellrank_fate.tsv", sep="\t", index=False)
+drivers.to_csv(output / "cellrank_drivers.tsv", sep="\t", index=False)
+activity.reset_index().to_csv(output / "decoupler_ulm.tsv", sep="\t", index=False)
+```

@@ -1,0 +1,280 @@
+---
+title: "Single-cell RNA-seq in R with Seurat"
+format:
+  html:
+    toc: true
+    code-fold: false
+execute:
+  warning: false
+  message: false
+---
+
+> Status: draft. Check species-specific gene labels, QC limits, package versions, and study design before use.
+
+Input: a gene-by-cell count matrix and one metadata row per cell. The main path
+creates and filters a Seurat object, clusters cells, and finds cell-level
+markers between two clusters;
+the remaining analyses are optional.
+
+## 1. Load one count matrix and its cell metadata
+
+The matrix has genes in rows and cells in columns. `metadata.tsv` has one row
+per cell and contains `cell_id` and `sample_id`.
+
+```{r}
+library(Seurat)
+library(qs2)
+library(readr)
+
+counts <- qs2::qs_read("input/counts.qs2")
+metadata <- readr::read_tsv("input/metadata.tsv", show_col_types = FALSE)
+
+stopifnot("cell_id" %in% names(metadata), "sample_id" %in% names(metadata))
+stopifnot(!anyDuplicated(colnames(counts)), !anyDuplicated(metadata$cell_id))
+stopifnot(setequal(colnames(counts), metadata$cell_id))
+
+rownames(metadata) <- metadata$cell_id
+metadata$cell_id <- NULL
+metadata <- metadata[colnames(counts), , drop = FALSE]
+
+object <- Seurat::CreateSeuratObject(
+  counts = counts,
+  meta.data = metadata,
+  min.cells = 3,
+  min.features = 200
+)
+object[["percent.mt"]] <- Seurat::PercentageFeatureSet(object, pattern = "^MT-")
+print(object)
+```
+
+`min.cells` and `min.features` are object-construction filters. They are not
+final QC thresholds. Change the mitochondrial pattern for the organism and
+gene annotation.
+
+## 2. Inspect and apply cell QC
+
+These example cutoffs are starting values. Inspect each sample before choosing
+them; a pooled cutoff can hide sample-specific quality problems.
+
+```{r}
+min_features <- 200
+max_features <- Inf
+min_counts <- 500
+max_counts <- Inf
+max_percent_mt <- 20
+
+metadata <- object[[]]
+metadata$qc_pass <- with(
+  metadata,
+  !is.na(nFeature_RNA) &
+    !is.na(nCount_RNA) &
+    !is.na(percent.mt) &
+    nFeature_RNA >= min_features &
+    nFeature_RNA <= max_features &
+    nCount_RNA >= min_counts &
+    nCount_RNA <= max_counts &
+    percent.mt <= max_percent_mt
+)
+
+print(table(metadata$sample_id, metadata$qc_pass, useNA = "ifany"))
+VlnPlot(object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+        group.by = "sample_id", ncol = 3, pt.size = 0)
+object <- subset(object, cells = rownames(metadata)[metadata$qc_pass])
+```
+
+## 3. Call doublets by capture library (optional)
+
+Enable this cell after confirming that `sample_id` identifies independent
+capture libraries. Review calls by library before removing cells.
+
+```{r}
+#| eval: false
+
+library(SingleCellExperiment)
+library(scDblFinder)
+
+sce <- Seurat::as.SingleCellExperiment(object, assay = "RNA")
+sce <- scDblFinder::scDblFinder(sce, samples = sce$sample_id)
+object$doublet_class <- SummarizedExperiment::colData(sce)$scDblFinder.class
+object$doublet_score <- SummarizedExperiment::colData(sce)$scDblFinder.score
+table(object$doublet_class, object$sample_id, useNA = "ifany")
+
+# Filter only after reviewing per-library calls:
+# object <- subset(object, subset = doublet_class == "singlet")
+```
+
+## 4. Normalize, reduce dimensions, and cluster
+
+This guide uses log normalization as the default route. SCTransform is a
+separate choice; do not run both normalization routes in sequence.
+
+```{r}
+object <- Seurat::NormalizeData(object, normalization.method = "LogNormalize",
+                                scale.factor = 10000)
+object <- Seurat::FindVariableFeatures(object, selection.method = "vst",
+                                       nfeatures = 3000)
+object <- Seurat::ScaleData(object, features = Seurat::VariableFeatures(object))
+object <- Seurat::RunPCA(object, features = Seurat::VariableFeatures(object),
+                         npcs = 30)
+object <- Seurat::FindNeighbors(object, reduction = "pca", dims = 1:30)
+object <- Seurat::FindClusters(object, resolution = 0.5, random.seed = 1234)
+object <- Seurat::RunUMAP(object, reduction = "pca", dims = 1:30, seed.use = 1234)
+DimPlot(object, group.by = "seurat_clusters", label = TRUE)
+```
+
+To use SCTransform instead, enable this cell and skip the log-normalization cell above:
+
+```{r}
+#| eval: false
+
+object <- Seurat::SCTransform(object, assay = "RNA", vst.flavor = "v2")
+object <- Seurat::RunPCA(object, assay = "SCT", npcs = 30)
+```
+
+Harmony is optional batch correction. Add it only when the study design and
+diagnostics support integration, then use the `harmony` reduction for
+neighbors, clustering, and UMAP.
+
+```{r}
+#| eval: false
+
+object <- harmony::RunHarmony(object, group.by.vars = "sample_id",
+                              reduction = "pca", dims.use = 1:30)
+object <- Seurat::FindNeighbors(object, reduction = "harmony", dims = 1:30)
+object <- Seurat::FindClusters(object, resolution = 0.5, random.seed = 1234)
+object <- Seurat::RunUMAP(object, reduction = "harmony", dims = 1:30,
+                          reduction.name = "umap_harmony", seed.use = 1234)
+```
+
+## 5. Compare two cell groups
+
+This is a cell-level marker comparison. When donors or patients are the
+replicates, use a sample-aware or pseudobulk model for inferential claims.
+
+```{r}
+Seurat::Idents(object) <- "seurat_clusters"
+markers <- Seurat::FindMarkers(object, ident.1 = "0", ident.2 = "1",
+                               assay = "RNA", logfc.threshold = 0.25)
+head(markers[order(markers$p_val_adj), ], 20)
+```
+
+## 6. Score one directional gene signature (optional)
+
+The TSV has `gene` and `direction` columns; direction is `UP` or `DOWN`.
+
+```{r}
+#| eval: false
+
+library(UCell)
+signature <- readr::read_tsv("input/signature.tsv", show_col_types = FALSE)
+genes_up <- intersect(signature$gene[signature$direction == "UP"],
+                      rownames(object[["RNA"]]))
+genes_down <- intersect(signature$gene[signature$direction == "DOWN"],
+                        rownames(object[["RNA"]]))
+stopifnot(length(genes_up) > 0, length(genes_down) > 0)
+
+object <- UCell::AddModuleScore_UCell(
+  object,
+  features = list(signature_UP = genes_up, signature_DOWN = genes_down),
+  name = NULL
+)
+object$signature_score <- object$signature_UP_UCell - object$signature_DOWN_UCell
+FeaturePlot(object, features = "signature_score")
+```
+
+## 7. Estimate cell potency from raw counts (optional)
+
+CytoTRACE2 uses raw RNA counts. Set `species` to match the data. Its score is a
+potency estimate, not a lineage trace or a replacement for trajectory inference.
+
+```{r}
+#| eval: false
+
+library(CytoTRACE2)
+counts <- Seurat::GetAssayData(object, assay = "RNA", layer = "counts")
+cytotrace <- CytoTRACE2::cytotrace2(counts, is_seurat = FALSE,
+                                    species = "human", ncores = 1)
+object$cytotrace2_score <- cytotrace$CytoTRACE2_Score[colnames(object)]
+object$cytotrace2_potency <- cytotrace$CytoTRACE2_Potency[colnames(object)]
+FeaturePlot(object, features = "cytotrace2_score", reduction = "umap")
+```
+
+## 8. Infer pseudotime, then test expression along it (optional)
+
+Choose the starting cluster from the study design. Slingshot infers curves
+from the PCA coordinates and cluster labels. tradeSeq then tests count changes
+along the selected curve; neither step proves cell lineage or causal direction.
+
+```{r}
+#| eval: false
+
+library(SingleCellExperiment)
+library(slingshot)
+
+sce <- Seurat::as.SingleCellExperiment(object, assay = "RNA")
+reducedDim(sce, "PCA") <- Seurat::Embeddings(object, "pca")
+sce <- slingshot::slingshot(sce, clusterLabels = "seurat_clusters",
+                            reducedDim = "PCA", start.clus = "0")
+pseudotime <- slingshot::slingPseudotime(sce)[, 1]
+weights <- slingshot::slingCurveWeights(sce)[, 1]
+object$pseudotime_1 <- pseudotime[colnames(object)]
+object$lineage_weight_1 <- weights[colnames(object)]
+```
+
+```{r}
+#| eval: false
+
+library(tradeSeq)
+counts <- Seurat::GetAssayData(object, assay = "RNA", layer = "counts")
+fit <- tradeSeq::fitGAM(
+  counts = counts,
+  pseudotime = matrix(object$pseudotime_1, ncol = 1,
+                      dimnames = list(colnames(object), "lineage_1")),
+  cellWeights = matrix(object$lineage_weight_1, ncol = 1,
+                       dimnames = list(colnames(object), "lineage_1")),
+  nknots = 5,
+  verbose = FALSE
+)
+trajectory_results <- tradeSeq::associationTest(fit)
+head(trajectory_results[order(trajectory_results$pvalue), ], 20)
+```
+
+## 9. Infer co-expression modules in one population (optional)
+
+hdWGCNA is a network analysis, not a score for a supplied gene set. Choose
+the target population for the network; pooling distinct cell types can make
+modules reflect cell composition. See the [hdWGCNA tutorial](https://smorabit.github.io/hdWGCNA/articles/basic_tutorial.html).
+
+```{r}
+#| eval: false
+
+library(hdWGCNA)
+object <- hdWGCNA::SetupForWGCNA(object, features = Seurat::VariableFeatures(object),
+                                wgcna_name = "wgcna")
+object <- hdWGCNA::MetacellsByGroups(object, group.by = c("sample_id", "seurat_clusters"),
+                                     reduction = "pca", k = 25, max_shared = 10)
+object <- hdWGCNA::NormalizeMetacells(object)
+network_group <- "0"
+stopifnot(network_group %in% as.character(object$seurat_clusters))
+object <- hdWGCNA::SetDatExpr(object,
+                             group_name = network_group,
+                             group.by = "seurat_clusters", assay = "RNA",
+                             layer = "data")
+object <- hdWGCNA::TestSoftPowers(object, networkType = "signed hybrid")
+hdWGCNA::PlotSoftPowers(object)
+object <- hdWGCNA::ConstructNetwork(object, soft_power = NULL,
+                                    networkType = "signed hybrid",
+                                    randomSeed = 1234)
+object <- hdWGCNA::ModuleEigengenes(object, assay = "RNA")
+object <- hdWGCNA::ModuleConnectivity(object, group.by = "seurat_clusters",
+                                      group_name = network_group)
+```
+
+## 10. Save the object
+
+The object carries the retained cells and any optional results added above.
+
+```{r}
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(object, "output/seurat_analysis.qs2")
+```

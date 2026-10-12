@@ -1,36 +1,40 @@
-# Canonical template library
+# Analysis guidebook
 
-This is the active reusable analytical library. It contains compact
-source-backed workflows and concise API/tutorial reminders derived from real
-bioinformatics work. Project-specific analyses are preserved separately under
-[`../examples/`](../examples/README.md).
+The active library is seven Quarto guides. Each guide keeps one main analysis
+object and puts related steps in order. The original project notebooks under
+`../code_MAP/` are preserved unchanged; these guides are the reusable starting
+points.
 
-## Families
+## Guide map
 
-| Family | Folder | Contents |
+```mermaid
+flowchart LR
+  RNA1[RNA counts] --> RSC[Single-cell RNA in R<br/>Seurat]
+  RNA2[Processed AnnData] --> PSC[Single-cell RNA in Python<br/>scVelo and CellRank]
+  BULK[Bulk gene counts] --> BR[Bulk RNA<br/>edgeR and scoring]
+  PEAK[ATAC peaks and fragments] --> AT[scATAC<br/>Signac]
+  PAIR[Paired RNA and ATAC] --> MO[Multiome<br/>WNN and linkage]
+  VIEWS[Matched omics views] --> MF[MOFA2<br/>factors and weights]
+  SAMPLES[Sample expression and labels] --> BM[Biomarker model<br/>held-out evaluation]
+```
+
+| Guide | Main object | Analyses in one notebook |
 |---|---|---|
-| Single-cell RNA | [`single_cell/`](single_cell/README.md) | Seurat, QC, normalization, scoring, trajectories, dynamics, networks |
-| Bulk RNA-seq | [`bulk_rna/`](bulk_rna/README.md) | tximport/edgeR, QC, DE reminder, GSEA, singscore, GSVA |
-| scATAC-seq | [`scatac/`](scatac/README.md) | Signac construction, fragment-aware QC, LSI, motifs, chromVAR reminder |
-| Multiome | [`multiome/`](multiome/README.md) | Paired RNA/ATAC WNN, peak-gene linkage, label transfer |
-| Multi-omics / MOFA | [`multiomics/mofa/`](multiomics/mofa/README.md) | View preparation, MOFA2 fitting, diagnostics, interpretation |
-| Biomarker machine learning | [`machine_learning/biomarkers/`](machine_learning/biomarkers/README.md) | Bias-reduced sample-level classification and frozen reporting |
+| [Single-cell RNA in R](single_cell/guide_r.qmd) | `object` (Seurat) | QC, doublets, normalization, clustering, markers, scoring, trajectories, hdWGCNA |
+| [Single-cell RNA in Python](single_cell/guide_python.qmd) | `adata` (AnnData) | scVelo, CellRank, decoupler, scCellFie |
+| [Bulk RNA-seq](bulk_rna/guide.qmd) | `dge` (edgeR) | tximport, QC, differential expression, GSEA, singscore, GSVA |
+| [scATAC-seq](scatac/guide.qmd) | `object` (Signac) | fragment QC, LSI, peaks, motif enrichment, chromVAR |
+| [Multiome](multiome/guide.qmd) | `object` (Seurat) | paired QC, WNN, peak-gene links, label transfer |
+| [Multi-omics with MOFA2](multiomics/mofa/guide.qmd) | `mofa` | matched views, fitting, factor diagnostics, weights |
+| [Sample-level biomarkers](machine_learning/biomarkers/guide.qmd) | `model` | training-only preprocessing, bias-reduced classification, held-out reporting |
 
-## Legend
+## Use
 
-- `SOURCE-BACKED WORKFLOW`: substantial implementation was available in the
-  repository sources.
-- `API / TUTORIAL REMINDER`: minimal current API reminder where no complete
-  source workflow was available.
-- `validated`, `draft`, `blocked`: strict notebook validation status. Most
-  templates are intentionally `draft` until representative execution.
+Run the code cells from top to bottom after changing the input paths and the
+scientific choices for the study. Optional cells are marked in the guide.
+The guides are drafts and have not been rendered or run on representative data.
+Check the current package documentation, study design, and assumptions before
+using results.
 
-## Persistence
-
-R analytical objects use `.qs2` through visible `qs2` calls, Python AnnData
-uses `.h5ad`, and tabular outputs use `.tsv`. MOFA2 trained models use native
-`.hdf5` as the documented model-format exception.
-
-Use a template by reading its input/output contract, setting only the exposed
-scientific decisions, and checking the current official package documentation
-before adapting version-sensitive code.
+R objects use `.qs2`; AnnData objects use `.h5ad`; tables use TSV. MOFA2 models
+use their native HDF5 format.

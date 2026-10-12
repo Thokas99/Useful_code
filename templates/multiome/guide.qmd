@@ -1,0 +1,191 @@
+---
+title: "Paired RNA and ATAC analysis with Seurat and Signac"
+format:
+  html:
+    toc: true
+    code-fold: false
+execute:
+  warning: false
+  message: false
+---
+
+> Status: draft. Match barcodes, genome build, assay inputs, and reference labels to the study.
+
+The cells align RNA counts, ATAC counts, and metadata before building a paired
+Seurat object. They then run QC, WNN, and peak-to-gene linkage. WNN builds
+multimodal neighborhoods; it does not correct batch effects.
+
+## 1. Match RNA, ATAC, and metadata cells
+
+The two count matrices have features in rows and cells in columns. The metadata
+table has `cell_id` and `sample_id`.
+
+```{r}
+library(Seurat)
+library(Signac)
+library(qs2)
+library(readr)
+
+rna_counts <- qs2::qs_read("input/rna_counts.qs2")
+atac_counts <- qs2::qs_read("input/atac_peak_counts.qs2")
+metadata <- readr::read_tsv("input/cell_metadata.tsv", show_col_types = FALSE)
+annotation <- qs2::qs_read("input/gene_annotation.qs2")
+fragments_path <- "input/fragments.tsv.gz"
+stopifnot(all(c("cell_id", "sample_id") %in% names(metadata)))
+stopifnot(!anyNA(metadata$cell_id), !anyDuplicated(metadata$cell_id))
+stopifnot(file.exists(fragments_path), file.exists(paste0(fragments_path, ".tbi")))
+stopifnot(!anyDuplicated(colnames(rna_counts)), !anyDuplicated(colnames(atac_counts)))
+
+all_cells <- unique(c(colnames(rna_counts), colnames(atac_counts), metadata$cell_id))
+cell_alignment <- data.frame(
+  cell_id = all_cells,
+  in_rna = all_cells %in% colnames(rna_counts),
+  in_atac = all_cells %in% colnames(atac_counts),
+  in_metadata = all_cells %in% metadata$cell_id
+)
+cells <- intersect(intersect(colnames(rna_counts), colnames(atac_counts)), metadata$cell_id)
+stopifnot(length(cells) > 0)
+rna_counts <- rna_counts[, cells, drop = FALSE]
+atac_counts <- atac_counts[, cells, drop = FALSE]
+metadata <- metadata[match(cells, metadata$cell_id), , drop = FALSE]
+rownames(metadata) <- metadata$cell_id
+
+fragment_object <- Signac::CreateFragmentObject(path = fragments_path,
+                                                 cells = cells,
+                                                 validate.fragments = TRUE)
+chromatin_assay <- Signac::CreateChromatinAssay(
+  counts = atac_counts, sep = c(":", "-"), genome = "hg38",
+  annotation = annotation, fragments = fragment_object,
+  min.cells = 1, min.features = 0
+)
+object <- Seurat::CreateSeuratObject(counts = rna_counts, assay = "RNA",
+                                     meta.data = metadata, min.features = 0)
+object[["ATAC"]] <- chromatin_assay
+stopifnot(identical(colnames(object[["RNA"]]), colnames(object[["ATAC"]])))
+object[["percent.mt"]] <- Seurat::PercentageFeatureSet(object, assay = "RNA",
+                                                       pattern = "^MT-")
+object <- Signac::NucleosomeSignal(object, assay = "ATAC")
+object <- Signac::TSSEnrichment(object, assay = "ATAC", fast = TRUE)
+qc <- object[[]]
+object$qc_pass <- with(qc,
+  !is.na(nFeature_RNA) & !is.na(nCount_RNA) &
+    is.finite(percent.mt) & is.finite(nCount_ATAC) &
+    is.finite(nucleosome_signal) & is.finite(TSS.enrichment) &
+    nFeature_RNA >= 200 & nCount_RNA >= 500 & percent.mt <= 20 &
+    nCount_ATAC >= 1000 & nucleosome_signal <= 1.5 & TSS.enrichment >= 6
+)
+print(table(object$sample_id, object$qc_pass, useNA = "ifany"))
+VlnPlot(object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+        group.by = "sample_id", ncol = 3, pt.size = 0)
+VlnPlot(object, features = c("nCount_ATAC", "nucleosome_signal", "TSS.enrichment"),
+        group.by = "sample_id", ncol = 3, pt.size = 0)
+object <- subset(object, subset = qc_pass)
+```
+
+Use a matching genome build for peaks, fragments, annotation, and any later
+sequence resources.
+
+## 2. Build RNA and ATAC representations and WNN clusters
+
+```{r}
+object <- Seurat::NormalizeData(object, assay = "RNA")
+object <- Seurat::FindVariableFeatures(object, assay = "RNA", nfeatures = 2000)
+object <- Seurat::ScaleData(object, assay = "RNA",
+                            features = Seurat::VariableFeatures(object, assay = "RNA"))
+object <- Seurat::RunPCA(object, assay = "RNA", npcs = 30,
+                         reduction.name = "pca_rna")
+
+object <- Signac::RunTFIDF(object, assay = "ATAC")
+object <- Signac::FindTopFeatures(object, assay = "ATAC", min.cutoff = "q0")
+object <- Signac::RunSVD(object, assay = "ATAC", n = 50,
+                         reduction.name = "lsi_atac")
+Signac::DepthCor(object, reduction = "lsi_atac")
+
+object <- Seurat::FindMultiModalNeighbors(
+  object,
+  reduction.list = list("pca_rna", "lsi_atac"),
+  dims.list = list(1:30, 2:30),
+  k.nn = 20,
+  knn.graph.name = "wknn",
+  snn.graph.name = "wsnn",
+  weighted.nn.name = "weighted.nn"
+)
+object <- Seurat::RunUMAP(object, nn.name = "weighted.nn",
+                          reduction.name = "wnn.umap", seed.use = 1)
+object <- Seurat::FindClusters(object, graph.name = "wsnn",
+                               resolution = 0.5, random.seed = 1)
+DimPlot(object, reduction = "wnn.umap", group.by = "seurat_clusters", label = TRUE)
+```
+
+Inspect the ATAC depth correlation before choosing LSI dimensions. WNN does not
+remove technical differences between samples.
+
+## 3. Estimate peak-to-gene links
+
+The coordinate object is a `GRanges` with the same genome build as the peak
+assay. Links are statistical associations, not proof of regulation.
+
+```{r}
+gene_coordinates <- qs2::qs_read("input/gene_coordinates.qs2")
+object <- Signac::LinkPeaks(
+  object,
+  peak.assay = "ATAC",
+  expression.assay = "RNA",
+  expression.slot = "data",
+  peak.slot = "counts",
+  gene.coords = gene_coordinates,
+  distance = 500000,
+  min.cells = 10
+)
+links <- Signac::Links(object[["ATAC"]])
+```
+
+## 4. Transfer labels from an RNA reference (optional)
+
+GeneActivity is derived from accessibility; it is not measured RNA. Enable
+this cell only with a compatible labeled RNA reference. Seurat uses CCA to
+find shared structure across RNA and gene activity, then can use ATAC LSI to
+weight predictions ([Seurat workflow](https://satijalab.org/seurat/articles/seurat5_atacseq_integration_vignette)).
+
+```{r}
+#| eval: false
+
+reference <- qs2::qs_read("input/rna_reference.qs2")
+reference_label <- "cell_type"
+stopifnot(reference_label %in% names(reference[[]]))
+reference <- Seurat::NormalizeData(reference, assay = "RNA")
+reference <- Seurat::FindVariableFeatures(reference, assay = "RNA", nfeatures = 2000)
+transfer_features <- Seurat::VariableFeatures(reference, assay = "RNA")
+reference <- Seurat::ScaleData(reference, assay = "RNA", features = transfer_features)
+gene_activity <- Signac::GeneActivity(object, assay = "ATAC",
+                                      features = transfer_features)
+object[["ACTIVITY"]] <- SeuratObject::CreateAssay5Object(counts = gene_activity)
+object <- Seurat::NormalizeData(object, assay = "ACTIVITY")
+object <- Seurat::ScaleData(object, assay = "ACTIVITY",
+                            features = rownames(object[["ACTIVITY"]]))
+anchors <- Seurat::FindTransferAnchors(
+  reference = reference, query = object,
+  reference.assay = "RNA", query.assay = "ACTIVITY",
+  features = intersect(transfer_features, rownames(object[["ACTIVITY"]])),
+  reduction = "cca", dims = 1:30
+)
+predictions <- Seurat::TransferData(
+  anchorset = anchors,
+  refdata = setNames(reference[[reference_label, drop = TRUE]], colnames(reference)),
+  weight.reduction = object[["lsi_atac"]],
+  dims = 2:30
+)
+object <- Seurat::AddMetaData(object, metadata = predictions)
+```
+
+Review prediction scores and reference compatibility; there is no universal
+confidence cutoff.
+
+## 5. Save the object and links
+
+```{r}
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(object, "output/multiome_analysis.qs2")
+readr::write_tsv(as.data.frame(links), "output/peak_gene_links.tsv")
+readr::write_tsv(cell_alignment, "output/multiome_cell_alignment.tsv")
+```

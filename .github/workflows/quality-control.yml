@@ -32,10 +32,8 @@ jobs:
         with:
           r-version: "release"
 
-      - name: Check Python, paths, files, links, and registry
-        run: |
-          python scripts/check_repository.py
-          python scripts/build_method_registry.py --check
+      - name: Check Python, paths, files, and links
+        run: python scripts/check_repository.py
 
       - name: Check YAML and Quarto front matter
         run: ruby scripts/check_quarto_yaml.rb

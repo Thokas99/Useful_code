@@ -1,0 +1,190 @@
+---
+title: "scATAC-seq with Signac"
+format:
+  html:
+    toc: true
+    code-fold: false
+execute:
+  warning: false
+  message: false
+---
+
+> Status: draft. Match the genome build across peaks, fragments, annotations, and sequence resources.
+
+Input: a peak-by-cell count matrix, cell metadata, fragment file, and gene
+annotation. The cells run fragment-aware QC, LSI, peak testing, and motif
+enrichment; chromVAR is optional.
+
+## 1. Create the Signac object
+
+The count matrix has peaks in rows and cells in columns. Metadata has one row
+per cell and contains `cell_id` and `sample_id`.
+
+```{r}
+library(Seurat)
+library(Signac)
+library(qs2)
+library(readr)
+
+counts <- qs2::qs_read("input/peak_counts.qs2")
+metadata <- readr::read_tsv("input/cell_metadata.tsv", show_col_types = FALSE)
+annotation <- qs2::qs_read("input/gene_annotation.qs2")
+fragments_path <- "input/fragments.tsv.gz"
+stopifnot("cell_id" %in% names(metadata), "sample_id" %in% names(metadata))
+stopifnot(!anyNA(metadata$cell_id), !anyDuplicated(metadata$cell_id))
+stopifnot(file.exists(fragments_path), file.exists(paste0(fragments_path, ".tbi")))
+stopifnot(!anyDuplicated(rownames(counts)), !anyDuplicated(colnames(counts)))
+
+cell_alignment <- data.frame(
+  cell_id = c(setdiff(colnames(counts), metadata$cell_id),
+              setdiff(metadata$cell_id, colnames(counts))),
+  source = c(rep("count_matrix_only", length(setdiff(colnames(counts), metadata$cell_id))),
+             rep("metadata_only", length(setdiff(metadata$cell_id, colnames(counts)))))
+)
+cells <- intersect(colnames(counts), metadata$cell_id)
+counts <- counts[, cells, drop = FALSE]
+metadata <- metadata[match(cells, metadata$cell_id), , drop = FALSE]
+rownames(metadata) <- metadata$cell_id
+
+fragment_object <- Signac::CreateFragmentObject(
+  path = fragments_path, cells = cells, validate.fragments = TRUE
+)
+chromatin_assay <- Signac::CreateChromatinAssay(
+  counts = counts, sep = c(":", "-"), genome = "hg38",
+  annotation = annotation, fragments = fragment_object,
+  min.cells = 1, min.features = 1
+)
+object <- Seurat::CreateSeuratObject(counts = chromatin_assay,
+                                     assay = "ATAC", meta.data = metadata)
+DefaultAssay(object) <- "ATAC"
+print(object)
+```
+
+Change `hg38` and the peak separator to match the input. Fragment files must
+be indexed and contain the retained cell barcodes.
+
+## 2. Add fragment-aware QC and filter
+
+`metrics.tsv` has `cell_id`, `passed_filters`, `peak_region_fragments`, and
+`blacklist_region_fragments`. These example thresholds are not universal.
+
+```{r}
+metrics <- readr::read_tsv("input/singlecell_metrics.tsv", show_col_types = FALSE)
+stopifnot(!anyDuplicated(metrics$cell_id))
+metrics <- metrics[match(colnames(object), metrics$cell_id), , drop = FALSE]
+stopifnot(identical(metrics$cell_id, colnames(object)))
+metrics$pct_reads_in_peaks <- 100 * metrics$peak_region_fragments / metrics$passed_filters
+metrics$blacklist_ratio <- metrics$blacklist_region_fragments / metrics$peak_region_fragments
+rownames(metrics) <- metrics$cell_id
+object <- Seurat::AddMetaData(object, metrics[, setdiff(names(metrics), "cell_id"), drop = FALSE])
+object <- Signac::NucleosomeSignal(object)
+object <- Signac::TSSEnrichment(object, fast = TRUE)
+
+qc_metadata <- object[[]]
+object$qc_pass <- with(qc_metadata,
+  is.finite(nCount_ATAC) & is.finite(passed_filters) &
+    is.finite(pct_reads_in_peaks) & is.finite(blacklist_ratio) &
+    is.finite(nucleosome_signal) & is.finite(TSS.enrichment) &
+    nCount_ATAC >= 1000 & passed_filters >= 3000 &
+    pct_reads_in_peaks >= 25 & blacklist_ratio <= 0.05 &
+    nucleosome_signal <= 1.5 & TSS.enrichment >= 6
+)
+print(table(object$sample_id, object$qc_pass, useNA = "ifany"))
+VlnPlot(object, features = c("nCount_ATAC", "nFeature_ATAC",
+                             "nucleosome_signal", "TSS.enrichment"),
+        group.by = "sample_id", ncol = 2, pt.size = 0)
+object <- subset(object, subset = qc_pass)
+```
+
+Inspect missing values and distributions before filtering. Retain the
+per-sample counts so the filter cannot hide a library-specific failure.
+
+## 3. Run TF-IDF, LSI, clustering, and UMAP
+
+```{r}
+object <- Signac::RunTFIDF(object)
+object <- Signac::FindTopFeatures(object, min.cutoff = "q5")
+object <- Signac::RunSVD(object, n = 50)
+Signac::DepthCor(object, reduction = "lsi")
+
+# Inspect DepthCor before deciding whether to include LSI1.
+object <- Seurat::FindNeighbors(object, reduction = "lsi", dims = 2:30,
+                                graph.name = c("atac_nn", "atac_snn"))
+object <- Seurat::FindClusters(object, graph.name = "atac_snn",
+                               resolution = 0.5, random.seed = 1)
+object <- Seurat::RunUMAP(object, reduction = "lsi", dims = 2:30,
+                          reduction.name = "umap_atac", seed.use = 1)
+DimPlot(object, reduction = "umap_atac", group.by = "seurat_clusters", label = TRUE)
+```
+
+LSI is a representation of accessibility. It does not correct batch effects.
+
+## 4. Find differential peaks and motif enrichment
+
+The example compares two clusters. The background is all peaks in the assay;
+change it only when the study has a justified background universe.
+
+```{r}
+library(JASPAR2024)
+library(TFBSTools)
+library(RSQLite)
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+Seurat::Idents(object) <- "seurat_clusters"
+peak_results <- Seurat::FindMarkers(object, ident.1 = "0", ident.2 = "1",
+                                    assay = "ATAC", test.use = "LR",
+                                    latent.vars = "nCount_ATAC")
+foreground <- rownames(peak_results)[peak_results$p_val_adj < 0.05]
+background <- rownames(object[["ATAC"]])
+stopifnot(length(foreground) > 0)
+
+database <- JASPAR2024::JASPAR2024()
+connection <- RSQLite::dbConnect(RSQLite::SQLite(), JASPAR2024::db(database))
+motifs <- TFBSTools::getMatrixSet(connection, opts = list(
+  collection = "CORE", tax_group = "vertebrates", species = 9606,
+  all_versions = FALSE
+))
+RSQLite::dbDisconnect(connection)
+
+object <- Signac::AddMotifs(object, genome = BSgenome.Hsapiens.UCSC.hg38,
+                            pfm = motifs, assay = "ATAC")
+motif_results <- Signac::FindMotifs(object, features = foreground,
+                                    background = background, assay = "ATAC")
+head(motif_results[order(motif_results$p.adjust), ], 20)
+```
+
+Peak-level tests are exploratory when individual cells are treated as
+replicates. Use a sample-aware method for population-level claims.
+
+## 5. Estimate cell-level motif deviations with chromVAR (optional)
+
+Motif enrichment and chromVAR answer different questions. The first tests a
+peak set; chromVAR estimates bias-corrected deviations per cell.
+
+```{r}
+#| eval: false
+
+library(chromVAR)
+peak_counts <- Seurat::GetAssayData(object, assay = "ATAC", layer = "counts")
+motif_annotations <- Signac::GetMotifData(object, assay = "ATAC", slot = "data")
+deviations <- chromVAR::computeDeviations(
+  object = peak_counts,
+  annotations = t(motif_annotations)
+)
+motif_deviations <- chromVAR::deviationScores(deviations)
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(data.frame(motif = rownames(motif_deviations), motif_deviations),
+                 "output/chromvar_deviations.tsv")
+```
+
+## 6. Save the object and peak results
+
+```{r}
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(object, "output/scatac_analysis.qs2")
+readr::write_tsv(data.frame(peak = rownames(peak_results), peak_results),
+                 "output/differential_peaks.tsv")
+readr::write_tsv(data.frame(motif = rownames(motif_results), motif_results),
+                 "output/motif_enrichment.tsv")
+readr::write_tsv(cell_alignment, "output/cell_alignment.tsv")
+```

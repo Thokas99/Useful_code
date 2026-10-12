@@ -9,7 +9,12 @@ examples/    real project workflows and provenance
 miscellaneous/ reusable scientific-workflow resources that are not analytical method templates
 docs/        architecture and refactor documentation
 archive/     superseded scaffolds and historical material
+website/     searchable catalog and notebook downloads
 ```
+
+The active library contains seven Quarto guides across six analysis areas.
+The root README and [`templates/README.md`](../templates/README.md) describe
+the current guides; `website/` publishes their catalog and downloadable copies.
 
 ## Canonical conventions
 
@@ -32,5 +37,5 @@ biology, labels, paths, and study conclusions remain in `examples/` or
 scientific workflows but do not define analytical methods. A separate
 cheatsheet collection is not currently maintained.
 
-The structure is suitable for later documentation, but no website or Quarto
-website configuration is part of this repository state.
+The website is a Jekyll catalog. It indexes the guide sources and builds a ZIP
+for each method family; it does not run the bioinformatics analyses.

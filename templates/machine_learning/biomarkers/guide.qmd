@@ -1,0 +1,162 @@
+---
+title: "Sample-level biomarker classification"
+format:
+  html:
+    toc: true
+    code-fold: false
+execute:
+  warning: false
+  message: false
+---
+
+> Status: draft. This is exploratory research code, not a clinical prediction tool.
+
+Input: sample-level expression, outcomes, and a split assigned by patient.
+Candidate features and the probability threshold are set before evaluating the
+held-out samples.
+
+## 1. Load sample labels and expression
+
+The expression CSV has one row per feature and one column per sample. The split
+TSV has one row per sample and columns `sample_id`, `patient_id`, `outcome`,
+and `split`; `split` is `train` or `test`. Samples from one patient must stay
+in one split.
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(tidymodels)
+library(brglm2)
+library(ggplot2)
+library(qs2)
+
+expression <- readr::read_csv("input/feature_expression.csv", show_col_types = FALSE)
+splits <- readr::read_tsv("input/train_test_split.tsv", show_col_types = FALSE)
+stopifnot("feature_id" %in% names(expression))
+stopifnot(all(c("sample_id", "patient_id", "outcome", "split") %in% names(splits)))
+stopifnot(!anyDuplicated(expression$feature_id), !anyDuplicated(splits$sample_id))
+stopifnot(!anyNA(splits$patient_id), all(splits$split %in% c("train", "test")))
+train_patients <- unique(splits$patient_id[splits$split == "train"])
+test_patients <- unique(splits$patient_id[splits$split == "test"])
+stopifnot(length(intersect(train_patients, test_patients)) == 0)
+
+expression_matrix <- expression |>
+  tibble::column_to_rownames("feature_id") |>
+  as.matrix()
+stopifnot(is.numeric(expression_matrix), all(is.finite(expression_matrix)))
+model_data <- as.data.frame(t(expression_matrix)) |>
+  tibble::rownames_to_column("sample_id") |>
+  dplyr::inner_join(splits, by = "sample_id")
+stopifnot(nrow(model_data) == nrow(splits), !anyNA(model_data$outcome))
+```
+
+## 2. Declare the outcome and candidate features
+
+Edit the positive and negative labels and the feature names. This simple guide
+does not select features from the held-out data.
+
+```{r}
+positive_class <- "case"
+negative_class <- "control"
+predictors <- c("GENE_A", "GENE_B", "GENE_C")
+threshold <- 0.5
+
+stopifnot(all(c(positive_class, negative_class) %in% model_data$outcome))
+stopifnot(all(predictors %in% names(model_data)))
+stopifnot(all(stats::complete.cases(model_data[, predictors, drop = FALSE])))
+stopifnot(all(c("train", "test") %in% model_data$split))
+model_data$outcome <- factor(model_data$outcome,
+                             levels = c(positive_class, negative_class))
+train_data <- model_data |>
+  dplyr::filter(split == "train") |>
+  dplyr::select(outcome, dplyr::all_of(predictors))
+test_data <- model_data |>
+  dplyr::filter(split == "test") |>
+  dplyr::select(sample_id, outcome, dplyr::all_of(predictors))
+test_predictors <- dplyr::select(test_data, dplyr::all_of(predictors))
+stopifnot(nlevels(droplevels(train_data$outcome)) == 2)
+stopifnot(nlevels(droplevels(test_data$outcome)) == 2)
+```
+
+## 3. Fit the model using training data only
+
+The recipe estimates zero-variance filtering and scaling from the training
+split. Bias reduction can stabilize logistic fits under separation; it does
+not make a small cohort representative.
+
+```{r}
+recipe <- recipes::recipe(outcome ~ ., data = train_data) |>
+  recipes::step_zv(recipes::all_predictors()) |>
+  recipes::step_normalize(recipes::all_predictors())
+
+model_spec <- parsnip::logistic_reg() |>
+  parsnip::set_engine(
+    "glm",
+    family = stats::binomial(),
+    method = brglm2::brglm_fit,
+    type = "AS_mean"
+  ) |>
+  parsnip::set_mode("classification")
+
+model_workflow <- workflows::workflow() |>
+  workflows::add_recipe(recipe) |>
+  workflows::add_model(model_spec)
+model <- parsnip::fit(model_workflow, data = train_data)
+```
+
+## 4. Evaluate once on the held-out samples
+
+The probability threshold is fixed above before evaluating the test set. The
+metrics below are descriptive and may be unstable when the held-out set is
+small. If a patient contributes several test samples, each sample counts
+separately; use patient-level predictions or resampling for patient-level
+uncertainty.
+
+```{r}
+probability <- predict(model, new_data = test_predictors, type = "prob")[[
+  paste0(".pred_", positive_class)
+]]
+predicted_class <- factor(
+  ifelse(probability >= threshold, positive_class, negative_class),
+  levels = c(positive_class, negative_class)
+)
+predictions <- tibble::tibble(
+  sample_id = test_data$sample_id,
+  truth = test_data$outcome,
+  probability = probability,
+  predicted_class = predicted_class
+)
+
+roc_result <- yardstick::roc_auc(predictions, truth, probability,
+                                 event_level = "first")
+pr_result <- yardstick::pr_auc(predictions, truth, probability,
+                               event_level = "first")
+confusion <- yardstick::conf_mat(predictions, truth, predicted_class)
+print(roc_result)
+print(pr_result)
+print(confusion)
+
+ggplot2::ggplot(predictions, ggplot2::aes(x = truth, y = probability,
+                                         color = predicted_class)) +
+  ggplot2::geom_point(position = ggplot2::position_jitter(width = 0.1),
+                      size = 2) +
+  ggplot2::geom_hline(yintercept = threshold, linetype = "dashed") +
+  ggplot2::theme_bw() +
+  ggplot2::labs(x = "Observed class", y = "Predicted positive probability")
+```
+
+## 5. Save the fitted model and frozen predictions
+
+```{r}
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(model, "output/biomarker_model.qs2")
+readr::write_tsv(predictions, "output/biomarker_test_predictions.tsv")
+readr::write_tsv(roc_result, "output/biomarker_roc_auc.tsv")
+readr::write_tsv(pr_result, "output/biomarker_pr_auc.tsv")
+readr::write_tsv(as.data.frame(confusion$table), "output/biomarker_confusion.tsv")
+```
+
+This compact workflow omits cross-validation, threshold tuning, feature
+stability, and external validation. Those require a larger evaluation design;
+do not infer clinical performance from one split.

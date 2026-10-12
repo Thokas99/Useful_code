@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import csv
 import re
 import subprocess
 import sys
@@ -171,49 +170,6 @@ def check_site(site_root: Path) -> list[str]:
     return errors
 
 
-def load_registry(path: Path) -> tuple[list[dict[str, str]], list[str]]:
-    errors = []
-    if not path.is_file():
-        return [], [f"Missing method registry: {relative(path)}"]
-    with path.open(newline="") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
-    required = {"method", "category", "language", "main_packages", "input", "output", "status", "tags", "path"}
-    if set(rows[0]) != required if rows else True:
-        errors.append("Method registry has an unexpected header")
-    paths = [row.get("path", "") for row in rows]
-    if len(paths) != len(set(paths)):
-        errors.append("Method registry contains duplicate paths")
-    for item in paths:
-        if not item.startswith("templates/") or not (ROOT / item).is_file():
-            errors.append(f"Registry path is missing or outside templates/: {item}")
-    print(f"Method registry check: {len(rows)} rows")
-    return rows, errors
-
-
-def check_catalog_consistency(registry_rows: list[dict[str, str]]) -> list[str]:
-    command = [
-        "ruby",
-        "-ryaml",
-        "-rjson",
-        "-e",
-        'puts JSON.generate(YAML.load_file(ARGV.fetch(0)))',
-        "website/_data/methods.yml",
-    ]
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
-    if result.returncode:
-        return [f"Catalog YAML could not be read: {result.stderr.strip()}"]
-    import json
-
-    methods = json.loads(result.stdout)
-    catalog_paths = [notebook["path"] for family in methods.values() for notebook in family["notebooks"]]
-    registry_paths = [row["path"] for row in registry_rows]
-    errors = []
-    if catalog_paths != registry_paths:
-        errors.append("Method registry paths do not match website/_data/methods.yml")
-    print(f"Catalog consistency check: {len(catalog_paths)} catalog notebooks")
-    return errors
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--site", type=Path, help="also check links in a built Jekyll site")
@@ -225,9 +181,6 @@ def main() -> int:
     errors += check_quarto_fences(paths)
     errors += check_large_files(paths)
     errors += check_markdown_links(paths)
-    rows, registry_errors = load_registry(ROOT / "CODE_MAP" / "method_registry.tsv")
-    errors += registry_errors
-    errors += check_catalog_consistency(rows)
     if args.site:
         errors += check_site((ROOT / args.site).resolve())
     if errors:

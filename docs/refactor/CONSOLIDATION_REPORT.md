@@ -1,4 +1,8 @@
-# Final consolidation report
+# Earlier consolidation report: 37-template library
+
+> Historical snapshot. This report describes the earlier 37-template state.
+> The active library now has seven guides; see the root README and
+> [`templates/README.md`](../../templates/README.md).
 
 ## Before
 

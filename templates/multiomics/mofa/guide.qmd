@@ -1,0 +1,127 @@
+---
+title: "Multi-omics factor analysis with MOFA2"
+format:
+  html:
+    toc: true
+    code-fold: false
+execute:
+  warning: false
+  message: false
+---
+
+> Status: draft. Check preprocessing and likelihoods for each modality before fitting.
+
+Input: prepared feature-by-sample matrices with matched sample IDs. This
+example fits RNA and protein views with Gaussian likelihoods, then inspects
+variance, factors, and feature weights.
+
+## 1. Load and match two prepared views
+
+Prepare each modality on its own measurement scale before this step. Do not
+convert missing values to zero or apply RNA transformations to another assay.
+
+```{r}
+library(MOFA2)
+library(qs2)
+library(readr)
+
+rna <- qs2::qs_read("input/rna_view.qs2")
+protein <- qs2::qs_read("input/protein_view.qs2")
+stopifnot(is.matrix(rna), is.matrix(protein))
+stopifnot(!anyDuplicated(rownames(rna)), !anyDuplicated(rownames(protein)))
+stopifnot(!anyDuplicated(colnames(rna)), !anyDuplicated(colnames(protein)))
+stopifnot(all(is.na(rna) | is.finite(rna)), all(is.na(protein) | is.finite(protein)))
+
+samples <- intersect(colnames(rna), colnames(protein))
+stopifnot(length(samples) >= 2)
+views <- list(
+  rna = rna[, samples, drop = FALSE],
+  protein = protein[, samples, drop = FALSE]
+)
+stopifnot(identical(colnames(views$rna), colnames(views$protein)))
+```
+
+For another modality, add its matrix to `views` and match its sample order in
+the same visible way. MOFA2 can model missing values; this simple example uses
+the shared-sample set instead of hidden imputation.
+
+## 2. Configure and fit MOFA2
+
+MOFA is unsupervised. Do not use response labels to select features or tune
+the model. The number of factors and likelihoods are model choices.
+
+```{r}
+mofa <- MOFA2::create_mofa(views)
+data_options <- MOFA2::get_default_data_options(mofa)
+data_options$scale_views <- FALSE
+
+model_options <- MOFA2::get_default_model_options(mofa)
+model_options$num_factors <- 10
+model_options$likelihoods <- c(rna = "gaussian", protein = "gaussian")
+
+training_options <- MOFA2::get_default_training_options(mofa)
+training_options$seed <- 1234
+training_options$convergence_mode <- "slow"
+training_options$maxiter <- 1500
+
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+mofa <- MOFA2::prepare_mofa(mofa, data_options = data_options,
+                            model_options = model_options,
+                            training_options = training_options)
+mofa <- MOFA2::run_mofa(mofa, outfile = "output/mofa_model.hdf5",
+                        save_data = TRUE, use_basilisk = FALSE)
+```
+
+The trained model uses MOFA2's native HDF5 format. Check the current MOFA2
+backend instructions if the Python environment cannot be found.
+
+## 3. Check variance explained and factor scores
+
+```{r}
+variance <- MOFA2::get_variance_explained(mofa, as.data.frame = TRUE)
+print(variance$r2_total)
+print(variance$r2_per_factor)
+MOFA2::plot_variance_explained(mofa, plot_total = TRUE)
+
+factor_matrix <- MOFA2::get_factors(mofa, groups = "all", factors = "all")[[1]]
+factor_scores <- data.frame(sample_id = rownames(factor_matrix), factor_matrix)
+boxplot(as.data.frame(factor_matrix), las = 2, ylab = "Factor score")
+```
+
+Factor number and sign are not biological identities. A factor that explains
+large variance may be technical; review sample quality and processing effects.
+
+## 4. Inspect feature weights
+
+Weights characterize the fitted factors; they do not establish causal genes.
+
+```{r}
+weights <- MOFA2::get_weights(mofa, views = "all", factors = "all",
+                              scale = FALSE, as.data.frame = TRUE)
+head(weights[order(-abs(weights$value)), ], 20)
+```
+
+## 5. Test one metadata association (optional)
+
+```{r}
+#| eval: false
+
+metadata <- readr::read_tsv("input/sample_metadata.tsv", show_col_types = FALSE)
+metadata <- metadata[match(factor_scores$sample_id, metadata$sample_id), , drop = FALSE]
+stopifnot(identical(metadata$sample_id, factor_scores$sample_id))
+stats::cor.test(metadata$technical_measure, factor_matrix[, "Factor1"],
+                method = "spearman", exact = FALSE)
+```
+
+Replace `technical_measure` with one numeric QC or processing variable. Apply
+multiple-testing correction when assessing several associations.
+
+## 6. Save the model summaries
+
+```{r}
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(variance$r2_total, "output/mofa_variance_total.tsv")
+readr::write_tsv(variance$r2_per_factor, "output/mofa_variance_by_factor.tsv")
+readr::write_tsv(factor_scores, "output/mofa_factor_scores.tsv")
+readr::write_tsv(weights, "output/mofa_feature_weights.tsv")
+```

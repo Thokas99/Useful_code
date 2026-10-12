@@ -32,50 +32,40 @@ reuse the useful parts.
 
 Useful code keeps readable analytical workflows together with the parameters,
 diagnostics, and implementation details that make them useful when reopened.
-The website groups the notebooks by analysis area and links back to the files.
-The generated registry in `CODE_MAP/method_registry.tsv` makes the active
-notebook collection searchable by script.
+The website groups the end-to-end guides by analysis area and links back to
+their Quarto files.
 
 ## Browse the methods
 
-| Family | Scope | Notebooks | Link |
+| Family | Scope | Guides | Link |
 |---|---|---:|---|
-| Single-cell RNA | Seurat preprocessing, scoring, trajectories, dynamics, and networks | 16 | [Open family](https://thokas99.github.io/Useful_code/methods/single-cell/) |
-| Bulk RNA | tximport/edgeR, quality control, enrichment, and sample-level scoring | 6 | [Open family](https://thokas99.github.io/Useful_code/methods/bulk-rna/) |
-| scATAC | Signac object construction, quality control, LSI, and motif analysis | 5 | [Open family](https://thokas99.github.io/Useful_code/methods/scatac/) |
-| Multiome | Paired RNA/ATAC WNN, linkage, and label transfer | 4 | [Open family](https://thokas99.github.io/Useful_code/methods/multiome/) |
-| Multi-omics / MOFA | MOFA2 view preparation, fitting, diagnostics, and interpretation | 4 | [Open family](https://thokas99.github.io/Useful_code/methods/mofa/) |
-| Biomarker machine learning | Sample-level biomarker classification and frozen reporting | 2 | [Open family](https://thokas99.github.io/Useful_code/methods/biomarker-ml/) |
+| Single-cell RNA | One Seurat guide and one AnnData guide | 2 | [Open family](https://thokas99.github.io/Useful_code/methods/single-cell/) |
+| Bulk RNA | tximport/edgeR, differential expression, enrichment, and sample scoring | 1 | [Open family](https://thokas99.github.io/Useful_code/methods/bulk-rna/) |
+| scATAC | Signac QC, LSI, peak testing, motifs, and chromVAR | 1 | [Open family](https://thokas99.github.io/Useful_code/methods/scatac/) |
+| Multiome | Paired RNA/ATAC QC, WNN, linkage, and label transfer | 1 | [Open family](https://thokas99.github.io/Useful_code/methods/multiome/) |
+| Multi-omics / MOFA | View matching, fitting, diagnostics, and interpretation | 1 | [Open family](https://thokas99.github.io/Useful_code/methods/mofa/) |
+| Biomarker machine learning | Sample-level classification and held-out reporting | 1 | [Open family](https://thokas99.github.io/Useful_code/methods/biomarker-ml/) |
 
-The collection currently contains **37 notebooks**: **34 source-backed
-workflows** and **3 API / tutorial reminders**.
+The active library now contains **7 end-to-end guides**. The original project
+notebooks remain under `code_MAP/` unchanged.
 
 ## How to use these scripts safely
 
-Before reusing a notebook:
+Before reusing a guide:
 
-1. Read its Purpose, Inputs, Outputs, Parameters, and Status sections.
+1. Read its draft note, input requirements, and analysis assumptions.
 2. Check package and API behavior against current upstream documentation.
 3. Review thresholds, transformations, genome builds, factor levels, and
    positive/event classes.
 4. Adapt paths and other dataset-specific assumptions.
 5. Validate the outputs on your own data and study design.
 
-## Repository checks and registry
+## Repository checks
 
 GitHub Actions runs lightweight checks on pushes and pull requests: YAML and
 Quarto front matter, Markdown links, Python and R syntax, reusable-template
-paths, large files, registry consistency, and the website build. It does not
-run the bioinformatics analyses.
-
-Regenerate the notebook registry after changing the active catalog with:
-
-```bash
-python3 scripts/build_method_registry.py
-```
-
-Use `--check` in CI or before committing to confirm that the tracked TSV is
-current.
+paths, large files, catalog paths, and the website build. It does not run the
+bioinformatics analyses.
 
 ## Repository structure
 
@@ -83,23 +73,16 @@ current.
     templates/       reusable notebooks
     examples/        project-specific analyses and context
     miscellaneous/   reporting prompts and reusable documentation material
-    scripts/          repository maintenance and registry checks
+    scripts/          repository maintenance and structural checks
     CODE_MAP/         searchable repository metadata
     website/         Jekyll catalog website
     docs/            architecture and refactor documentation
     archive/         superseded historical material
 
-## Template classes and status
+## Guide status
 
-`SOURCE-BACKED WORKFLOW` means that a substantial implementation exists in the
-repository sources. `API / TUTORIAL REMINDER` means that the notebook is a
-concise reminder based on a package interface where no complete source workflow
-was found.
-
-Each notebook also states a validation status such as `draft`, `validated`, or
-`blocked`. A source-backed workflow is not automatically scientifically
-validated everywhere, and `draft` does not mean broken; the status describes
-what was established for the source project.
+The guides are `draft` until they have been run on representative data. The
+code is a starting point, not scientific validation for another study.
 
 ## Conventions
 

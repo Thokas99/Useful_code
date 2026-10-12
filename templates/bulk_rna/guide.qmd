@@ -1,0 +1,178 @@
+---
+title: "Bulk RNA-seq with edgeR"
+format:
+  html:
+    toc: true
+    code-fold: false
+execute:
+  warning: false
+  message: false
+---
+
+> Status: draft. The case/control labels and cutoffs below are examples; match the design to the study.
+
+Input: a gene-level tximport object and sample metadata with `control` and
+`case` groups. The main path fits an edgeR model; enrichment and sample scoring
+are optional.
+
+## 1. Import tximport counts and align the sample table
+
+```{r}
+library(edgeR)
+library(qs2)
+library(readr)
+
+txi <- qs2::qs_read("input/tximport_gene.qs2")
+metadata <- readr::read_tsv("input/sample_metadata.tsv", show_col_types = FALSE)
+stopifnot(all(c("sample_id", "group") %in% names(metadata)))
+stopifnot(!anyDuplicated(metadata$sample_id), !anyDuplicated(rownames(txi$counts)))
+stopifnot(setequal(colnames(txi$counts), metadata$sample_id))
+
+txi$counts <- txi$counts[, match(metadata$sample_id, colnames(txi$counts)), drop = FALSE]
+gene_ids <- sub("\\..*$", "", rownames(txi$counts))
+stopifnot(!anyDuplicated(gene_ids))
+rownames(txi$counts) <- gene_ids
+
+dge <- edgeR::DGEListFromTximport(txi)
+dge$samples$group <- factor(metadata$group, levels = c("control", "case"))
+stopifnot(!anyNA(dge$samples$group))
+stopifnot(all(c("control", "case") %in% dge$samples$group))
+stopifnot(identical(colnames(dge), metadata$sample_id))
+design <- stats::model.matrix(~ 0 + group, data = dge$samples)
+colnames(design) <- sub("^group", "", colnames(design))
+print(design)
+```
+
+If version cleanup makes duplicate IDs, stop and resolve the annotation
+upstream. Do not silently sum rows with different transcript-to-gene mappings.
+`DGEListFromTximport()` requires edgeR 4.10.0 or later and carries tximport
+length offsets into the edgeR object ([tximport vignette](https://bioconductor.org/packages/release/bioc/vignettes/tximport/inst/doc/tximport.html)).
+
+## 2. Filter, normalize, and inspect samples
+
+```{r}
+keep_gene <- edgeR::filterByExpr(dge, design = design)
+stopifnot(any(keep_gene))
+dge <- dge[keep_gene, , keep.lib.sizes = FALSE]
+dge <- edgeR::normLibSizes(dge, method = "TMMwsp")
+logcpm <- edgeR::cpm(dge, log = TRUE, prior.count = 1)
+
+qc <- data.frame(
+  sample_id = colnames(dge),
+  group = dge$samples$group,
+  library_size = dge$samples$lib.size,
+  norm_factor = dge$samples$norm.factors,
+  detected_genes = colSums(dge$counts > 0)
+)
+print(qc)
+boxplot(as.data.frame(logcpm), las = 2, ylab = "log2 CPM")
+sample_correlation <- stats::cor(logcpm, method = "spearman")
+heatmap(sample_correlation, symm = TRUE)
+```
+
+The filtered raw counts remain in `dge` for count-model inference. `logcpm` is
+for diagnostics and sample-level scores. A QC outlier is a reason to
+investigate the sample and library, not an automatic deletion rule.
+
+## 3. Test the declared case-versus-control contrast
+
+```{r}
+contrast <- limma::makeContrasts(case - control, levels = design)
+fit <- edgeR::glmQLFit(dge, design)
+test <- edgeR::glmQLFTest(fit, contrast = contrast)
+de_results <- edgeR::topTags(test, n = nrow(dge), sort.by = "PValue")$table
+de_results$gene_id <- rownames(de_results)
+de_results$reported <- de_results$FDR <= 0.05 & abs(de_results$logFC) >= 1
+head(de_results[order(de_results$FDR), ], 20)
+```
+
+The `reported` flag uses example cutoffs. Choose thresholds for the study
+before interpreting the results.
+
+The sample is the biological replicate. Add pairing, batch, or other
+covariates only when justified by the design and replication. Check contrast
+direction before interpreting `logFC`.
+
+## 4. Run ranked gene-set enrichment (optional)
+
+This code assumes `gene_id` contains Entrez IDs. Use a deliberate identifier
+mapping step when the source IDs differ; retain one ranking value per gene.
+
+```{r}
+#| eval: false
+
+ranked <- sign(de_results$logFC) * sqrt(de_results$F)
+names(ranked) <- de_results$gene_id
+ranked <- sort(ranked, decreasing = TRUE)
+
+go_results <- clusterProfiler::gseGO(
+  geneList = ranked,
+  OrgDb = org.Hs.eg.db::org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  minGSSize = 10,
+  maxGSSize = 500
+)
+kegg_results <- clusterProfiler::gseKEGG(
+  geneList = ranked,
+  organism = "hsa",
+  minGSSize = 10,
+  maxGSSize = 500
+)
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(as.data.frame(go_results), "output/gsea_go.tsv")
+readr::write_tsv(as.data.frame(kegg_results), "output/gsea_kegg.tsv")
+```
+
+Keep the full ranked list. Filtering to significant genes before GSEA changes
+the question and discards ranking information.
+
+## 5. Score one directional signature per sample (optional)
+
+The signature TSV has `gene_id` and `direction` columns. The expression input
+is the normalized `logcpm` matrix created above.
+
+```{r}
+#| eval: false
+
+signature <- readr::read_tsv("input/signature.tsv", show_col_types = FALSE)
+up_genes <- intersect(signature$gene_id[signature$direction == "UP"], rownames(logcpm))
+down_genes <- intersect(signature$gene_id[signature$direction == "DOWN"], rownames(logcpm))
+stopifnot(length(up_genes) > 0, length(down_genes) > 0)
+rank_data <- singscore::rankGenes(logcpm)
+scores <- singscore::simpleScore(rank_data, upSet = up_genes,
+                                 downSet = down_genes)
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(tibble::rownames_to_column(as.data.frame(scores), "sample_id"),
+                 "output/singscore.tsv")
+```
+
+## 6. Score gene sets per sample with GSVA (optional)
+
+The gene-set TSV has `set_id` and `gene_id` columns. This is sample-level
+activity from bulk expression, distinct from cell-level UCell scores.
+
+```{r}
+#| eval: false
+
+gene_set_table <- readr::read_tsv("input/gene_sets.tsv", show_col_types = FALSE)
+gene_sets <- split(gene_set_table$gene_id, gene_set_table$set_id)
+gsva_input <- GSVA::gsvaParam(exprData = logcpm, geneSets = gene_sets,
+                              kcdf = "Gaussian", minSize = 10, maxSize = 500)
+gsva_scores <- GSVA::gsva(gsva_input)
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(tibble::rownames_to_column(as.data.frame(gsva_scores), "gene_set"),
+                 "output/gsva_scores.tsv")
+```
+
+## 7. Save the main object and results
+
+```{r}
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+qs2::qs_save(dge, "output/dge_qc_normalized.qs2")
+readr::write_tsv(qc, "output/sample_qc.tsv")
+readr::write_tsv(de_results, "output/edgeR_results.tsv")
+```
+
+Keep package versions, the design matrix, contrast, ID mapping, and gene-set
+source with the analysis record.
