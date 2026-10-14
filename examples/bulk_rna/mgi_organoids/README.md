@@ -1,6 +1,5 @@
-# MGI organoid bulk-RNA examples
+# MGI organoid bulk RNA
 
-This group preserves the source notebooks for tximport/edgeR QC,
-ranked-enrichment, and Hallmark/singscore work. They retain project-specific
-inputs and comparisons; the reusable versions are under
-[`../../../templates/bulk_rna/`](../../../templates/bulk_rna/).
+These notebooks preserve project-specific tximport/edgeR QC, enrichment, and
+sample scoring. The reusable starting point is the
+[bulk RNA guide](../../../templates/bulk_rna/guide.qmd).

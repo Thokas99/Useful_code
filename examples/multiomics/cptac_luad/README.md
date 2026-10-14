@@ -1,5 +1,4 @@
 # CPTAC-LUAD scoring example
 
-This project notebook preserves the CPTAC-LUAD expression and pathway-scoring
-workflow as provenance for the bulk scoring templates. It is not a generic
-multi-omics or signature-scoring interface.
+This notebook preserves project-specific expression and pathway scoring.
+It is an example, not a general multi-omics workflow.

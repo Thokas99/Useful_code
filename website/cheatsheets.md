@@ -4,6 +4,4 @@ title: Cheatsheets
 nav_order: 4
 ---
 
-Compact bioinformatics reference sheets will be added here in the future.
-
-This section is currently under development.
+No cheatsheets are published yet. This page will list them when they are ready.

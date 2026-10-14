@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run lightweight structural checks for the repository."""
+"""Check repository structure and syntax without running analyses."""
 
 from __future__ import annotations
 

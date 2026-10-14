@@ -1,0 +1,193 @@
+---
+title: "Gene signature scoring in Python with pyUCell"
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: python3
+execute:
+  warning: false
+  message: false
+---
+
+> Status: draft. This vignette follows the official pyUCell tutorials; it has
+> not been run on representative data.
+
+Score supplied gene signatures in one AnnData object, inspect the scores, and
+save the object, tables, and figures. Install the required packages in your
+Python environment before opening the notebook:
+
+```bash
+pip install pyucell scanpy matplotlib
+```
+
+## 1. Load the expression object
+
+Use an `.h5ad` with unique cell and gene IDs, a raw `counts` layer, and a
+`cluster` column. Keep the full measured gene space rather than only highly
+variable genes. Gene IDs must match the signatures below; these examples use
+human gene symbols.
+
+```{python}
+#| label: load-expression
+
+from pathlib import Path
+from importlib.metadata import version
+
+import anndata as ad
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import pyucell as uc
+from scipy import sparse
+
+adata = ad.read_h5ad("input/processed_single_cell.h5ad")
+assert adata.n_obs > 0 and adata.n_vars > 0
+assert adata.obs_names.is_unique and adata.var_names.is_unique
+assert "counts" in adata.layers and "cluster" in adata.obs
+assert not adata.obs["cluster"].isna().any()
+counts = adata.layers["counts"]
+values = counts.data if sparse.issparse(counts) else np.asarray(counts)
+assert np.isfinite(values).all() and (values >= 0).all()
+print(adata)
+print("pyucell version:", version("pyucell"))
+
+output = Path("output/pyucell")
+output.mkdir(parents=True, exist_ok=True)
+```
+
+The explicit layer prevents scoring a scaled or integrated `adata.X` by
+accident. Per-cell normalization and `log1p` preserve within-cell ranks;
+scaling each gene across cells changes those ranks. If raw counts are in
+`adata.X`, preserve them as `adata.layers["counts"] = adata.X.copy()` before
+preprocessing.
+
+## 2. Define signatures and inspect gene coverage
+
+Replace these small marker examples with your biological signatures. A `+`
+suffix marks a positive gene and a `-` suffix marks a negative gene; genes
+without a suffix are positive. Each signature needs measured genes for every
+direction it includes.
+
+```{python}
+#| label: define-signatures
+
+signatures = {
+    "Tcell": ["CD3D", "CD3E", "CD2"],
+    "Bcell": ["MS4A1", "CD79A", "CD79B"],
+    "CD8T": ["CD8A+", "CD8B+", "CD4-"],
+}
+
+coverage = pd.DataFrame(
+    [(name, gene.rstrip("+-"), "negative" if gene.endswith("-") else "positive")
+     for name, genes in signatures.items() for gene in genes],
+    columns=["signature", "gene", "direction"],
+)
+coverage["present"] = coverage["gene"].isin(adata.var_names)
+print(coverage.groupby(["signature", "direction"])["present"].agg(["sum", "count"]))
+print(coverage.loc[~coverage["present"]])
+assert coverage.groupby(["signature", "direction"])["present"].any().all()
+coverage.to_csv(output / "signature_gene_coverage.tsv", sep="\t", index=False)
+```
+
+Missing genes change the interpretation of a signature. The scoring cell uses
+`missing_genes="impute"`, which assigns missing genes the lowest rank. The
+alternative `"skip"` removes them from the signature. Choose deliberately
+after inspecting coverage, especially for targeted gene panels.
+
+## 3. Score cells from the counts layer
+
+`max_rank` caps the ranked gene list. The example keeps the default 1500, capped
+at the measured gene count; inspect detected genes per cell before changing
+it. Keep the same gene space and scoring settings when comparing datasets.
+
+```{python}
+#| label: score-signatures
+
+detected_genes = np.asarray((counts > 0).sum(axis=1)).ravel()
+print(pd.Series(detected_genes).describe())
+max_rank = min(1500, adata.n_vars)
+assert max_rank > 1
+score_columns = [f"{name}_UCell" for name in signatures]
+assert not set(score_columns).intersection(adata.obs.columns), "Scores already exist"
+
+uc.compute_ucell_scores(
+    adata,
+    signatures=signatures,
+    layer="counts",
+    max_rank=max_rank,
+    missing_genes="impute",
+    w_neg=1.0,
+    chunk_size=500,
+    n_jobs=1,
+)
+scores = adata.obs[score_columns]
+assert np.isfinite(scores.to_numpy()).all()
+assert ((scores >= 0) & (scores <= 1)).all().all()
+print(scores.describe())
+```
+
+Scores are added to `adata.obs`. For signed signatures, pyUCell subtracts the
+weighted negative score from the positive score and clips negative results to
+zero. These scores describe signature enrichment; they are not cell-type
+probabilities or evidence of pathway flux.
+
+## 4. Plot scores by cluster and on an existing UMAP
+
+Use the embedding already associated with the processed object. The UMAP
+cell is optional when `adata.obsm["X_umap"]` is absent.
+
+```{python}
+#| label: plot-signature-scores
+
+sc.pl.violin(adata, keys=score_columns, groupby="cluster", rotation=90, show=False)
+plt.gcf().savefig(output / "ucell_by_cluster.pdf", bbox_inches="tight")
+plt.show()
+
+if "X_umap" in adata.obsm:
+    figure = sc.pl.umap(
+        adata, color=score_columns, cmap="viridis", vmin=0, vmax=1,
+        return_fig=True, show=False,
+    )
+    figure.savefig(output / "ucell_umap.pdf", bbox_inches="tight")
+    plt.show()
+```
+
+Clusters summarize cells, while biological replication belongs to samples or
+donors. A condition comparison needs a design that accounts for those samples.
+Optional kNN smoothing is described in the upstream tutorial; retain original
+scores alongside smoothed scores because smoothing borrows information from
+the chosen neighbors.
+
+## 5. Save the scored object and settings
+
+```{python}
+#| label: save-ucell-results
+
+adata.uns["pyucell_vignette"] = {
+    "version": version("pyucell"),
+    "signatures": signatures,
+    "layer": "counts",
+    "max_rank": max_rank,
+    "missing_genes": "impute",
+    "w_neg": 1.0,
+    "ties_method": "average",
+    "chunk_size": 500,
+    "n_jobs": 1,
+}
+adata.obs[score_columns].rename_axis("cell_id").reset_index().to_csv(
+    output / "ucell_scores.tsv", sep="\t", index=False,
+)
+adata.write_h5ad(output / "single_cell_ucell.h5ad")
+```
+
+## Official documentation and references
+
+- [Basic pyUCell tutorial](https://pyucell.readthedocs.io/en/latest/notebooks/basic.html)
+- [Parameters: layers, signed signatures, ranks, and missing genes](https://pyucell.readthedocs.io/en/latest/notebooks/parameters.html)
+- [compute_ucell_scores API](https://pyucell.readthedocs.io/en/latest/generated/pyucell.compute_ucell_scores.html)
+- [Optional kNN smoothing](https://pyucell.readthedocs.io/en/latest/notebooks/knn.html)
+- [pyUCell source repository](https://github.com/carmonalab/pyucell)
+- Andreatta and Carmona (2026), [UCell and pyUCell](https://doi.org/10.1093/bioinformatics/btag055).
+- Andreatta and Carmona (2021), [UCell](https://doi.org/10.1016/j.csbj.2021.06.043).

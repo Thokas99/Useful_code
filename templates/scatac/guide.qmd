@@ -12,8 +12,8 @@ execute:
 > Status: draft. Match the genome build across peaks, fragments, annotations, and sequence resources.
 
 Input: a peak-by-cell count matrix, cell metadata, fragment file, and gene
-annotation. The cells run fragment-aware QC, LSI, peak testing, and motif
-enrichment; chromVAR is optional.
+annotation. The cells run fragment-aware QC, LSI, exploratory peak markers, and
+motif enrichment; sample-level peak testing and chromVAR are optional.
 
 ## 1. Create the Signac object
 
@@ -121,8 +121,12 @@ LSI is a representation of accessibility. It does not correct batch effects.
 
 ## 4. Find differential peaks and motif enrichment
 
-The example compares two clusters. The background is all peaks in the assay;
-change it only when the study has a justified background universe.
+This cell-level cluster comparison is exploratory. `nCount_ATAC` adjusts for
+depth, but cells from the same sample are not independent biological
+replicates. Use the sample-level pseudobulk section for condition-level claims.
+The motif results below inherit that exploratory foreground. The background is
+all peaks in the assay; change it only when the study has a justified
+background universe.
 
 ```{r}
 library(JASPAR2024)
@@ -153,10 +157,87 @@ motif_results <- Signac::FindMotifs(object, features = foreground,
 head(motif_results[order(motif_results$p.adjust), ], 20)
 ```
 
-Peak-level tests are exploratory when individual cells are treated as
-replicates. Use a sample-aware method for population-level claims.
+## 5. Test condition differences by sample (optional)
 
-## 5. Estimate cell-level motif deviations with chromVAR (optional)
+Use one row per biological sample in `sample_metadata.tsv`, with `sample_id`
+and `condition` plus any prespecified sample-level covariates. This sums peak
+counts within each sample and cell type before testing. The example expects
+`control` and `case`; edit the factor levels and contrast for other labels. Add
+only estimable covariates to the design; a full-rank design cannot resolve
+condition-batch confounding.
+
+```{r}
+#| eval: false
+
+library(edgeR)
+library(limma)
+
+sample_metadata <- readr::read_tsv("input/sample_metadata.tsv", show_col_types = FALSE)
+stopifnot(all(c("sample_id", "condition") %in% names(sample_metadata)))
+stopifnot(!anyDuplicated(sample_metadata$sample_id))
+stopifnot(!anyNA(sample_metadata$sample_id), !anyNA(sample_metadata$condition))
+stopifnot(all(unique(object$sample_id) %in% sample_metadata$sample_id))
+sample_covariates <- setdiff(names(sample_metadata), c("sample_id", "condition"))
+
+sample_metadata <- sample_metadata[match(object$sample_id, sample_metadata$sample_id), , drop = FALSE]
+rownames(sample_metadata) <- colnames(object)
+object <- Seurat::AddMetaData(
+  object,
+  sample_metadata[, setdiff(names(sample_metadata), "sample_id"), drop = FALSE]
+)
+object$cell_type <- as.character(object$seurat_clusters)
+print(table(object$sample_id, object$cell_type))
+
+pseudobulk <- Seurat::AggregateExpression(
+  object,
+  assays = "ATAC",
+  return.seurat = TRUE,
+  group.by = c("sample_id", "condition", "cell_type", sample_covariates)
+)
+cell_type_to_test <- "0"
+pseudobulk <- subset(pseudobulk, subset = cell_type == cell_type_to_test)
+pb_counts <- as.matrix(Seurat::GetAssayData(pseudobulk, assay = "ATAC", layer = "counts"))
+pb_metadata <- pseudobulk[[]][colnames(pb_counts), , drop = FALSE]
+stopifnot(all(as.character(pb_metadata$condition) %in% c("control", "case")))
+pb_metadata$condition <- factor(pb_metadata$condition, levels = c("control", "case"))
+print(table(pb_metadata$condition))
+stopifnot(!anyDuplicated(pb_metadata$sample_id))
+stopifnot(all(table(pb_metadata$condition) >= 2))
+
+model_covariates <- intersect("batch", sample_covariates)
+# For paired samples, add "donor_id" only when the design is paired:
+# model_covariates <- c(model_covariates, "donor_id")
+design <- stats::model.matrix(
+  stats::reformulate(c("condition", model_covariates), intercept = FALSE),
+  data = pb_metadata
+)
+stopifnot(qr(design)$rank == ncol(design))
+dge <- edgeR::DGEList(counts = pb_counts)
+keep <- edgeR::filterByExpr(dge, design = design)
+stopifnot(any(keep))
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dge <- edgeR::normLibSizes(dge)
+fit <- edgeR::glmQLFit(dge, design)
+contrast <- limma::makeContrasts(conditioncase - conditioncontrol, levels = design)
+test <- edgeR::glmQLFTest(fit, contrast = contrast)
+pseudobulk_peak_results <- edgeR::topTags(test, n = nrow(dge))$table
+pseudobulk_peak_results$peak <- rownames(pseudobulk_peak_results)
+pseudobulk_foreground <- rownames(pseudobulk_peak_results)[pseudobulk_peak_results$FDR < 0.05]
+dir.create("output", recursive = TRUE, showWarnings = FALSE)
+readr::write_tsv(pseudobulk_peak_results, "output/pseudobulk_differential_peaks.tsv")
+if (length(pseudobulk_foreground) > 0) {
+  population_motif_results <- Signac::FindMotifs(
+    object, features = pseudobulk_foreground, background = background, assay = "ATAC"
+  )
+  readr::write_tsv(population_motif_results, "output/pseudobulk_motif_enrichment.tsv")
+}
+```
+
+Two samples per condition is only a minimal code check, not evidence of
+adequate replication. The disabled block reruns motif enrichment with the
+pseudobulk peak foreground.
+
+## 6. Estimate cell-level motif deviations with chromVAR (optional)
 
 Motif enrichment and chromVAR answer different questions. The first tests a
 peak set; chromVAR estimates bias-corrected deviations per cell.
@@ -177,13 +258,13 @@ readr::write_tsv(data.frame(motif = rownames(motif_deviations), motif_deviations
                  "output/chromvar_deviations.tsv")
 ```
 
-## 6. Save the object and peak results
+## 7. Save the object and peak results
 
 ```{r}
 dir.create("output", recursive = TRUE, showWarnings = FALSE)
 qs2::qs_save(object, "output/scatac_analysis.qs2")
 readr::write_tsv(data.frame(peak = rownames(peak_results), peak_results),
-                 "output/differential_peaks.tsv")
+                 "output/cell_level_cluster_peak_markers.tsv")
 readr::write_tsv(data.frame(motif = rownames(motif_results), motif_results),
                  "output/motif_enrichment.tsv")
 readr::write_tsv(cell_alignment, "output/cell_alignment.tsv")

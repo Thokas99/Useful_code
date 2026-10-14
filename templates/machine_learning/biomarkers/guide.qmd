@@ -1,5 +1,5 @@
 ---
-title: "Sample-level biomarker classification"
+title: "Sample-level classification with patient-grouped evaluation"
 format:
   html:
     toc: true
@@ -11,16 +11,16 @@ execute:
 
 > Status: draft. This is exploratory research code, not a clinical prediction tool.
 
-Input: sample-level expression, outcomes, and a split assigned by patient.
-Candidate features and the probability threshold are set before evaluating the
-held-out samples.
+Input: sample-level expression, patient-level outcomes, and a patient-grouped
+train/test split. Choose features and the probability threshold using training
+data before evaluating held-out patients.
 
 ## 1. Load sample labels and expression
 
 The expression CSV has one row per feature and one column per sample. The split
 TSV has one row per sample and columns `sample_id`, `patient_id`, `outcome`,
-and `split`; `split` is `train` or `test`. Samples from one patient must stay
-in one split.
+and `split`; `split` is `train` or `test`. All samples from one patient must
+have the same outcome and stay in one split.
 
 ```{r}
 library(readr)
@@ -49,6 +49,11 @@ model_data <- as.data.frame(t(expression_matrix)) |>
   tibble::rownames_to_column("sample_id") |>
   dplyr::inner_join(splits, by = "sample_id")
 stopifnot(nrow(model_data) == nrow(splits), !anyNA(model_data$outcome))
+stopifnot(all(vapply(
+  split(as.character(model_data$outcome), model_data$patient_id),
+  function(x) length(unique(x)) == 1L,
+  logical(1)
+)))
 ```
 
 ## 2. Declare the outcome and candidate features
@@ -70,10 +75,10 @@ model_data$outcome <- factor(model_data$outcome,
                              levels = c(positive_class, negative_class))
 train_data <- model_data |>
   dplyr::filter(split == "train") |>
-  dplyr::select(outcome, dplyr::all_of(predictors))
+  dplyr::select(sample_id, patient_id, outcome, dplyr::all_of(predictors))
 test_data <- model_data |>
   dplyr::filter(split == "test") |>
-  dplyr::select(sample_id, outcome, dplyr::all_of(predictors))
+  dplyr::select(sample_id, patient_id, outcome, dplyr::all_of(predictors))
 test_predictors <- dplyr::select(test_data, dplyr::all_of(predictors))
 stopifnot(nlevels(droplevels(train_data$outcome)) == 2)
 stopifnot(nlevels(droplevels(test_data$outcome)) == 2)
@@ -85,8 +90,12 @@ The recipe estimates zero-variance filtering and scaling from the training
 split. Bias reduction can stabilize logistic fits under separation; it does
 not make a small cohort representative.
 
+> **Training unit:** The model fits one row per sample. Patients with more
+> samples therefore contribute more rows; grouping the split by patient
+> prevents patient overlap but does not make fitting patient-level.
+
 ```{r}
-recipe <- recipes::recipe(outcome ~ ., data = train_data) |>
+recipe <- recipes::recipe(outcome ~ . - sample_id - patient_id, data = train_data) |>
   recipes::step_zv(recipes::all_predictors()) |>
   recipes::step_normalize(recipes::all_predictors())
 
@@ -105,13 +114,12 @@ model_workflow <- workflows::workflow() |>
 model <- parsnip::fit(model_workflow, data = train_data)
 ```
 
-## 4. Evaluate once on the held-out samples
+## 4. Evaluate held-out patients with bootstrap uncertainty
 
-The probability threshold is fixed above before evaluating the test set. The
-metrics below are descriptive and may be unstable when the held-out set is
-small. If a patient contributes several test samples, each sample counts
-separately; use patient-level predictions or resampling for patient-level
-uncertainty.
+The probability threshold is fixed above before evaluating the test set. If a
+patient contributes several samples with the same outcome, this guide averages
+their predicted probabilities so each patient contributes once. The bootstrap
+resamples patients, not samples.
 
 ```{r}
 probability <- predict(model, new_data = test_predictors, type = "prob")[[
@@ -123,21 +131,69 @@ predicted_class <- factor(
 )
 predictions <- tibble::tibble(
   sample_id = test_data$sample_id,
+  patient_id = test_data$patient_id,
   truth = test_data$outcome,
   probability = probability,
   predicted_class = predicted_class
 )
 
-roc_result <- yardstick::roc_auc(predictions, truth, probability,
+patient_predictions <- predictions |>
+  dplyr::group_by(patient_id) |>
+  dplyr::summarise(
+    truth = dplyr::first(truth),
+    probability = mean(probability),
+    sample_count = dplyr::n(),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    predicted_class = factor(
+      ifelse(probability >= threshold, positive_class, negative_class),
+      levels = c(positive_class, negative_class)
+    )
+  )
+print(table(patient_predictions$truth))
+
+roc_result <- yardstick::roc_auc(patient_predictions, truth, probability,
                                  event_level = "first")
-pr_result <- yardstick::pr_auc(predictions, truth, probability,
+pr_result <- yardstick::pr_auc(patient_predictions, truth, probability,
                                event_level = "first")
-confusion <- yardstick::conf_mat(predictions, truth, predicted_class)
+brier_score <- mean((as.integer(patient_predictions$truth == positive_class) -
+                       patient_predictions$probability)^2)
+confusion <- yardstick::conf_mat(patient_predictions, truth, predicted_class)
 print(roc_result)
 print(pr_result)
+print(brier_score)
 print(confusion)
 
-ggplot2::ggplot(predictions, ggplot2::aes(x = truth, y = probability,
+set.seed(1234)
+patient_bootstrap <- rsample::bootstraps(patient_predictions, times = 1000, strata = truth)
+bootstrap_metrics <- purrr::map_dfr(patient_bootstrap$splits, function(split) {
+  resampled <- rsample::analysis(split)
+  tibble::tibble(
+    roc_auc = yardstick::roc_auc(resampled, truth, probability,
+                                 event_level = "first")$.estimate,
+    pr_auc = yardstick::pr_auc(resampled, truth, probability,
+                               event_level = "first")$.estimate,
+    brier_score = mean((as.integer(resampled$truth == positive_class) -
+                          resampled$probability)^2)
+  )
+})
+metric_intervals <- tibble::tibble(
+  metric = c("ROC AUC", "PR AUC", "Brier score"),
+  lower_95 = c(
+    stats::quantile(bootstrap_metrics$roc_auc, 0.025, na.rm = TRUE),
+    stats::quantile(bootstrap_metrics$pr_auc, 0.025, na.rm = TRUE),
+    stats::quantile(bootstrap_metrics$brier_score, 0.025, na.rm = TRUE)
+  ),
+  upper_95 = c(
+    stats::quantile(bootstrap_metrics$roc_auc, 0.975, na.rm = TRUE),
+    stats::quantile(bootstrap_metrics$pr_auc, 0.975, na.rm = TRUE),
+    stats::quantile(bootstrap_metrics$brier_score, 0.975, na.rm = TRUE)
+  )
+)
+print(metric_intervals)
+
+ggplot2::ggplot(patient_predictions, ggplot2::aes(x = truth, y = probability,
                                          color = predicted_class)) +
   ggplot2::geom_point(position = ggplot2::position_jitter(width = 0.1),
                       size = 2) +
@@ -146,17 +202,25 @@ ggplot2::ggplot(predictions, ggplot2::aes(x = truth, y = probability,
   ggplot2::labs(x = "Observed class", y = "Predicted positive probability")
 ```
 
-## 5. Save the fitted model and frozen predictions
+## 5. Save the model and held-out predictions
 
 ```{r}
 dir.create("output", recursive = TRUE, showWarnings = FALSE)
 qs2::qs_save(model, "output/biomarker_model.qs2")
 readr::write_tsv(predictions, "output/biomarker_test_predictions.tsv")
-readr::write_tsv(roc_result, "output/biomarker_roc_auc.tsv")
-readr::write_tsv(pr_result, "output/biomarker_pr_auc.tsv")
-readr::write_tsv(as.data.frame(confusion$table), "output/biomarker_confusion.tsv")
+readr::write_tsv(patient_predictions, "output/biomarker_patient_test_predictions.tsv")
+readr::write_tsv(roc_result, "output/biomarker_patient_roc_auc.tsv")
+readr::write_tsv(pr_result, "output/biomarker_patient_pr_auc.tsv")
+readr::write_tsv(tibble::tibble(brier_score = brier_score),
+                 "output/biomarker_patient_brier_score.tsv")
+readr::write_tsv(metric_intervals, "output/biomarker_patient_metric_intervals.tsv")
+readr::write_tsv(as.data.frame(confusion$table), "output/biomarker_patient_confusion.tsv")
 ```
 
-This compact workflow omits cross-validation, threshold tuning, feature
-stability, and external validation. Those require a larger evaluation design;
-do not infer clinical performance from one split.
+The patient-level bootstrap intervals are conditional on this fitted model and
+split; they do not measure training or feature-selection instability. The
+patient counts above matter: intervals from few patients per class are weak.
+Brier score summarizes probability accuracy but is not a complete calibration
+analysis. Cross-validation, threshold tuning, feature stability, and external
+validation remain outside this compact guide; do not infer clinical performance
+from one split.

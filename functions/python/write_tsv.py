@@ -1,15 +1,13 @@
-"""Small helper for writing dataframe-like objects as TSV files."""
+"""Write a pandas-style table as TSV without row names."""
 
 from pathlib import Path
 from typing import Any, Union
 
 
 def write_tsv(table: Any, path: Union[str, Path]) -> None:
-    """Write a dataframe-like object as a headered TSV.
+    """Write ``table`` to ``path`` with tab separators and no index.
 
-    The object must provide a pandas-compatible ``to_csv`` method. Parent
-    directories are created, but table contents and output names stay with the
-    caller.
+    ``table`` must provide ``to_csv``. Parent directories are created.
     """
 
     if not hasattr(table, "to_csv"):

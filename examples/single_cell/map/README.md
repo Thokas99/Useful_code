@@ -1,7 +1,9 @@
 # MAP project examples
 
-This directory preserves the coupled MAP RNA, ATAC, multiome-transfer,
-trajectory, velocity, network, and metabolic workflows that informed the
-canonical single-cell families. They remain project examples, not generalized
-templates. Their external `input/` and `output/` contracts are not committed
-here.
+These notebooks preserve project-specific RNA, ATAC, multiome, trajectory,
+velocity, network, and metabolic workflows. They informed the reusable guides
+but retain their original analysis context.
+
+External inputs and generated outputs are not included. Use the
+[reusable templates](../../../templates/), and check each notebook's inputs and
+design before adapting it.

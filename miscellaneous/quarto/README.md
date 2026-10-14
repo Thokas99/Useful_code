@@ -1,7 +1,4 @@
-# Quarto resources
+# Quarto reports
 
-This folder contains reusable Quarto and scientific-reporting resources. The
-templates provide presentation and reporting conventions for professional,
-self-contained HTML reports rather than analytical methodology.
-
-- [Scientific report template](scientific_report_template.md) — a detailed reference for Quarto scientific HTML reports.
+[Scientific report template](scientific_report_template.md) provides a
+reusable structure and formatting guide for HTML reports.

@@ -13,8 +13,20 @@ execute:
 > Status: draft. Check package versions, input layers, and state choices before use.
 
 Input: an `.h5ad` with unique cell and gene IDs, `spliced` and `unspliced`
-layers, a cluster label, and sample metadata. The cells estimate RNA velocity,
-transition-based fate probabilities, and network activity; scCellFie is optional.
+layers, a cluster label, and sample metadata.
+
+| Analysis | Depends on | Main output |
+|---|---|---|
+| RNA velocity | Spliced and unspliced counts | Velocity field and latent-time estimates |
+| CellRank fate inference | Velocity and connectivity kernels | Macrostate and fate probabilities |
+| Network activity | Expression and a matched gene network | Cell-level regulator scores |
+| Metabolic-task scoring | Expression, metadata, and package resources | Task-activity estimates |
+
+::: {.callout-warning}
+These are model-based estimates. Fate probabilities are not observed lineage
+outcomes; regulator scores are not direct binding measurements; metabolic-task
+scores are not measurements of flux.
+:::
 
 ## 1. Load and check the input
 
@@ -40,7 +52,11 @@ print(adata)
 The velocity layers must contain the kinetic counts for the same cells and
 genes as `adata`. An integrated expression matrix does not replace them.
 
-## 2. Estimate RNA velocity
+## RNA velocity and latent time
+
+This branch estimates transcriptional direction from spliced and unspliced
+counts. It requires kinetic layers from the same cells and genes; integrated
+expression values do not replace them.
 
 ```{python}
 scv.settings.set_figure_params(dpi=120, frameon=False)
@@ -58,14 +74,13 @@ scv.tl.velocity_confidence(adata)
 scv.pl.velocity_embedding_stream(adata, basis="umap", color="cluster")
 ```
 
-Inspect the kinetic fit and velocity confidence. Pseudotime and latent time
-are model-derived ordering measures.
+Inspect the kinetic fit and velocity confidence. Pseudotime and latent time are
+model-derived orderings, not elapsed time.
 
-## 3. Infer coarse states and fate probabilities
+## CellRank states and fate probabilities
 
-CellRank combines the scVelo transition information with a cell-connectivity
-kernel. These probabilities depend on the fitted model and state choices; they
-are not observed lineage outcomes.
+This branch combines velocity and cell-connectivity kernels. Results depend on
+the kernel blend and number of states; inspect sensitivity to plausible choices.
 
 ```{python}
 from cellrank.estimators import GPCCA
@@ -92,10 +107,11 @@ print(fate.describe())
 print(drivers.head())
 ```
 
-## 4. Infer pathway or regulator activity
+## Network activity with decoupler
 
-The network TSV has `source`, `target`, and `weight` columns. The network and
-the expression layer must use the same gene identifiers.
+This analysis is independent of RNA velocity. The network TSV needs `source`,
+`target`, and `weight` columns, and its gene identifiers must match the
+expression data.
 
 ```{python}
 import decoupler as dc
@@ -108,13 +124,14 @@ activity.index.name = "cell_id"
 print(activity.describe().T.head())
 ```
 
-ULM activity is inferred from a prior-knowledge network. It is not direct
-measurement of transcription-factor binding or pathway flux.
+ULM scores summarize expression patterns relative to a prior-knowledge
+network; they do not measure transcription-factor binding or pathway flux.
 
-## 5. Estimate metabolic-task activity (optional)
+## Metabolic-task scores with scCellFie (optional)
 
-scCellFie needs a Scanpy neighbor graph and the named metadata columns below.
-Enable the cell after checking the current package API and organism resource.
+This analysis is independent of velocity and network scoring. It needs a
+Scanpy neighbor graph and the metadata columns below. Check the current package
+API and organism resource before enabling the example.
 
 ```{python}
 #| eval: false
@@ -145,10 +162,10 @@ report = sccellfie.reports.generate_report_from_adata(
 )
 ```
 
-These are metabolic-task activity estimates, not direct measurements of
-metabolic flux.
+These scores estimate metabolic-task activity; they do not measure metabolic
+flux.
 
-## 6. Save the object and tables
+## Save the object and analysis tables
 
 ```{python}
 output = Path("output")

@@ -1,23 +1,20 @@
-# Shared functions
+# Shared helpers
 
-`functions/` contains small, standalone implementation primitives that are
-useful across more than one notebook. The analytical notebooks remain
-self-contained where sourcing a repository-relative file would make copying
-them harder.
+These small helpers support notebooks that benefit from a common operation.
+The analytical workflows remain readable and runnable on their own.
 
-R:
+| Language | Helper | Example |
+|---|---|---|
+| R | [`zscore()`](R/zscore.R) | `zscore(values)` |
+| Python | [`write_tsv()`](python/write_tsv.py) | `write_tsv(table, "output/table.tsv")` |
 
 ```r
 source("functions/R/zscore.R")
 zscore(values)
 ```
 
-Python:
-
 ```python
 from functions.python.write_tsv import write_tsv
 
 write_tsv(table, "output/table.tsv")
 ```
-
-These helpers do not replace the notebook workflows or package documentation.

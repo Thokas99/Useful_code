@@ -1,19 +1,24 @@
 single_cell:
   title: Single-cell RNA
   slug: single-cell
-  description: Complete single-cell analyses in R with Seurat or Python with AnnData.
-  representative: Seurat QC and downstream analysis; AnnData velocity and activity
+  description: Single-cell analysis with Seurat, AnnData, and pyUCell.
+  representative: Seurat QC and inference; AnnData velocity and activity; Python signature scoring
   notebooks:
     - title: Single-cell RNA in R
       path: templates/single_cell/guide_r.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
-      description: Carry one Seurat object through object creation, QC, normalization, clustering, signatures, markers, trajectories, and networks.
+      description: Carry one Seurat object through QC, clustering, MAST markers, sample-level pseudobulk, signatures, trajectories, and coexpression modules.
     - title: Single-cell RNA in Python
       path: templates/single_cell/guide_python.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
-      description: Carry one AnnData object through RNA velocity, CellRank fate inference, decoupler activity, and optional scCellFie scoring.
+      description: Estimate velocity and fate probabilities, then score network activity with AnnData; scCellFie is optional.
+    - title: Gene signature scoring in Python with pyUCell
+      path: templates/single_cell/guide_pyucell.qmd
+      template_class: API / TUTORIAL REMINDER
+      status: draft
+      description: Score supplied gene signatures from an explicit counts layer, inspect gene coverage, and save cell scores, plots, and AnnData.
 
 bulk_rna:
   title: Bulk RNA
@@ -73,4 +78,4 @@ biomarker_ml:
       path: templates/machine_learning/biomarkers/guide.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
-      description: Fit a bias-reduced logistic model with training-only preprocessing, then save held-out probabilities, metrics, and a confusion table.
+      description: Fit a sample-level classifier with patient-grouped splits, then report held-out metrics once per patient.

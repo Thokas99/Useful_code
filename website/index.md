@@ -7,8 +7,8 @@ has_toc: false
 
 <section class="hero-panel">
   <p class="hero-kicker">PERSONAL RESEARCH COOKBOOK</p>
-  <h2>Readable workflows for real analytical work.</h2>
-  <p>A personal collection of R, Python, and Quarto notebooks for common bioinformatics analyses. Browse by topic, then open a notebook on GitHub when you want the code.</p>
+  <h2>Readable workflows for bioinformatics.</h2>
+  <p>Browse R, Python, and Quarto guides by method. Open a notebook on GitHub to inspect its code and assumptions.</p>
   <div class="cta-row">
     <a class="btn btn-primary" href="{{ site.baseurl }}/methods/">Browse methods</a>
     <a class="btn" href="https://github.com/Thokas99/Useful_code">View repository</a>
@@ -26,9 +26,8 @@ has_toc: false
   <div class="stat"><strong class="stat-value">6</strong><span>method areas</span></div>
 </div>
 
-<p class="site-caution"><strong>Personal research scripts.</strong> These are not drop-in pipelines. Check the assumptions and validate them on your own data before reuse. <a href="{{ site.baseurl }}/about/">Read the full disclaimer.</a></p>
-
-<p class="search-note">Search also looks inside the notebook text.</p>
+<p class="site-caution"><strong>Research workflows.</strong> Check assumptions and validate outputs for your study. <a href="{{ site.baseurl }}/about/">Read the reuse guidance.</a></p>
+<p class="search-note">Search includes notebook text.</p>
 
 ## Browse the library
 
@@ -41,6 +40,7 @@ has_toc: false
   {% assign family = site.data.methods.biomarker_ml %}{% include family-card.html family=family %}
 </div>
 
-## Other resources
+## More resources
 
-Browse [Examples]({{ site.baseurl }}/examples/) and [Miscellaneous]({{ site.baseurl }}/miscellaneous/) for project notebooks and reporting material.
+Browse [project examples]({{ site.baseurl }}/examples/) and
+[reporting resources]({{ site.baseurl }}/miscellaneous/).

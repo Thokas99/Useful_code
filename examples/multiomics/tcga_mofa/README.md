@@ -1,5 +1,5 @@
-# TCGA/MOFA project examples
+# TCGA/MOFA examples
 
-These notebooks preserve the TCGA acquisition, scoring, and original MOFA
-workflow that informed the canonical MOFA family. The generalized four-stage
-workflow is under [`../../../templates/multiomics/mofa/`](../../../templates/multiomics/mofa/).
+These notebooks preserve TCGA data acquisition, scoring, and the original MOFA
+analysis. The reusable workflow is the
+[MOFA2 guide](../../../templates/multiomics/mofa/guide.qmd).

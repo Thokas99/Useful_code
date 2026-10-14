@@ -1,7 +1,5 @@
-# Documentation prompts
+# Documentation prompt
 
-Prompts in this folder are intended to be copied or passed to coding agents.
-They should preserve existing analysis and scientific logic rather than rewrite
-it unless explicitly instructed.
-
-- [Scientific Methods documentation prompt](scientific_methods_documentation_prompt.md) — a comprehensive prompt for documenting computational biology repositories in a Methods-style format.
+[Scientific Methods prompt](scientific_methods_documentation_prompt.md) helps
+document analysis code. It directs the writer to describe implemented methods
+and flag details the code does not establish.

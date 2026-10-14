@@ -1,21 +1,12 @@
 # Archive
 
-Archive content is retained intentionally and is not part of the active
-template library.
+This directory preserves superseded templates and historical files.
 
-Archived QMD files have been presentation-normalized to the repository's Quarto report conventions without changing their historical analytical logic.
+| Path | Contents |
+|---|---|
+| [Legacy templates](legacy_templates/README.md) | Previous reusable notebooks |
+| `raw_archives/` | Historical ZIP files retained without unpacking |
 
-- [`legacy_templates/`](legacy_templates/) contains superseded intermediate
-  template systems.
-- [`raw_archives/`](raw_archives/) contains historical ZIP archives preserved
-  without unpacking.
-
-Active reusable templates are under [`../templates/`](../templates/). No files
-were intentionally deleted during consolidation.
-
-## Raw archive manifest
-
-| File | Historical purpose | Active replacement |
-|---|---|---|
-| `raw_archives/Archive.zip` | Historical MAP notebook/archive export | Current canonical families and `examples/single_cell/map/` |
-| `raw_archives/Task for 2nd interview.zip` | Historical interview proteomics/PPI exercise | None; retained as archive |
+The active guides are under [`../templates/`](../templates/). Archived
+notebooks retain their historical analysis; use them as records, not current
+canonical workflows.

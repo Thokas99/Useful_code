@@ -6,8 +6,7 @@ has_children: true
 has_toc: false
 ---
 
-Browse the notebooks by analysis type. Each entry has a short description and
-links to view or download the QMD file.
+Choose a method area to view and download its Quarto guides.
 
 <div class="catalog-grid">
   {% assign family = site.data.methods.single_cell %}{% include family-card.html family=family %}

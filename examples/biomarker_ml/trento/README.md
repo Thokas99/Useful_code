@@ -1,6 +1,5 @@
 # TRENTO biomarker examples
 
-These notebooks are the original sample-level TRENTO biomarker modeling and
-reporting workflows used as provenance for the canonical biomarker templates.
-They retain project-specific inputs, labels, and reporting choices and are not
-the generalized interface.
+Project-specific notebooks preserve the TRENTO modeling and reporting workflow.
+For a reusable starting point, see the
+[biomarker guide](../../../templates/machine_learning/biomarkers/guide.qmd).
