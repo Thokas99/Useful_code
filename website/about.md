@@ -19,7 +19,8 @@ or open the [GitHub repository](https://github.com/Thokas99/Useful_code).
 |---|---|
 | `SOURCE-BACKED WORKFLOW` | A substantial implementation was available in the repository sources. |
 | `API / TUTORIAL REMINDER` | A concise workflow summary links to package documentation. |
-| `draft` | Representative-data execution has not been established. |
+| `Static checks` | CI checks document structure, paths, front matter, and code syntax; it does not run the analysis. |
+| `draft` | The guide has not been run on representative data. |
 
 A source-backed workflow can still need adaptation and validation.
 

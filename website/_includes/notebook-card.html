@@ -1,7 +1,9 @@
 {% assign repo_url = "https://github.com/Thokas99/Useful_code" %}
 {% assign source_url = repo_url | append: "/blob/main/" | append: include.notebook.path %}
 {% assign notebook_filename = include.notebook.path | split: "/" | last %}
+{% assign notebook_stem = notebook_filename | replace: ".qmd", "" %}
 {% capture download_path %}/downloads/notebooks/{{ include.family.slug }}/{{ notebook_filename }}{% endcapture %}
+{% capture preview_path %}/downloads/previews/{{ include.family.slug }}/{{ notebook_stem }}/{% endcapture %}
 {% assign template_label = include.notebook.template_class %}
 {% if template_label == "SOURCE-BACKED WORKFLOW" %}{% assign template_label = "Source-backed" %}{% endif %}
 {% if template_label == "API / TUTORIAL REMINDER" %}{% assign template_label = "API reminder" %}{% endif %}
@@ -13,10 +15,18 @@
   <p class="catalog-meta">
     <span class="catalog-badge">{{ template_label }}</span>
     <span class="catalog-badge">{{ status_label }}</span>
+    <span class="catalog-badge">{{ include.notebook.verification }}</span>
   </p>
   <p>{{ include.notebook.description }}</p>
+  <dl class="notebook-facts">
+    <div><dt>Input</dt><dd>{{ include.notebook.input }}</dd></div>
+    <div><dt>Analysis unit</dt><dd>{{ include.notebook.unit }}</dd></div>
+    <div><dt>Outputs</dt><dd>{{ include.notebook.outputs }}</dd></div>
+    <div><dt>Key limit</dt><dd>{{ include.notebook.caveat }}</dd></div>
+  </dl>
   <div class="catalog-actions">
-    <a class="btn btn-primary" href="{{ source_url }}" target="_blank" rel="noopener">View on GitHub</a>
+    <a class="btn btn-primary" href="{{ preview_path | relative_url }}">Preview code</a>
     <a class="btn" href="{{ download_path | relative_url }}" download="{{ notebook_filename }}">Download .qmd</a>
+    <a class="catalog-source-link" href="{{ source_url }}" target="_blank" rel="noopener">GitHub source</a>
   </div>
 </article>

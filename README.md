@@ -18,6 +18,9 @@ context.
 [Templates](templates/README.md) · [Examples](examples/README.md) ·
 [Other resources](miscellaneous/README.md)
 
+The catalog previews each Quarto guide on site and lists its inputs, analysis
+unit, outputs, key limit, and verification status.
+
 ## Methods
 
 | Area | Guides | Focus |

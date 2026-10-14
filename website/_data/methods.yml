@@ -8,17 +8,32 @@ single_cell:
       path: templates/single_cell/guide_r.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
+      verification: Static checks
       description: Carry one Seurat object through QC, clustering, MAST markers, sample-level pseudobulk, signatures, trajectories, and coexpression modules.
+      input: Gene-by-cell raw counts and per-cell metadata with cell and sample IDs.
+      unit: Cell for QC and cluster markers; sample for condition pseudobulk.
+      outputs: Seurat object, marker and pseudobulk tables, signatures, trajectories, and modules.
+      caveat: Cluster markers are not replicate-level condition tests; use pseudobulk for that inference.
     - title: Single-cell RNA in Python
       path: templates/single_cell/guide_python.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
+      verification: Static checks
       description: Estimate velocity and fate probabilities, then score network activity with AnnData; scCellFie is optional.
+      input: AnnData with spliced and unspliced layers, cluster labels, and sample IDs.
+      unit: Cell.
+      outputs: Velocity, latent time, fate probabilities, and network activity; optional metabolic tasks.
+      caveat: Fate results depend on the selected states, kernels, and transition weights.
     - title: Gene signature scoring in Python with pyUCell
       path: templates/single_cell/guide_pyucell.qmd
       template_class: API / TUTORIAL REMINDER
       status: draft
+      verification: Static checks
       description: Score supplied gene signatures from an explicit counts layer, inspect gene coverage, and save cell scores, plots, and AnnData.
+      input: AnnData with a raw counts layer and supplied gene signatures.
+      unit: Cell.
+      outputs: Per-cell scores, signature-gene coverage, plots, and AnnData export.
+      caveat: Missing signature genes affect score interpretation; scores are not differential tests.
 
 bulk_rna:
   title: Bulk RNA
@@ -30,7 +45,12 @@ bulk_rna:
       path: templates/bulk_rna/guide.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
+      verification: Static checks
       description: Carry one edgeR DGEList through filtering, normalization, differential expression, ranked enrichment, and sample scoring.
+      input: Gene-level tximport counts and one metadata row per sample.
+      unit: Sample.
+      outputs: edgeR contrasts, ranked enrichment, and sample-level signature scores.
+      caveat: Replicates are samples; define pairing, batch, and other justified covariates in the model.
 
 scatac:
   title: scATAC-seq
@@ -42,7 +62,12 @@ scatac:
       path: templates/scatac/guide.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
+      verification: Static checks
       description: Carry one Signac object through fragment-aware QC, LSI, peak testing, motif enrichment, and optional chromVAR.
+      input: Peak counts, cell metadata, indexed fragments, and gene annotation.
+      unit: Cell for QC and markers; sample for condition peak tests.
+      outputs: Signac object, QC, LSI, peak tests, motif enrichment, and optional chromVAR scores.
+      caveat: Genome build and coordinates must match across peaks, fragments, annotation, and sequence resources.
 
 multiome:
   title: Multiome
@@ -54,7 +79,12 @@ multiome:
       path: templates/multiome/guide.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
+      verification: Static checks
       description: Carry one paired Seurat object through cell matching, QC, WNN, peak-to-gene linkage, and optional RNA-reference label transfer.
+      input: Paired RNA and ATAC counts, cell metadata, indexed fragments, and gene annotation.
+      unit: Matched cell.
+      outputs: Paired Seurat object, WNN embedding and clusters, peak-gene links, and optional label transfer.
+      caveat: Cell barcodes and genome coordinates must align across modalities and references.
 
 mofa:
   title: Multi-omics / MOFA
@@ -66,7 +96,12 @@ mofa:
       path: templates/multiomics/mofa/guide.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
+      verification: Static checks
       description: Fit one MOFA2 model from matched modality matrices, inspect variance and factors, and export weights and optional metadata associations.
+      input: Feature-by-sample matrices from matched modalities.
+      unit: Sample.
+      outputs: MOFA2 model, factor scores, variance explained, and feature weights.
+      caveat: Factors are unsupervised; review preprocessing, missingness, and technical covariates before interpretation.
 
 biomarker_ml:
   title: Biomarker machine learning
@@ -78,4 +113,9 @@ biomarker_ml:
       path: templates/machine_learning/biomarkers/guide.qmd
       template_class: SOURCE-BACKED WORKFLOW
       status: draft
+      verification: Static checks
       description: Fit a sample-level classifier with patient-grouped splits, then report held-out metrics once per patient.
+      input: Sample-level expression, outcomes, and patient-grouped train/test assignments.
+      unit: Sample for model fitting; patient for train/test separation.
+      outputs: Bias-reduced classifier and held-out patient metrics.
+      caveat: Exploratory cohort analysis; external and clinical validation are not established.

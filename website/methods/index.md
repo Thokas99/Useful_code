@@ -6,7 +6,7 @@ has_children: true
 has_toc: false
 ---
 
-Choose a method area to view and download its Quarto guides.
+Choose a method area to preview and download its Quarto guides.
 
 <div class="catalog-grid">
   {% assign family = site.data.methods.single_cell %}{% include family-card.html family=family %}

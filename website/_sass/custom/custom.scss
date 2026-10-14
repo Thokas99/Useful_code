@@ -271,7 +271,41 @@ button:focus-visible,
 }
 
 .catalog-actions {
+  align-items: center;
   margin-top: 1rem;
+}
+
+.notebook-facts {
+  display: grid;
+  gap: 0.55rem;
+  margin: 1rem 0;
+  font-size: 0.88rem;
+}
+
+.notebook-facts > div {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 0.5rem;
+}
+
+.notebook-facts dt {
+  font-weight: 700;
+}
+
+.notebook-facts dd {
+  margin: 0;
+}
+
+.catalog-source-link {
+  font-size: 0.9rem;
+}
+
+.notebook-source {
+  max-height: 75vh;
+  overflow: auto;
+  white-space: pre;
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 
 .section-download {

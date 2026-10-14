@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 require "fileutils"
+require "cgi"
 require "tmpdir"
 require "yaml"
 
@@ -44,6 +45,31 @@ Dir.mktmpdir("useful-code-downloads-") do |staging_root|
 
       FileUtils.cp(source, File.join(notebook_dir, basename))
       FileUtils.cp(source, File.join(staging_dir, basename))
+
+      stem = File.basename(source, ".qmd")
+      preview_dir = File.join(download_dir, "previews", slug, stem)
+      FileUtils.mkdir_p(preview_dir)
+      source_text = File.read(source)
+      escaped_source = CGI.escapeHTML(source_text)
+      preview_path = File.join(preview_dir, "index.html")
+      display_path = CGI.escapeHTML(relative_path)
+      source_url = CGI.escapeHTML("https://github.com/Thokas99/Useful_code/blob/main/#{relative_path}")
+      title = CGI.escapeHTML(notebook.fetch("title"))
+      preview = <<~HTML
+        ---
+        layout: default
+        title: #{notebook.fetch("title")}
+        permalink: /downloads/previews/#{slug}/#{stem}/
+        render_with_liquid: false
+        ---
+        <h1>#{title}</h1>
+        <p>This page displays the Quarto source; it does not run the analysis.</p>
+        <p><code>#{display_path}</code> · <a href="../../../notebooks/#{slug}/#{basename}">Download .qmd</a> · <a href="#{source_url}" target="_blank" rel="noopener">GitHub source</a></p>
+        <pre class="notebook-source"><code>#{escaped_source}</code></pre>
+      HTML
+      File.write(preview_path, preview)
+      abort "Preview generation failed: #{relative_path}" unless File.read(preview_path).include?(escaped_source)
+
       basenames[basename] = true
       total_notebooks += 1
     end
@@ -56,4 +82,4 @@ Dir.mktmpdir("useful-code-downloads-") do |staging_root|
   end
 end
 
-puts "Generated #{total_notebooks} notebook downloads and #{methods.length} section ZIPs."
+puts "Generated #{total_notebooks} notebook downloads and previews, plus #{methods.length} section ZIPs."
